@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mec-placement-face-detection
+  namespace: open5gs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mec-placement-face-detection
+  template:
+    metadata:
+      labels:
+        app: mec-placement-face-detection
+    spec:
+      containers:
+        - name: face-detection
+          image: 10.34.211.194:30500/face-detection@sha256:e40daf875da253d2ea354f05544d45db2ae216c33bbd0fe108dbff0261ddf8f9
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mec-placement-face-detection
+  namespace: open5gs
+spec:
+  selector:
+    app: mec-placement-face-detection
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP
