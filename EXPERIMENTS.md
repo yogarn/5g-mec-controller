@@ -31,7 +31,7 @@ kubectl -n open5gs get hpa
 kubectl -n open5gs top pods -l app=mec-placement-face-detection
 ```
 
-The preflight defaults to gNB-2; `--node gnb-3` checks the other UPF. Both currently use the configured latency query, so a successful gNB-3 preflight alone does not prove gNB-3 telemetry. `--json` gives the detailed report and disables interactive prompts. A confirmed idle proxy may have no finite p95 until a real `/detect` request has been observed and Prometheus has scraped it. Do not replace missing latency with zero.
+The preflight defaults to gNB-2; `--node gnb-3` checks the other UPF. Both currently use the configured latency query, so a successful gNB-3 preflight alone does not prove gNB-3 telemetry. `--json` gives the detailed report and disables interactive prompts. A NaN p95 with a confirmed zero request count in the last two minutes is an idle warning, not a preflight failure; other telemetry errors still fail. The controller waits for a finite p95 from real requests before making latency-based decisions. No dummy traffic or synthetic zero latency is needed, but an idle warning does not verify the request path.
 
 If the proxy configuration differs, preflight can offer to back up the current ConfigMap under `results/` and restart the shared UPF. **Restarting interrupts 5G traffic and applying the configuration replaces existing proxy routes.** Only confirm after reviewing the impact and recovery plan. A matching config is not a reason to restart.
 

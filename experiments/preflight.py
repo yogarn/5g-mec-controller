@@ -31,10 +31,13 @@ def proxy_is_idle(settings):
     """Recognize the configured face-proxy histogram only; never invent latency."""
     query = settings.latency_query
     node = re.search(r'node="([^"]+)"', query)
-    if ('envoy_http_downstream_rq_time_bucket' not in query or
-            'job="upf-envoy"' not in query or
-            'envoy_http_conn_manager_prefix="face_detection"' not in query or
-            '[2m]' not in query or not node):
+    if not node:
+        return False
+    expected = ('histogram_quantile(0.95,sumby(le)(rate('
+                'envoy_http_downstream_rq_time_bucket{job="upf-envoy",'
+                'envoy_http_conn_manager_prefix="face_detection",'
+                f'node={json.dumps(node.group(1))}' + '}[2m])))/1000')
+    if ''.join(query.split()) != expected:
         return False
     labels = f'job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node={json.dumps(node.group(1))}'
     count_query = f'sum(increase(envoy_http_downstream_rq_time_count{{{labels}}}[2m]))'
@@ -248,8 +251,10 @@ def render_report(report):
     """Render check results without dumping Kubernetes resources."""
     lines = []
     for name, result in report['checks'].items():
-        status = 'OK' if result['ok'] else 'FAIL'
-        if not result['ok']:
+        status = 'WARN' if result.get('idle') else ('OK' if result['ok'] else 'FAIL')
+        if result.get('idle'):
+            detail = 'no requests observed in the last 2 minutes; latency unavailable'
+        elif not result['ok']:
             detail = result.get('error', '')
         elif name == 'service':
             resource = result.get('detail', {})
@@ -270,15 +275,16 @@ def render_report(report):
             detail = detail[:197] + '...'
         lines.append(f'[{status}] {name}' + (f': {detail}' if detail else ''))
         if name == 'prometheus_query' and result.get('idle'):
-            lines.append('  No requests observed in the last 2 minutes; latency is unavailable until traffic arrives.')
+            lines.append('  The controller will wait for real traffic before making latency-based decisions.')
         elif name == 'prometheus_query' and not result['ok'] and 'invalid or stale Prometheus sample' in result.get('error', ''):
-            lines.append('  Hint: May be no recent traffic; inspect the query and sample timestamps.')
+            lines.append('  Hint: Inspect the query, metric values and sample timestamps.')
     for warning in report['warnings']:
         lines.append(f'[WARN] {warning}')
     for action in report['actions']:
         details = ', '.join(f'{key}={value}' for key, value in action.items() if key != 'action')
         lines.append(f"[ACTION] {action['action']}" + (f': {details}' if details else ''))
-    lines.append(f"Preflight: {'OK' if report['ok'] else 'FAIL'}")
+    status = 'OK (idle traffic warning)' if report['ok'] and any(item.get('idle') for item in report['checks'].values()) else ('OK' if report['ok'] else 'FAIL')
+    lines.append(f'Preflight: {status}')
     return '\n'.join(lines)
 
 
@@ -317,7 +323,7 @@ def main(argv=None):
             return {'status_code': response.status_code, 'body': response.text.strip()}
         check('prometheus_health', http_health)
         check('prometheus_query', lambda: {'latency_seconds': Prometheus(settings.prometheus_url, settings.max_metric_age_seconds).scalar(settings.latency_query), 'query': settings.latency_query})
-        if report['checks']['prometheus_query'].get('error') == 'invalid or stale Prometheus sample':
+        if report['checks']['prometheus_query'].get('error') == 'Prometheus sample is NaN':
             try:
                 if proxy_is_idle(settings):
                     report['checks']['prometheus_query']['idle'] = True
@@ -438,7 +444,7 @@ def main(argv=None):
                     report['checks']['envoy_apply'] = {'ok': True, 'detail': 'ConfigMap already matches; no changes performed'}
                 if mount_ok:
                     check('envoy_active', active)
-    report['ok'] = all(item['ok'] for item in report['checks'].values())
+    report['ok'] = all(item['ok'] or item.get('idle', False) for item in report['checks'].values())
     # Configuration objects are not JSON serializable and may include secrets.
     if settings:
         report['checks']['configuration']['detail'] = {'path': args.config}

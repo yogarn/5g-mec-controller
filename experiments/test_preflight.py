@@ -149,7 +149,7 @@ class PreflightSafetyTests(unittest.TestCase):
         self.assertIn('[FAIL] envoy_active: active configuration differs', output)
         self.assertIn('[WARN] UPF was not restarted', output)
         self.assertIn('[FAIL] prometheus_query: invalid or stale Prometheus sample', output)
-        self.assertIn('May be no recent traffic; inspect the query and sample timestamps', output)
+        self.assertIn('Inspect the query, metric values and sample timestamps', output)
         self.assertIn('[ACTION] configmap_replaced: backup=/tmp/backup', output)
         self.assertTrue(output.endswith('Preflight: FAIL'))
         self.assertNotIn('annotations', output)
@@ -209,7 +209,7 @@ class PreflightSafetyTests(unittest.TestCase):
             preflight.runtime_matches(dump, desired)
 
     def test_idle_counter_does_not_manufacture_a_latency_value(self):
-        settings = SimpleNamespace(latency_query='histogram_quantile(0.95, sum(rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m])))',
+        settings = SimpleNamespace(latency_query='histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m]))) / 1000',
                                    prometheus_url='http://prom', max_metric_age_seconds=60)
         with patch.object(preflight.Prometheus, 'scalar', return_value=0) as scalar:
             self.assertTrue(preflight.proxy_is_idle(settings))
@@ -219,6 +219,52 @@ class PreflightSafetyTests(unittest.TestCase):
         self.assertEqual(preflight.mutation_blockers({
             'prometheus_query': {'ok': False, 'idle': True},
             'deployment': {'ok': False}}), ['deployment'])
+
+    def test_idle_is_warning_but_stale_samples_fail(self):
+        query = ('histogram_quantile(0.95, sum by (le) '
+                 '(rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",'
+                 'envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m]))) / 1000')
+        for error, idle, expected in [('Prometheus sample is NaN', True, 0),
+                                      ('invalid or stale Prometheus sample', False, 1)]:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as temp:
+                config = Path(temp) / 'envoy.yaml'
+                text = 'static_resources: {}\n'
+                config.write_text(text)
+                sts = {'metadata': {'name': 'upf', 'uid': 'owner'}, 'spec': {}}
+                pod = {'metadata': {'name': 'upf-0', 'uid': 'old'}}
+                cm = {'metadata': {'resourceVersion': '7'}, 'data': {'envoy.yaml': text}}
+                deployment = {'metadata': {'generation': 1}, 'spec': {'replicas': 1},
+                              'status': {'observedGeneration': 1, 'updatedReplicas': 1,
+                                         'readyReplicas': 1, 'availableReplicas': 1, 'replicas': 1}}
+                service = {'spec': {'ports': [{'port': 5000}]}}
+                endpoints = {'subsets': [{'addresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]}
+                objects = {'statefulset': sts, 'configmap': cm, 'deployment': deployment,
+                           'service': service, 'endpoints': endpoints}
+                settings = SimpleNamespace(manifest=Path('app.yaml'), namespace='open5gs',
+                                           prometheus_url='http://prom', max_metric_age_seconds=60,
+                                           latency_query=query)
+                response = SimpleNamespace(status_code=200, text='ok', raise_for_status=lambda: None,
+                                           json=lambda: {})
+                output = io.StringIO()
+                with (patch.object(preflight, 'load_settings', return_value=settings),
+                      patch.object(preflight, 'workload_identity', return_value=('open5gs', 'app')),
+                      patch.object(preflight, 'get', side_effect=lambda kind, name, namespace: objects[kind]),
+                      patch.object(preflight, 'find_pod', return_value=pod),
+                      patch.object(preflight, 'validate_proxy_mount'),
+                      patch.object(preflight, 'kubectl', return_value='ok'),
+                      patch.object(preflight, 'port_forward', return_value=nullcontext('http://localhost:1234')),
+                      patch.object(preflight.requests, 'get', return_value=response),
+                      patch.object(preflight.Prometheus, 'scalar', side_effect=[ValueError(error), 0]),
+                      patch.object(preflight, 'runtime_matches', return_value='verified'),
+                      redirect_stdout(output)):
+                    result = preflight.main(['--upf-statefulset', 'upf', '--envoy-configmap', 'upf',
+                                             '--envoy-config', str(config), '--json'])
+                report = json.loads(output.getvalue())
+                self.assertEqual(result, expected)
+                self.assertEqual(report['checks']['prometheus_query'].get('idle', False), idle)
+                self.assertFalse(report['checks']['prometheus_query']['ok'])
+                if idle:
+                    self.assertIn('[WARN] prometheus_query:', preflight.render_report(report))
 
     def test_interactive_rollout_requires_confirmation(self):
         text = 'static_resources: {}\n'

@@ -20,7 +20,11 @@ class Prometheus:
             stamp, raw = series['value']
             value, stamp = float(raw), float(stamp)
             age = time.time() - stamp
-            if not math.isfinite(value) or not math.isfinite(stamp) or age > self.max_age or age < -10:
+            if not math.isfinite(stamp) or age > self.max_age or age < -10:
+                raise ValueError('invalid or stale Prometheus sample')
+            if math.isnan(value):
+                raise ValueError('Prometheus sample is NaN')
+            if not math.isfinite(value):
                 raise ValueError('invalid or stale Prometheus sample')
             result.append((series['metric'], value))
         if not result:

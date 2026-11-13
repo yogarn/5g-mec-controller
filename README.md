@@ -105,7 +105,7 @@ The command prints concise status checks and exits nonzero on failure; use `--js
 
 This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The current controller latency query only covers gnb-2; the gnb-3 proxy route and complete service-wide telemetry must be configured and verified before interpreting a two-site run.
 
-An idle service can yield no finite latency histogram; preflight reports that as a failed telemetry check rather than inventing a value. For the supplied face-proxy query, it checks whether the request counter has increased in the last two minutes and reports confirmed idle traffic separately. A confirmed idle latency query does not block an explicitly approved Envoy redeployment; other failed prerequisites do. Send a real face-detection request through the intended proxy path, then recheck. The controller cannot scale from a missing or non-finite latency value; idle traffic is not evidence of readiness for a campaign.
+An idle service can yield no finite latency histogram. For the supplied face-proxy query, preflight reports a warning rather than failure only when the latency is NaN and its request counter confirms zero traffic in the last two minutes. The JSON report retains the failed latency check with `idle: true`, while the overall result can be OK with a warning. Other telemetry errors still fail. The controller does not invent a latency or scale without one; it resumes latency-based decisions when real requests arrive and Prometheus reports a finite value. Idle traffic does not prove the full path is ready for a campaign.
 
 ## Automated UE ramp and switching
 

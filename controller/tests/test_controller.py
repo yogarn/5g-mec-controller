@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from controller.config import load_settings, workload_identity
 from controller.policy import LatencyRatioPolicy, Node, rank_nodes
@@ -139,6 +139,22 @@ class ReconciliationTests(unittest.TestCase):
         prom.vector = Mock(return_value=[({'node': 'a'}, 1)])
         with self.assertRaises(ValueError):
             prom.per_node('query', ('a', 'b'))
+
+    def test_nan_and_stale_telemetry_remain_unusable(self):
+        prom = Prometheus('http://example', 60)
+        response = Mock()
+        prom.session.get = Mock(return_value=response)
+        with patch('controller.telemetry.time.time', return_value=100):
+            response.json.return_value = {'status': 'success', 'data': {
+                'resultType': 'vector', 'result': [{'metric': {}, 'value': [100, 'NaN']}]}}
+            with self.assertRaisesRegex(ValueError, 'sample is NaN'):
+                prom.scalar('latency')
+            response.json.return_value['data']['result'][0]['value'][0] = 1
+            with self.assertRaisesRegex(ValueError, 'invalid or stale'):
+                prom.scalar('latency')
+            response.json.return_value['data']['result'][0]['value'] = [100, '+Inf']
+            with self.assertRaisesRegex(ValueError, 'invalid or stale'):
+                prom.scalar('latency')
 
 
 if __name__ == '__main__':
