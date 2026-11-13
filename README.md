@@ -44,6 +44,22 @@ python3 -m benchmark.client \
 
 The example is illustrative, not a runnable campaign. Output creation is exclusive: choose a new path. Request generation stops at each phase deadline; outstanding requests drain before the next phase. Configure method, body, headers and timeout for the selected service. Establish connectivity and routing separately before any campaign.
 
+## Provisioning UE subscribers
+
+The experiment requires an existing Open5GS core, two registered gNBs, UERANSIM and two configured IPv4 DNNs with nonoverlapping address pools. Provisioning does not configure the core, DNNs, UPFs, routing or gNBs.
+
+1. Install the project dependencies on a trusted host with access to the Open5GS MongoDB. Restrict the database connection to trusted hosts; set `OPEN5GS_MONGO_URI` in the environment if it is not `mongodb://127.0.0.1:27017/`. Do not put database credentials in shell history or Git.
+2. For each subscriber, make two private copies of a working UERANSIM UE YAML configuration, one per gNB. Use a unique 15-digit `imsi-...` SUPI per subscriber; the two copies must share the same SUPI, `key`, `op` (OPC), `opType: OPC`, and `amf`. Set `gnbSearchList` and the single IPv4 `sessions` entry's `apn` for the intended site; use the same numeric `slice.sst` in both. Provisioning supports one SST without SD and one session per site configuration.
+3. Create the private inventory described below, with unique per-site static IPs inside the configured DNN pools. Reserve them outside dynamic allocation and ensure they are not already assigned. Keep inventory and UE YAMLs accessible to the UE host and restrict permissions.
+4. Stop other subscriber provisioning writers. Run the check first, review the redacted IMSI/DNN/IP plan, then explicitly insert:
+
+```sh
+python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml
+python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --apply
+```
+
+The command checks the database for existing IMSIs and static IPs and inserts only new subscribers; it never updates or deletes existing records. Authentication values come from the private UE configurations and are not printed. **MongoDB writes are not transactional:** if insertion fails, some subscribers may already have been created. Inspect the database before retrying; resolve partial results manually under the site's recovery procedures. The conflict check cannot prevent races with other writers, so exclusive provisioning is required. Successful insertion does not prove UE registration, IP pool correctness or connectivity; verify those separately.
+
 ## Preflight
 
 From a host with `kubectl` access to the testbed, check the workload, proxy, and Prometheus without changing the cluster:
