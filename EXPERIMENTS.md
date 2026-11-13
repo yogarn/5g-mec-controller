@@ -25,6 +25,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
+# The Python Kubernetes client does not automatically use k3s's default path.
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
 # After the collector and Prometheus are configured as described below:
 python -m experiments.preflight
 kubectl -n services get deployment mec-placement-face-detection -o wide
