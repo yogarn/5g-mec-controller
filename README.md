@@ -44,4 +44,48 @@ python3 -m benchmark.client \
 
 The example is illustrative, not a runnable campaign. Output creation is exclusive: choose a new path. Request generation stops at each phase deadline; outstanding requests drain before the next phase. Configure method, body, headers and timeout for the selected service. Establish connectivity and routing separately before any campaign.
 
+## Preflight
+
+From a host with `kubectl` access to the testbed, check the workload, proxy, and Prometheus without changing the cluster:
+
+```sh
+python3 preflight.py --upf-statefulset upf-gnb-2 \
+  --envoy-container envoy --envoy-configmap upf-gnb-2-envoy-config \
+  --envoy-config-key envoy.yaml --envoy-config-path /etc/envoy-config/envoy.yaml
+```
+
+The command emits JSON checks and exits nonzero on failure. Applying a differing Envoy configuration requires `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. Applying replaces the existing proxy routes, and restarting interrupts 5G traffic. Inspect the JSON and backup before a separately authorized change; `OnDelete` does not reload the static configuration automatically.
+
+This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The current controller latency query only covers gnb-2; the gnb-3 proxy route and complete service-wide telemetry must be configured and verified before interpreting a two-site run.
+
+An idle service can yield no finite latency histogram; preflight reports that as a failed telemetry check rather than inventing a value. Generate authorized test traffic and recheck when validating the query.
+
+## Automated UE ramp and switching
+
+Run `experiment.py` on the UERANSIM host as root, after preflight and an approved recovery plan. It creates owned UE sessions, tears them down and reattaches them to realize each ordered gNB split, then drives closed-loop face requests from the resulting source IPs. This is stop-and-reattach, **not a 5G handover**. Phase changes include registration and routing setup; traffic pauses during switching.
+
+Supply a private UE inventory YAML outside the repository. Each `subscribers` entry has `gnb2` and `gnb3` mappings with `config` (path to that subscriber's existing UERANSIM YAML) and `ip` (its expected IPv4 address at that site). The two configurations for each subscriber must have the same SUPI; SUPIs and expected IPs must be unique across the inventory. Paths are relative to the inventory. Keep subscriber keys out of Git.
+
+For example, one subscriber entry has this shape (replace paths and addresses with the provisioned testbed values):
+
+```yaml
+subscribers:
+  - gnb2: {config: /secure/ue-01-gnb2.yaml, ip: 10.63.1.101}
+    gnb3: {config: /secure/ue-01-gnb3.yaml, ip: 10.64.1.101}
+```
+
+```sh
+sudo python3 experiment.py --armed \
+  --ue-config /secure/ue-inventory.yaml --nr-ue /path/to/nr-ue \
+  --url http://SERVICE_ADDRESS:8000/detect --image /path/to/image.jpg \
+  --phase-schedule '2:2:0,4:3:1,4:1:3,2:0:2' \
+  --phase-duration 180 --timeout 10 --output-dir results/run-001
+python3 summarize.py results/run-001/requests.jsonl \
+  --slo-ms 500 --output-prefix results/run-001/summary
+```
+
+The output directory must not exist; its parent must already exist. `run.json` records the image hash, schedule and request settings; `requests.jsonl` records phase boundaries and every attempt. UE lifecycle logs and recovery evidence are retained in `owned_ues/`. On interruption, preserve the directory; use `python3 ue_lifecycle.py --recover RESULTS_DIR/owned_ues` as root if cleanup did not finish. Review recovery output rather than killing unrelated UE processes.
+
+The summary command creates `summary.json`, `summary.csv`, `summary-ues.json` and `summary-ues.csv` without overwriting existing output. Percentiles use successful request latencies; SLO attainment divides successful attempts within the threshold by **all** attempts. Throughput uses elapsed phase time including request drain. These are client-observed latencies, not Envoy-only timings. Source IP and configured site are not independent proof of attachment: verify session, route, and traffic path before interpreting results. The runner does not collect pod resource usage or controller events; collect those separately for a placement or scaling comparison.
+
 Do not run an experiment or change cluster state without an approved campaign and recovery plan. Never run two replica writers against the same Deployment.
