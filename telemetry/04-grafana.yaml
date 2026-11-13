@@ -1,0 +1,1049 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placement-grafana-datasources
+  namespace: placement
+data:
+  datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: PlacementPrometheus
+        type: prometheus
+        access: proxy
+        uid: placement-prometheus
+        url: http://placement-prometheus.placement.svc.cluster.local:9090
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placement-grafana-dashboard-provider
+  namespace: placement
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'placement-dashboards'
+        orgId: 1
+        folder: 'Placement'
+        type: file
+        disableDeletion: true
+        allowUiUpdates: true
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placement-grafana-dashboard-node-resources
+  namespace: placement
+data:
+  node-placement-resources.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 100,
+          "title": "CPU Resource Telemetry",
+          "type": "row"
+        },
+        {
+          "id": 1,
+          "title": "Max CPU Cores",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "blue" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:cpu_cores:total",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "CPU Cores Used - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": { "mode": "fixed", "fixedColor": "orange" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:cpu_cores:used:avg15s",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "CPU Utilization % - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 70 },
+                  { "color": "red", "value": 85 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:cpu_utilization:percent:avg15s",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "CPU Cores Used - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 5 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:cpu_cores:used",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "CPU Utilization % - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 5 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 70 },
+                  { "color": "red", "value": 85 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:cpu_utilization:percent",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 },
+          "id": 101,
+          "title": "Memory (RAM) Resource Telemetry",
+          "type": "row"
+        },
+        {
+          "id": 6,
+          "title": "Max RAM (GB)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decgbytes",
+              "color": { "mode": "fixed", "fixedColor": "blue" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:memory_gb:total",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "title": "RAM Used (GB) - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decgbytes",
+              "color": { "mode": "fixed", "fixedColor": "orange" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:memory_gb:used:avg15s",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "title": "RAM Utilization % - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 75 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:memory_utilization:percent:avg15s",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "title": "RAM Used (GB) - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decgbytes",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:memory_gb:used",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "title": "RAM Utilization % - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 75 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:memory_utilization:percent",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "id": 102,
+          "title": "GPU & CUDA Resource Telemetry (Accelerated Nodes)",
+          "type": "row"
+        },
+        {
+          "id": 11,
+          "title": "Max CUDA Cores",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "green" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:cuda_cores:total",
+              "legendFormat": "{{node}} - GPU {{gpu}}"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "title": "Active CUDA Cores - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": { "mode": "fixed", "fixedColor": "orange" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:cuda_cores:used:avg15s",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "title": "GPU Utilization % - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 70 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:gpu_utilization:percent:avg15s",
+              "legendFormat": "{{node}} - GPU {{gpu}}"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "title": "Active CUDA Cores - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 27 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:cuda_cores:used",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "title": "GPU Utilization % - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 27 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 70 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:gpu_utilization:percent",
+              "legendFormat": "{{node}} - GPU {{gpu}}"
+            }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+          "id": 103,
+          "title": "VRAM Resource Telemetry (Accelerated Nodes)",
+          "type": "row"
+        },
+        {
+          "id": 16,
+          "title": "Max VRAM (GB)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 34 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decgbytes",
+              "color": { "mode": "fixed", "fixedColor": "blue" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:vram_gb:total",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "title": "VRAM Used (GB) - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 34 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decgbytes",
+              "color": { "mode": "fixed", "fixedColor": "orange" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:vram_gb:used:avg15s",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "title": "VRAM Utilization % - 15s Avg (Current)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 34 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 75 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "node:vram_utilization:percent:avg15s",
+              "legendFormat": "{{node}} - GPU {{gpu}}"
+            }
+          ]
+        },
+        {
+          "id": 19,
+          "title": "VRAM Used (GB) - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 38 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decgbytes",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:vram_gb:used",
+              "legendFormat": "{{node}}"
+            }
+          ]
+        },
+        {
+          "id": 20,
+          "title": "VRAM Utilization % - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 38 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 75 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "node:vram_utilization:percent",
+              "legendFormat": "{{node}} - GPU {{gpu}}"
+            }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+          "id": 104,
+          "title": "UPF Envoy Response Time & UE Mobility Telemetry (N6 -> vLLM)",
+          "type": "row"
+        },
+        {
+          "id": 21,
+          "title": "Response Time (Mean) - 15s Avg",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 45 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 2000 },
+                  { "color": "red", "value": 5000 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "upf:response_time_ms:avg15s",
+              "legendFormat": "{{upf}} ({{node}})"
+            }
+          ]
+        },
+        {
+          "id": 22,
+          "title": "Response Time (P90 SLO) - 15s Window",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 45 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 3000 },
+                  { "color": "red", "value": 8000 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "upf:response_time_ms:p90",
+              "legendFormat": "{{upf}} ({{node}})"
+            }
+          ]
+        },
+        {
+          "id": 23,
+          "title": "UE Request Arrival Rate (λ_n)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 45 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": { "mode": "fixed", "fixedColor": "blue" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "upf:request_rate:lambda",
+              "legendFormat": "{{upf}} ({{node}})"
+            }
+          ]
+        },
+        {
+          "id": 24,
+          "title": "UE Requests (15s Window)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 45 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "purple" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "upf:requests:window15s",
+              "legendFormat": "{{upf}} ({{node}})"
+            }
+          ]
+        },
+        {
+          "id": 25,
+          "title": "UPF -> vLLM Response Time (Mean, P50, P90) - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 49 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "upf:response_time_ms:mean",
+              "legendFormat": "{{upf}} ({{node}}) - Mean",
+              "interval": "1s"
+            },
+            {
+              "expr": "upf:response_time_ms:p50",
+              "legendFormat": "{{upf}} ({{node}}) - P50",
+              "interval": "1s"
+            },
+            {
+              "expr": "upf:response_time_ms:p90",
+              "legendFormat": "{{upf}} ({{node}}) - P90",
+              "interval": "1s"
+            }
+          ]
+        },
+        {
+          "id": 26,
+          "title": "UE Request Arrival Rate (λ_n) & Active Requests - Instant",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 49 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "upf:request_rate:lambda",
+              "legendFormat": "{{upf}} ({{node}}) - λ_n (req/s)"
+            },
+            {
+              "expr": "upf:requests:active",
+              "legendFormat": "{{upf}} ({{node}}) - Active In-Flight"
+            }
+          ]
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 55 },
+          "id": 105,
+          "title": "Serving gNodeB Origin & UE Mobility Telemetry (5G Core AMF /ue-info Inferred)",
+          "type": "row"
+        },
+        {
+          "id": 27,
+          "title": "Serving gNB Request Arrival Rate (λ_gnb)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 56 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": { "mode": "fixed", "fixedColor": "blue" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (gnb) (gnb:request_rate:lambda)",
+              "legendFormat": "{{gnb}}"
+            }
+          ]
+        },
+        {
+          "id": 28,
+          "title": "Serving gNB Mobility Traffic Share (M_gnb)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 56 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "blue", "value": null },
+                  { "color": "green", "value": 30 },
+                  { "color": "orange", "value": 60 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "(gnb:mobility:share) * 100",
+              "legendFormat": "{{gnb}}"
+            }
+          ]
+        },
+        {
+          "id": 29,
+          "title": "Serving gNodeB Requests (15s Window)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 56 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "purple" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (gnb) (gnb:requests:window15s)",
+              "legendFormat": "{{gnb}}"
+            }
+          ]
+        },
+        {
+          "id": 30,
+          "title": "Active In-Flight per Serving gNodeB",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 56 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "orange" }
+            }
+          },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (gnb) (gnb:requests:active)",
+              "legendFormat": "{{gnb}}"
+            }
+          ]
+        },
+        {
+          "id": 31,
+          "title": "Serving gNodeB Request Arrival Rate (λ_gnb) - 15s Window",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 60 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (gnb) (gnb:request_rate:lambda)",
+              "legendFormat": "{{gnb}} - λ_gnb (req/s)"
+            }
+          ]
+        },
+        {
+          "id": 32,
+          "title": "Serving gNodeB Requests (15s Window) & Active In-Flight",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 60 },
+          "datasource": { "type": "prometheus", "uid": "placement-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "auto" }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (gnb) (gnb:requests:window15s)",
+              "legendFormat": "{{gnb}} - Requests (15s Window)"
+            },
+            {
+              "expr": "sum by (gnb) (gnb:requests:active)",
+              "legendFormat": "{{gnb}} - Active In-Flight"
+            }
+          ]
+        }
+      ],
+      "refresh": "1s",
+      "schemaVersion": 39,
+      "tags": ["placement", "node-exporter", "dcgm", "envoy", "5g-ai-edge"],
+      "time": { "from": "now-2m", "to": "now" },
+      "timepicker": {
+        "refresh_intervals": ["500ms", "1s", "2s", "5s", "10s", "30s", "1m"],
+        "time_options": ["1m", "2m", "5m", "15m", "30m", "1h", "3h", "6h", "12h", "24h"]
+      },
+      "timezone": "browser",
+      "title": "Placement Node Resources (CPU, RAM, GPU, VRAM)",
+      "uid": "placement-node-resources",
+      "version": 7
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: placement-grafana
+  namespace: placement
+  labels:
+    app.kubernetes.io/name: placement-grafana
+    app.kubernetes.io/part-of: 5g-ai-edge-placement
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: placement-grafana
+  template:
+    metadata:
+      labels:
+        app: placement-grafana
+    spec:
+      containers:
+        - name: grafana
+          image: docker.io/grafana/grafana:11.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "true"
+            - name: GF_SECURITY_ALLOW_EMBEDDING
+              value: "true"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboard-node-resources
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        - name: datasources
+          configMap:
+            name: placement-grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: placement-grafana-dashboard-provider
+        - name: dashboard-node-resources
+          configMap:
+            name: placement-grafana-dashboard-node-resources
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: placement-grafana
+  namespace: placement
+  labels:
+    app.kubernetes.io/name: placement-grafana
+spec:
+  type: NodePort
+  selector:
+    app: placement-grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30031

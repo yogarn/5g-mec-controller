@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from benchmark.client import attempt, parse_schedule
+from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, telemetry_config
 from experiments import defaults
 from experiments.ue_lifecycle import OwnedUELifecycle
 
@@ -25,6 +26,7 @@ def run(args):
         raise ValueError('pass --armed to create and replace UE sessions')
     if not all(math.isfinite(x) and x > 0 for x in (args.phase_duration, args.timeout)):
         raise ValueError('phase duration and timeout must be finite and positive')
+    telemetry = telemetry_config(getattr(args, 'telemetry_url', None), getattr(args, 'telemetry_token_file', None))
     url = urlsplit(args.url)
     if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
             or url.password is not None or url.fragment or any(c.isspace() for c in args.url)):
@@ -48,6 +50,8 @@ def run(args):
                 'image_bytes': len(image), 'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
                 'workload': 'closed-loop', 'switching': 'stop-and-reattach; not handover'}
+    if telemetry:
+        metadata['telemetry_url'] = args.telemetry_url
     (out / 'run.json').write_text(json.dumps(metadata, indent=2) + '\n')
     lock = threading.Lock()
     with (out / 'requests.jsonl').open('x', encoding='utf-8') as output:
@@ -64,6 +68,7 @@ def run(args):
                 if len(g2) != phase['gnb2_ues'] or len(g3) != phase['gnb3_ues']:
                     raise RuntimeError('registered UE count differs from requested split')
                 selected = [(group, ue['ip']) for group, ues in (('gnb-2', g2), ('gnb-3', g3)) for ue in ues]
+                publisher = TelemetryPublisher(telemetry, [source for _, source in selected]) if telemetry else None
                 start = time.time()
                 deadline = time.monotonic() + args.phase_duration
                 emit({'event': 'phase_start', **phase, 'start_time': start,
@@ -74,7 +79,7 @@ def run(args):
                 def worker(group, source):
                     count = successes = 0
                     while time.monotonic() < deadline:
-                        record = attempt(url, 'POST', body, headers, source, args.timeout)
+                        record = request_with_telemetry(attempt, publisher, url, 'POST', body, headers, source, args.timeout)
                         count += 1
                         successes += record['success']
                         emit({'event': 'request', 'phase': phase['phase'], 'group': group,
@@ -83,9 +88,13 @@ def run(args):
                     return {'group': group, 'source_address': source,
                             'attempts': count, 'successes': successes}
 
-                with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-                    futures = [executor.submit(worker, group, source) for group, source in selected]
-                    per_ue = [future.result() for future in futures]
+                try:
+                    with ThreadPoolExecutor(max_workers=len(selected)) as executor:
+                        futures = [executor.submit(worker, group, source) for group, source in selected]
+                        per_ue = [future.result() for future in futures]
+                finally:
+                    if publisher:
+                        publisher.close()
                 emit({'event': 'phase_end', **phase, 'start_time': start,
                       'generation_duration_s': args.phase_duration, 'end_time': time.time(),
                       'attempts': sum(ue['attempts'] for ue in per_ue),
@@ -100,7 +109,7 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--url', default=defaults.URL, help='Face-detection /detect URL through the intended UE path')
+    parser.add_argument('--url', required=True, help='Face-detection URL using a reachable Kubernetes node IP and Service NodePort, e.g. http://NODE_IP:NODEPORT/detect')
     parser.add_argument('--image', default=str(defaults.IMAGE), help='Fixed image file sent as multipart field image')
     parser.add_argument('--ue-config', default=str(defaults.INVENTORY), help='Private UE inventory YAML')
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
@@ -108,6 +117,8 @@ def main(argv=None):
     parser.add_argument('--phase-duration', type=float, default=defaults.PHASE_DURATION, help='Request-generation seconds per phase')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
     parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')
+    parser.add_argument('--telemetry-url', help='Collector HTTP(S) /observations URL')
+    parser.add_argument('--telemetry-token-file', help='File containing the collector bearer token')
     parser.add_argument('--armed', action='store_true', help='Authorize creation and replacement of UE sessions')
     args = parser.parse_args(argv)
     if args.output_dir is None:

@@ -2,9 +2,8 @@
 # The manifest must contain exactly one apps/v1 Deployment. It is read, not applied.
 manifest: apps/face-detection/manifest.yaml
 prometheus_url: "http://10.34.211.140:30990"
-latency_query: '(histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="mec_placement_face",node=~"gnb-2|gnb-3"}[2m]))) / 1000) and on() (count(count by (node) (envoy_http_downstream_rq_time_count{job="upf-envoy",envoy_http_conn_manager_prefix="mec_placement_face",node=~"gnb-2|gnb-3"})) == 2)'
-# Both sites must expose new-prefix count series before the query can return a
-# value. Series appear after each edge rollout; request samples require traffic.
+latency_query: 'ue_request_duration_p90_seconds{job="ue-telemetry"}'
+# Collector p90 is emitted only for complete windows with successful requests.
 # Calibration, 2026-11-13: one pod on gnb-2, 500m CPU limit, 512Mi memory
 # limit, 100m CPU / 128Mi memory requests. Client on core reached the UPF
 # Envoy directly, not through a UE. Fixed 547x365 JPEG; SHA-256:
@@ -24,9 +23,8 @@ latency_query: '(histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstrea
 # Raw attempts: ssh://core/home/member/mec-face-calibration-14UkXB/
 #   attempts.jsonl and refinement.jsonl.
 #
-# The controller uses Envoy histogram p95, not the client-measured SLO above;
-# it aggregates the new listener across reporting UPFs and excludes UE network
-# latency. Recalibrate and verify coverage for the actual routes and workload.
+# The controller uses successful-request p90, not the all-attempt SLO above.
+# Recalibrate and verify delivery coverage for the actual UE routes and workload.
 # Mutation is disabled until the SLO and metric coverage are validated.
 slo_seconds: 0.5
 min_replicas: 1

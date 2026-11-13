@@ -10,13 +10,17 @@ For step-by-step setup, HPA and controller runs, resets, and result collection, 
 
 The controller reads the configured manifest but does not deploy it. The project workload is a separate Deployment and Service named `mec-placement-face-detection` in `services`; the similarly named workload in `open5gs` is a different resource and must be left untouched. After authorization, verify that `services` exists and the names are available, then create the workload with `kubectl create -f apps/face-detection/manifest.yaml`. Review the image, resources, routing and node eligibility first. The Deployment desires one replica; during cold start it can have zero running or ready pods while Kubernetes creates it. This is not scale-to-zero: the controller and baseline HPA have a minimum of one replica and a maximum of three. Wait for readiness and verify the request path before running traffic. The app accepts `POST /detect` with a multipart `image` field, returns face bounding boxes, and exposes `/health`.
 
-Prometheus can supply proxy-observed response time; app-side inference timing is not required. Configure `latency_query` from the actual Envoy metrics and labels for detection traffic, checking units and aggregation. Proxy time excludes client-to-proxy network latency and may include upstream waiting and network time; validate the exact Envoy metric's boundaries. Avoid duplicate proxy observations and health traffic. Measure end-to-end latency independently at the UE.
+The face-detection Service is a NodePort with an automatically allocated port. An authorized operator can inspect it with `kubectl -n services get service mec-placement-face-detection` and select a node IP reachable from each UE path. Requests go directly to `http://NODE_IP:APP_NODEPORT/detect` through Kubernetes kube-proxy, not Envoy. Verify both paths and the ready Service endpoints; creating the Service does not prove reachability.
 
-The historical gnb-2 calibration used an Envoy route to the `open5gs` workload; that live route is not the new `services` workload. The supplied `apps/face-detection/envoy-gnb2.yaml` instead routes port 8000 to `mec-placement-face-detection.services.svc.cluster.local` and replaces the UPF's static Envoy configuration without preserving previous routes. UPFs and their ConfigMaps remain in `open5gs`. Switching the live route requires an authorized ConfigMap change and UPF rollout, with an interruption and recovery plan; merely creating the Service does not switch traffic. The pre-calibration ConfigMap and StatefulSet snapshot are on `core` under `/home/member/mec-face-calibration-14UkXB/`. The historical workload was temporarily pinned to gnb-2, unlike the unpinned manifest.
+The controller reads successful full-response UE p90 from the shared telemetry collector. This is not the 95%-of-all-attempts SLO; failures and successful requests within the 500 ms threshold are counted separately. The target is exploratory and mutation remains disabled until telemetry coverage and policy are calibrated.
 
-The supplied Prometheus query aggregates the `mec_placement_face` Envoy listener across gnb-2 and gnb-3 UPFs, including non-detection requests on those listeners; direct requests and other proxies are not counted. The old `face_detection` listener is excluded. New-prefix count series appear after each edge Envoy rollout, and request samples require traffic. The query returns no result until both sites expose count series; even then, verify both routes and telemetry coverage. Envoy's duration histogram is in milliseconds; the query converts its p95 to seconds. Scrape and histogram windows introduce lag and quantile approximation; no traffic can produce a non-finite p95. This query does not measure UE-to-proxy time or all-attempt SLO attainment.
+## Telemetry collector
 
-The 500 ms SLO in `config.yaml` is an exploratory proxy-path target, not a validated production objective; mutation remains disabled.
+After authorization, build and push the collector image with `docker build -f collector/Dockerfile -t 10.34.211.140:30500/ue-telemetry-collector:latest .` and `docker push 10.34.211.140:30500/ue-telemetry-collector:latest`. Create the `ue-telemetry-token` Secret in `services` with key `token`, using the same protected token as the UE-side token file; do not commit credentials. Review `collector/config.yaml` and `collector/manifest.yaml`, then deploy the manifest only with authorization. The collector runs one replica and its Service receives an automatically allocated NodePort; inspect it with `kubectl -n services get service ue-telemetry`. Use a reachable node IP and that port for UE submissions; Prometheus scrapes its ClusterIP.
+
+An authorized operator must manually merge `collector/prometheus-scrape.yaml` into the separately managed `placement/placement-prometheus-config` and reload Prometheus without replacing other jobs. The controller query is `ue_request_duration_p90_seconds{job="ue-telemetry"}`. Pass both `--telemetry-url http://NODE_IP:TELEMETRY_NODEPORT/observations` and `--telemetry-token-file /secure/token` to either UE runner; without them telemetry is disabled. Review delivery and drop counts on stderr against the raw JSONL.
+
+The collector uses arrival time for its rolling window; delivery loss and restarts affect coverage. Overflow makes rolling counts partial and suppresses p90 until the window is complete. A single replica is required because individual p90s cannot be aggregated into a global p90. Protect the collector network and shared token: client-asserted UE IPs do not authenticate UEs or prove attachment. Unknown or stale mappings contribute only to global metrics. Verify both gNB paths, source and payload, the SMF-to-AMF mapping (including gNB-3), scrape health, losses and p90 against raw JSONL before enabling mutation.
 
 ## Controller
 
@@ -32,11 +36,11 @@ Optional settings include `interval_seconds`, `cpu_saturation`, `locality_weight
 
 ## Default commands
 
-From the repository root, `python3 -m experiments.preflight` checks gNB-2; add `--node gnb-3` for gNB-3. `python3 -m experiments.provision_ues` checks the inventory without writing to MongoDB. `python3 -m experiments.experiment` previews a two-phase smoke test and asks for confirmation before creating UE sessions. `python3 -m experiments.summarize` summarizes the only run under `results/`; if there are multiple runs, specify the input explicitly.
+From the repository root, `python3 -m experiments.preflight` performs read-only workload, NodePort and collector checks; it does not verify per-site reachability. `python3 -m experiments.provision_ues` checks the inventory without writing to MongoDB. `python3 -m experiments.experiment --url http://NODE_IP:APP_NODEPORT/detect` previews a two-phase smoke test and asks for confirmation before creating UE sessions. `python3 -m experiments.summarize` summarizes the only run under `results/`; if there are multiple runs, specify the input explicitly.
 
-Defaults are in `experiments/defaults.py`: UE inventory `~/.config/5g-mec/ue-inventory.yaml`, image `~/.config/5g-mec/face.jpg`, UERANSIM `~/ueransim/build/nr-ue`, URL `http://10.34.211.196:30090/detect`, two 30-second phases (`1:1:0,1:0:1`), and a 500 ms summary SLO. With sudo, `~` refers to the invoking user's home. Supply the private inventory, image and executable and verify the URL on both UE paths before running. The default schedule is a connectivity smoke test, **not** a justified research campaign; gNB-3's route and complete latency metrics are not yet validated.
+Defaults are in `experiments/defaults.py`: UE inventory `~/.config/5g-mec/ue-inventory.yaml`, image `~/.config/5g-mec/face.jpg`, UERANSIM `~/ueransim/build/nr-ue`, two 30-second phases (`1:1:0,1:0:1`), and a 500 ms summary SLO. The app URL is required and has no baked-in address. With sudo, `~` refers to the invoking user's home. Supply the private inventory, image and executable and verify the selected NodePort URL on both UE paths before running. The default schedule is a connectivity smoke test, **not** a justified research campaign.
 
-All options remain overridable. MongoDB writes still require `--apply`; proxy changes and UPF restarts still require their explicit flags and backup. Non-interactive experiments still require `--armed`, and UE recovery requires the exact journal path to avoid touching another run. The generic benchmark also requires explicit existing UE addresses.
+MongoDB writes still require `--apply`. Non-interactive experiments still require `--armed`, and UE recovery requires the exact journal path to avoid touching another run. The generic benchmark also requires explicit existing UE addresses.
 
 ## Experimental HPA baseline
 
@@ -93,21 +97,15 @@ Provisioning prints a short subscriber count by default; use `--verbose` for the
 
 ## Preflight
 
-From a host with `kubectl` access to the testbed, check the workload, proxy, and Prometheus without changing the cluster:
-
-The workload is checked in `services`; the UPF StatefulSet and Envoy ConfigMap remain in `open5gs`, the preflight proxy namespace default. A newly created Deployment with desired replicas 1 may temporarily have zero running or ready pods during cold start; this alone is not scale-to-zero. Wait for a ready endpoint before running a campaign.
+From a host with `kubectl` access, check the workload and Prometheus without changing the cluster:
 
 ```sh
-python3 -m experiments.preflight --upf-statefulset upf-gnb-2 \
-  --envoy-container envoy --envoy-configmap upf-gnb-2-envoy-config \
-  --envoy-config-key envoy.yaml --envoy-config-path /etc/envoy-config/envoy.yaml
+python3 -m experiments.preflight
 ```
 
-The command prints concise status checks and exits nonzero on failure; use `--json` for the full machine-readable report. In an interactive terminal, if the Envoy configuration differs and other prerequisites are satisfied, it offers to back up the ConfigMap under `results/` and redeploy the UPF after confirmation. Redeployment replaces proxy routes and interrupts 5G traffic. Non-interactive changes require `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. `OnDelete` does not reload the static configuration automatically.
+The workload is checked in `services`. A newly created Deployment with desired replicas 1 may temporarily have zero running or ready pods during cold start; this alone is not scale-to-zero. Wait for a ready endpoint before running a campaign. The command prints status checks and exits nonzero on failure; use `--json` for the machine-readable report. Check and independently verify both UE paths; a global collector p90 does not prove coverage at either site.
 
-This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The controller query aggregates new-prefix series across the two UPFs, but each site must be rolled out and verified before interpreting it as complete service-wide telemetry.
-
-An idle service can yield no finite latency histogram. Preflight reports a warning when the new workload's telemetry is not yet established, including missing metrics during rollout or confirmed zero traffic. The JSON report retains the failed latency check with `unverified: true`, while the overall result can be OK with a warning. Other telemetry errors still fail. The controller does not invent a latency or scale without one; it resumes latency-based decisions when real requests arrive and Prometheus reports a finite value. An unverified or idle warning does not prove the full path is ready for a campaign.
+Idle collector telemetry is unverified only when its scrape is up, its window is complete and attempts are zero. Scrape failures, malformed responses and overflow remain errors. An idle warning does not prove readiness; the controller fails closed without a finite latency.
 
 ## Automated UE ramp and switching
 
@@ -126,7 +124,7 @@ subscribers:
 ```sh
 sudo python3 -m experiments.experiment --armed \
   --ue-config /secure/ue-inventory.yaml --nr-ue /path/to/nr-ue \
-  --url http://SERVICE_ADDRESS:8000/detect --image /path/to/image.jpg \
+  --url http://NODE_IP:APP_NODEPORT/detect --image /path/to/image.jpg \
   --phase-schedule '2:2:0,4:3:1,4:1:3,2:0:2' \
   --phase-duration 180 --timeout 10 --output-dir results/run-001
 python3 -m experiments.summarize results/run-001/requests.jsonl \
@@ -135,6 +133,6 @@ python3 -m experiments.summarize results/run-001/requests.jsonl \
 
 The output directory must not exist; its parent must already exist. `run.json` records the image hash, schedule and request settings; `requests.jsonl` records phase boundaries and every attempt. UE lifecycle logs and recovery evidence are retained in `owned_ues/`. On interruption, preserve the directory; use `python3 -m experiments.ue_lifecycle --recover RESULTS_DIR/owned_ues` as root if cleanup did not finish. Review recovery output rather than killing unrelated UE processes.
 
-The summary command creates `summary.json`, `summary.csv`, `summary-ues.json` and `summary-ues.csv` without overwriting existing output. Percentiles use successful request latencies; SLO attainment divides successful attempts within the threshold by **all** attempts. Throughput uses elapsed phase time including request drain. These are client-observed latencies, not Envoy-only timings. Source IP and configured site are not independent proof of attachment: verify session, route, and traffic path before interpreting results. The runner does not collect pod resource usage or controller events; collect those separately for a placement or scaling comparison.
+The summary command creates `summary.json`, `summary.csv`, `summary-ues.json` and `summary-ues.csv` without overwriting existing output. Percentiles use successful request latencies; SLO attainment divides successful attempts within the threshold by **all** attempts. Throughput uses elapsed phase time including request drain. These are client-observed latencies. Source IP and configured site are not independent proof of attachment: verify session, route, and traffic path before interpreting results. The runner does not collect pod resource usage or controller events; collect those separately for a placement or scaling comparison.
 
 Do not run an experiment or change cluster state without an approved campaign and recovery plan. Never run two replica writers against the same Deployment.

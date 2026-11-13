@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, telemetry_config
+
 
 TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
@@ -122,6 +124,7 @@ def attempt(url, method, body, headers, source, timeout):
 
 def run(args):
     phases, groups, url, headers = validate(args)
+    telemetry = telemetry_config(getattr(args, 'telemetry_url', None), getattr(args, 'telemetry_token_file', None))
     body = args.body.encode('utf-8') if args.body is not None else None
     lock = threading.Lock()
     # Exclusive creation prevents accidentally destroying a previous experiment.
@@ -135,6 +138,7 @@ def run(args):
             selected = [(group, address) for group, key in
                         (('gnb-2', 'gnb2_ues'), ('gnb-3', 'gnb3_ues'))
                         for address in groups[group][:phase[key]]]
+            publisher = TelemetryPublisher(telemetry, [source for _, source in selected]) if telemetry else None
             start = time.time()
             deadline = time.monotonic() + args.phase_duration
             emit({'event': 'phase_start', **phase, 'start_time': start,
@@ -144,7 +148,7 @@ def run(args):
             def worker(group, source):
                 count = successes = 0
                 while time.monotonic() < deadline:
-                    record = attempt(url, args.method, body, headers, source, args.timeout)
+                    record = request_with_telemetry(attempt, publisher, url, args.method, body, headers, source, args.timeout)
                     count += 1
                     successes += record['success']
                     emit({'event': 'request', 'phase': phase['phase'], 'group': group,
@@ -153,9 +157,13 @@ def run(args):
                 return {'group': group, 'source_address': source,
                         'attempts': count, 'successes': successes}
 
-            with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-                futures = [executor.submit(worker, group, source) for group, source in selected]
-                per_ue = [future.result() for future in futures]
+            try:
+                with ThreadPoolExecutor(max_workers=len(selected)) as executor:
+                    futures = [executor.submit(worker, group, source) for group, source in selected]
+                    per_ue = [future.result() for future in futures]
+            finally:
+                if publisher:
+                    publisher.close()
             emit({'event': 'phase_end', **phase, 'start_time': start,
                   'generation_duration_s': args.phase_duration, 'end_time': time.time(),
                   'attempts': sum(ue['attempts'] for ue in per_ue),
@@ -174,6 +182,8 @@ def main(argv=None):
     parser.add_argument('--phase-duration', type=float, required=True, help='Request generation seconds per phase; in-flight attempts drain')
     parser.add_argument('--timeout', type=float, default=30.0, help='Socket timeout in seconds (default 30)')
     parser.add_argument('--output', required=True, help='New JSONL output file; must not already exist')
+    parser.add_argument('--telemetry-url', help='Collector HTTP(S) /observations URL')
+    parser.add_argument('--telemetry-token-file', help='File containing the collector bearer token')
     args = parser.parse_args(argv)
     try:
         run(args)

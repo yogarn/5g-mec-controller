@@ -46,6 +46,7 @@ metadata:
   name: mec-placement-face-detection
   namespace: services
 spec:
+  type: NodePort
   selector:
     app: mec-placement-face-detection
   ports:

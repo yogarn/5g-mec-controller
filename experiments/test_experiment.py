@@ -81,6 +81,14 @@ def test_default_cli_refuses_noninteractive_execution(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(experiment.sys.stdin, 'isatty', lambda: False)
     with pytest.raises(SystemExit) as error:
-        experiment.main([])
+        experiment.main(['--url', 'http://127.0.0.1:30000/detect'])
+    assert error.value.code == 2
+    assert not (tmp_path / 'results').exists()
+
+
+def test_cli_requires_explicit_nodeport_url(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        experiment.main(['--armed'])
     assert error.value.code == 2
     assert not (tmp_path / 'results').exists()

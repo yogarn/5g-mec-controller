@@ -1,0 +1,574 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: placement-prometheus
+  namespace: placement
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: placement-prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: placement-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: placement-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: placement-prometheus
+    namespace: placement
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placement-prometheus-config
+  namespace: placement
+data:
+  rules.yml: |
+    groups:
+      - name: placement_node_metrics
+        interval: 1s
+        rules:
+          # =======================================================
+          # 1. CPU Metrics (Instant 1s + 15s Sliding Window Average)
+          # =======================================================
+          - record: node:cpu_cores:total
+            expr: count without(cpu, mode) (node_cpu_seconds_total{mode="idle"})
+
+          # Instant CPU Utilization (Change per 1s scrape via irate)
+          - record: node:cpu_utilization:ratio
+            expr: clamp_min(clamp_max(1 - avg without(cpu, mode) (irate(node_cpu_seconds_total{mode="idle"}[30s])), 1), 0)
+
+          - record: node:cpu_utilization:percent
+            expr: clamp_min(clamp_max((1 - avg without(cpu, mode) (irate(node_cpu_seconds_total{mode="idle"}[30s]))) * 100, 100), 0)
+
+          - record: node:cpu_cores:used
+            expr: clamp_min((1 - avg without(cpu, mode) (irate(node_cpu_seconds_total{mode="idle"}[30s]))) * count without(cpu, mode) (node_cpu_seconds_total{mode="idle"}), 0)
+
+          # 15s Sliding Window Normalized Average
+          - record: node:cpu_utilization:percent:avg15s
+            expr: avg_over_time(node:cpu_utilization:percent[15s])
+
+          - record: node:cpu_cores:used:avg15s
+            expr: avg_over_time(node:cpu_cores:used[15s])
+
+          # =======================================================
+          # 2. Memory (RAM) (Instant 1s + 15s Sliding Window Average)
+          # =======================================================
+          - record: node:memory_bytes:total
+            expr: node_memory_MemTotal_bytes
+
+          - record: node:memory_gb:total
+            expr: node_memory_MemTotal_bytes / (1024 * 1024 * 1024)
+
+          # Instant RAM (Scraped every 1s)
+          - record: node:memory_bytes:used
+            expr: node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes
+
+          - record: node:memory_gb:used
+            expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / (1024 * 1024 * 1024)
+
+          - record: node:memory_utilization:percent
+            expr: ((node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes) * 100
+
+          # 15s Sliding Window Normalized Average
+          - record: node:memory_gb:used:avg15s
+            expr: avg_over_time(node:memory_gb:used[15s])
+
+          - record: node:memory_utilization:percent:avg15s
+            expr: avg_over_time(node:memory_utilization:percent[15s])
+
+          # =======================================================
+          # 3. GPU & CUDA Cores (Instant 1s + 15s Sliding Window Average)
+          # =======================================================
+          # Instant GPU Utilization (Sampled every 1s)
+          - record: node:gpu_utilization:percent
+            expr: DCGM_FI_DEV_GPU_UTIL
+
+          # 15s Sliding Window Normalized GPU Utilization
+          - record: node:gpu_utilization:percent:avg15s
+            expr: avg_over_time(DCGM_FI_DEV_GPU_UTIL[15s])
+
+          # CUDA Cores (RTX 5060 Ti: 4608 cores)
+          - record: node:cuda_cores:total
+            expr: count by (node, gpu, modelName) (DCGM_FI_DEV_GPU_UTIL) * 4608
+
+          # Instant Active CUDA Cores
+          - record: node:cuda_cores:used
+            expr: (DCGM_FI_DEV_GPU_UTIL / 100) * 4608
+
+          # 15s Sliding Window Normalized Active CUDA Cores
+          - record: node:cuda_cores:used:avg15s
+            expr: avg_over_time(node:cuda_cores:used[15s])
+
+          # =======================================================
+          # 4. VRAM (Instant 1s + 15s Sliding Window Average)
+          # =======================================================
+          - record: node:vram_bytes:total
+            expr: (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 1024 * 1024
+
+          - record: node:vram_gb:total
+            expr: (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) / 1024
+
+          # Instant VRAM (Sampled every 1s)
+          - record: node:vram_bytes:used
+            expr: DCGM_FI_DEV_FB_USED * 1024 * 1024
+
+          - record: node:vram_gb:used
+            expr: DCGM_FI_DEV_FB_USED / 1024
+
+          - record: node:vram_utilization:percent
+            expr: (DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)) * 100
+
+          # 15s Sliding Window Normalized VRAM
+          - record: node:vram_gb:used:avg15s
+            expr: avg_over_time(node:vram_gb:used[15s])
+
+          - record: node:vram_utilization:percent:avg15s
+            expr: avg_over_time(node:vram_utilization:percent[15s])
+
+          # =======================================================
+          # 5. UPF Envoy Response Time & UE Mobility (N6 -> vLLM)
+          # =======================================================
+          # Instant Mean Response Time in ms (active 30s window; drops to 0 when idle)
+          - record: upf:response_time_ms:mean
+            expr: |
+              (
+                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_sum{envoy_cluster_name=~"vllm.*"}[30s]))
+                /
+                (sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}[30s])) > 0)
+              )
+              or
+              (
+                sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_sum{envoy_http_conn_manager_prefix=~"upf_.*"}[30s]))
+                /
+                (sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}[30s])) > 0)
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
+
+          # 15s Sliding Window Normalized Response Time (ms)
+          - record: upf:response_time_ms:avg15s
+            expr: avg_over_time(upf:response_time_ms:mean[15s])
+
+          # P90 Response Time in ms (SLO Metric; drops to 0 when idle)
+          - record: upf:response_time_ms:p90
+            expr: |
+              (
+                histogram_quantile(
+                  0.90,
+                  sum by (le, node, upf, pod) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"vllm.*"}[30s]))
+                )
+                and on(node, upf, pod)
+                (sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}[30s])) > 0)
+              )
+              or
+              (
+                histogram_quantile(
+                  0.90,
+                  sum by (le, node, upf, pod) (rate(envoy_http_downstream_rq_time_bucket{envoy_http_conn_manager_prefix=~"upf_.*"}[30s]))
+                )
+                and on(node, upf, pod)
+                (sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}[30s])) > 0)
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
+
+          # P50 (Median) Response Time in ms (drops to 0 when idle)
+          - record: upf:response_time_ms:p50
+            expr: |
+              (
+                histogram_quantile(
+                  0.50,
+                  sum by (le, node, upf, pod) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"vllm.*"}[30s]))
+                )
+                and on(node, upf, pod)
+                (sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}[30s])) > 0)
+              )
+              or
+              (
+                histogram_quantile(
+                  0.50,
+                  sum by (le, node, upf, pod) (rate(envoy_http_downstream_rq_time_bucket{envoy_http_conn_manager_prefix=~"upf_.*"}[30s]))
+                )
+                and on(node, upf, pod)
+                (sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}[30s])) > 0)
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
+
+          # Last Recorded Response Time (Cumulative Historical Average in ms)
+          - record: upf:response_time_ms:last_recorded
+            expr: |
+              (
+                sum by (node, upf, pod) (envoy_cluster_upstream_rq_time_sum{envoy_cluster_name=~"vllm.*"})
+                /
+                (sum by (node, upf, pod) (envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}) > 0)
+              )
+              or
+              (
+                sum by (node, upf, pod) (envoy_http_downstream_rq_time_sum{envoy_http_conn_manager_prefix=~"upf_.*"})
+                /
+                (sum by (node, upf, pod) (envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}) > 0)
+              )
+
+          # Time-to-First-Token (TTFT) Recording Rules in ms (drops to 0 when idle)
+          - record: upf:ttft_ms:p90
+            expr: |
+              (
+                histogram_quantile(
+                  0.90,
+                  sum by (le, node, pod) (rate(vllm:time_to_first_token_seconds_bucket[30s]))
+                ) * 1000.0
+                and on(node, pod)
+                (sum by (node, pod) (rate(vllm:time_to_first_token_seconds_count[30s])) > 0)
+              )
+              or
+              (0 * sum by (node, pod) (vllm:time_to_first_token_seconds_count))
+
+          - record: upf:ttft_ms:p50
+            expr: |
+              (
+                histogram_quantile(
+                  0.50,
+                  sum by (le, node, pod) (rate(vllm:time_to_first_token_seconds_bucket[30s]))
+                ) * 1000.0
+                and on(node, pod)
+                (sum by (node, pod) (rate(vllm:time_to_first_token_seconds_count[30s])) > 0)
+              )
+              or
+              (0 * sum by (node, pod) (vllm:time_to_first_token_seconds_count))
+
+          - record: upf:ttft_ms:mean
+            expr: |
+              (
+                sum by (node, pod) (rate(vllm:time_to_first_token_seconds_sum[30s]))
+                /
+                (sum by (node, pod) (rate(vllm:time_to_first_token_seconds_count[30s])) > 0)
+              ) * 1000.0
+              or
+              (0 * sum by (node, pod) (vllm:time_to_first_token_seconds_count))
+
+          # UE Request Arrival Rate lambda_n (req/s) forwarded to vLLM (15s sliding window; drops to 0 when idle)
+          - record: upf:request_rate:lambda
+            expr: |
+              (
+                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*"}[15s]))
+              )
+              or
+              (
+                sum by (node, upf, pod) (rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}[15s]))
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
+
+          # UE Requests Processed in last 15s sliding window (drops to 0 when idle)
+          - record: upf:requests:window15s
+            expr: round(upf:request_rate:lambda * 15)
+
+          # Total UE Requests Processed to vLLM per UPF/Node
+          - record: upf:requests:total
+            expr: |
+              (
+                sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*"})
+              )
+              or
+              (
+                sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"})
+              )
+
+          # Active In-Flight UE Requests to vLLM per UPF/Node (drops to 0 when idle)
+          - record: upf:requests:active
+            expr: |
+              (
+                sum by (node, upf, pod) (envoy_cluster_upstream_rq_active{envoy_cluster_name=~"vllm.*"})
+              )
+              or
+              (
+                sum by (node, upf, pod) (envoy_http_downstream_rq_active{envoy_http_conn_manager_prefix=~"upf_.*"})
+              )
+
+          # =======================================================
+          # 6. Serving gNodeB Request Counters & UE Mobility (Core UE-Info Inferred)
+          # =======================================================
+          # Cumulative UE requests originating from serving gNB-2
+          - record: gnb:requests:total
+            expr: |
+              (
+                sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"})
+              )
+              or
+              (
+                sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_2"})
+              )
+            labels:
+              gnb: gnb-2
+
+          # Cumulative UE requests originating from serving gNB-3
+          - record: gnb:requests:total
+            expr: |
+              (
+                sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"})
+              )
+              or
+              (
+                sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_3"})
+              )
+            labels:
+              gnb: gnb-3
+
+          # UE Request Arrival Rate lambda_gnb (req/s) from serving gNB-2 (15s sliding window)
+          - record: gnb:request_rate:lambda
+            expr: |
+              (
+                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"}[15s]))
+              )
+              or
+              (
+                sum by (node, upf, pod) (rate(envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_2"}[15s]))
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"}))
+            labels:
+              gnb: gnb-2
+
+          # UE Request Arrival Rate lambda_gnb (req/s) from serving gNB-3 (15s sliding window)
+          - record: gnb:request_rate:lambda
+            expr: |
+              (
+                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"}[15s]))
+              )
+              or
+              (
+                sum by (node, upf, pod) (rate(envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_3"}[15s]))
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"}))
+            labels:
+              gnb: gnb-3
+
+          # UE Requests originating from serving gNB in last 15s sliding window (drops to 0 when idle)
+          - record: gnb:requests:window15s
+            expr: round(gnb:request_rate:lambda * 15)
+
+          # Active In-Flight UE Requests originating from serving gNB-2
+          - record: gnb:requests:active
+            expr: |
+              sum by (node, upf, pod) (
+                envoy_cluster_upstream_rq_active{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"}
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_2"}))
+            labels:
+              gnb: gnb-2
+
+          # Active In-Flight UE Requests originating from serving gNB-3
+          - record: gnb:requests:active
+            expr: |
+              sum by (node, upf, pod) (
+                envoy_cluster_upstream_rq_active{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"}
+              )
+              or
+              (0 * sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_3"}))
+            labels:
+              gnb: gnb-3
+
+          # Total requests across all UPF entry points grouped by serving gNB
+          - record: gnb:requests:aggregate:total
+            expr: sum by (gnb) (gnb:requests:total)
+
+          # Aggregate Request Arrival Rate lambda_gnb across all UPFs
+          - record: gnb:request_rate:aggregate:lambda
+            expr: sum by (gnb) (gnb:request_rate:lambda)
+
+          # Aggregate Active In-Flight Requests across all UPFs per serving gNB
+          - record: gnb:requests:aggregate:active
+            expr: sum by (gnb) (gnb:requests:active)
+
+          # UE Mobility Share per serving gNB: M_gnb = lambda_gnb / sum(lambda)
+          - record: gnb:mobility:share
+            expr: |
+              (
+                sum by (gnb) (gnb:request_rate:lambda)
+                / on() group_left
+                sum(gnb:request_rate:lambda > 0)
+              )
+              or
+              (0 * count by (gnb) (gnb:request_rate:lambda))
+
+  prometheus.yml: |
+    global:
+      scrape_interval: 1s
+      evaluation_interval: 1s
+      scrape_timeout: 1s
+
+    rule_files:
+      - /etc/prometheus/rules.yml
+
+    scrape_configs:
+      # Scrape Node Exporter across all nodes directly via Pod discovery
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - placement
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: node-exporter
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            regex: (.+)
+            target_label: __address__
+            replacement: ${1}:9100
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+      # Scrape DCGM Exporter on GPU-enabled nodes directly via Pod discovery
+      - job_name: 'dcgm-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - placement
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: dcgm-exporter
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            regex: (.+)
+            target_label: __address__
+            replacement: ${1}:9400
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+      # Scrape Envoy Sidecar Proxies on UPF pods in open5gs namespace
+      - job_name: 'upf-envoy'
+        metrics_path: /stats/prometheus
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - open5gs
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: upf.*
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            regex: envoy
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            regex: (.+)
+            target_label: __address__
+            replacement: ${1}:9901
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: upf
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+      # Scrape vLLM Inference Endpoints on GPU-enabled pods in services namespace
+      - job_name: 'vllm-edge'
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - services
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: vllm-edge-inference
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            regex: (.+)
+            target_label: __address__
+            replacement: ${1}:8000
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: placement-prometheus
+  namespace: placement
+  labels:
+    app.kubernetes.io/name: placement-prometheus
+    app.kubernetes.io/part-of: 5g-ai-edge-placement
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: placement-prometheus
+  template:
+    metadata:
+      labels:
+        app: placement-prometheus
+    spec:
+      nodeSelector:
+        site: core
+      serviceAccountName: placement-prometheus
+      containers:
+        - name: prometheus
+          image: docker.io/prom/prometheus:v2.53.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=24h
+            - --web.enable-lifecycle
+          ports:
+            - name: http
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: placement-prometheus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: placement-prometheus
+  namespace: placement
+  labels:
+    app.kubernetes.io/name: placement-prometheus
+spec:
+  type: NodePort
+  selector:
+    app: placement-prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+      nodePort: 30990

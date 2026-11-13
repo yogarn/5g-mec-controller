@@ -14,7 +14,6 @@ HOME = user_home()
 INVENTORY = HOME / '.config/5g-mec/ue-inventory.yaml'
 IMAGE = HOME / '.config/5g-mec/face.jpg'
 NR_UE = HOME / 'ueransim/build/nr-ue'
-URL = 'http://10.34.211.196:30090/detect'
 SCHEDULE = '1:1:0,1:0:1'
 PHASE_DURATION = 30.0
 SLO_MS = 500.0
