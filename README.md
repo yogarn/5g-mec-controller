@@ -49,7 +49,7 @@ The example is illustrative, not a runnable campaign. Output creation is exclusi
 From a host with `kubectl` access to the testbed, check the workload, proxy, and Prometheus without changing the cluster:
 
 ```sh
-python3 preflight.py --upf-statefulset upf-gnb-2 \
+python3 -m experiments.preflight --upf-statefulset upf-gnb-2 \
   --envoy-container envoy --envoy-configmap upf-gnb-2-envoy-config \
   --envoy-config-key envoy.yaml --envoy-config-path /etc/envoy-config/envoy.yaml
 ```
@@ -62,7 +62,7 @@ An idle service can yield no finite latency histogram; preflight reports that as
 
 ## Automated UE ramp and switching
 
-Run `experiment.py` on the UERANSIM host as root, after preflight and an approved recovery plan. It creates owned UE sessions, tears them down and reattaches them to realize each ordered gNB split, then drives closed-loop face requests from the resulting source IPs. This is stop-and-reattach, **not a 5G handover**. Phase changes include registration and routing setup; traffic pauses during switching.
+Run `python3 -m experiments.experiment` on the UERANSIM host as root, after preflight and an approved recovery plan. It creates owned UE sessions, tears them down and reattaches them to realize each ordered gNB split, then drives closed-loop face requests from the resulting source IPs. This is stop-and-reattach, **not a 5G handover**. Phase changes include registration and routing setup; traffic pauses during switching.
 
 Supply a private UE inventory YAML outside the repository. Each `subscribers` entry has `gnb2` and `gnb3` mappings with `config` (path to that subscriber's existing UERANSIM YAML) and `ip` (its expected IPv4 address at that site). The two configurations for each subscriber must have the same SUPI; SUPIs and expected IPs must be unique across the inventory. Paths are relative to the inventory. Keep subscriber keys out of Git.
 
@@ -75,16 +75,16 @@ subscribers:
 ```
 
 ```sh
-sudo python3 experiment.py --armed \
+sudo python3 -m experiments.experiment --armed \
   --ue-config /secure/ue-inventory.yaml --nr-ue /path/to/nr-ue \
   --url http://SERVICE_ADDRESS:8000/detect --image /path/to/image.jpg \
   --phase-schedule '2:2:0,4:3:1,4:1:3,2:0:2' \
   --phase-duration 180 --timeout 10 --output-dir results/run-001
-python3 summarize.py results/run-001/requests.jsonl \
+python3 -m experiments.summarize results/run-001/requests.jsonl \
   --slo-ms 500 --output-prefix results/run-001/summary
 ```
 
-The output directory must not exist; its parent must already exist. `run.json` records the image hash, schedule and request settings; `requests.jsonl` records phase boundaries and every attempt. UE lifecycle logs and recovery evidence are retained in `owned_ues/`. On interruption, preserve the directory; use `python3 ue_lifecycle.py --recover RESULTS_DIR/owned_ues` as root if cleanup did not finish. Review recovery output rather than killing unrelated UE processes.
+The output directory must not exist; its parent must already exist. `run.json` records the image hash, schedule and request settings; `requests.jsonl` records phase boundaries and every attempt. UE lifecycle logs and recovery evidence are retained in `owned_ues/`. On interruption, preserve the directory; use `python3 -m experiments.ue_lifecycle --recover RESULTS_DIR/owned_ues` as root if cleanup did not finish. Review recovery output rather than killing unrelated UE processes.
 
 The summary command creates `summary.json`, `summary.csv`, `summary-ues.json` and `summary-ues.csv` without overwriting existing output. Percentiles use successful request latencies; SLO attainment divides successful attempts within the threshold by **all** attempts. Throughput uses elapsed phase time including request drain. These are client-observed latencies, not Envoy-only timings. Source IP and configured site are not independent proof of attachment: verify session, route, and traffic path before interpreting results. The runner does not collect pod resource usage or controller events; collect those separately for a placement or scaling comparison.
 

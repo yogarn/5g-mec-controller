@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-import ue_lifecycle as ue
+from experiments import ue_lifecycle as ue
 
 
 def make_config(tmp_path, pairs):

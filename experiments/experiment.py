@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from benchmark.client import attempt, parse_schedule
-from ue_lifecycle import OwnedUELifecycle
+from experiments.ue_lifecycle import OwnedUELifecycle
 
 
 def run(args):

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import summarize
+from experiments import summarize
 
 
 def records():

@@ -5,8 +5,7 @@ import threading
 
 import pytest
 
-import summarize
-import experiment
+from experiments import experiment, summarize
 
 
 class FakeUEs:
