@@ -28,6 +28,25 @@ Scaling computes `ceil(replicas * latency / SLO)` within the configured replica 
 
 Optional settings include `interval_seconds`, `cpu_saturation`, `locality_weight`, `improvement_factor`, `cooldown_seconds`, `scale_down_seconds`, and `max_metric_age_seconds`. Cooldown and stabilization state are in memory and reset on restart.
 
+## Experimental HPA baseline
+
+`experiments/hpa-baseline.yaml` is a standalone Kubernetes HPA for the same face-detection Deployment; it is not part of the controller or its production configuration. It uses CPU utilization at 80% of each container's CPU **request**, with 1–3 replicas and a 180-second scale-down stabilization window. With the manifest's `100m` request, the target is 80m average CPU per pod, not 80% of its `500m` limit. This is a proposed experimental setting, not a calibrated equivalent of the latency SLO. Metrics Server and CPU requests for all containers are required.
+
+Before an authorized run, use the same workload, image, resources, replica bounds, routes, node constraints, initial replica count and UE schedule for both conditions. The live calibration workload was pinned to gnb-2: inspect and match placement constraints before comparison. Stop the placement controller and all other replica writers; its HPA detection is not a substitute for exclusive ownership. Check for existing HPAs targeting the Deployment, and do not overwrite or delete another experiment's HPA. Capture the pre-run Deployment and HPA state in a new directory:
+
+```sh
+mkdir baseline-state
+kubectl -n open5gs get deployment mec-placement-face-detection -o yaml > baseline-state/deployment-before.yaml
+kubectl -n open5gs get hpa -o yaml > baseline-state/hpas-before.yaml
+kubectl -n open5gs get hpa
+kubectl -n open5gs top pods -l app=mec-placement-face-detection
+kubectl -n open5gs get hpa mec-placement-face-detection-baseline
+```
+
+The last command must report NotFound; if it exists, stop and inspect ownership. After checking Metrics Server, workload readiness and the preflight results, create the baseline HPA with `kubectl create -f experiments/hpa-baseline.yaml`. Inspect `kubectl -n open5gs describe hpa mec-placement-face-detection-baseline` for valid CPU metrics and scaling conditions. Run the same `experiments.experiment` schedule and `experiments.summarize` commands documented below; retain HPA status/events and pod resources separately.
+
+After the run, capture the HPA status, then delete **only this experiment's** HPA with `kubectl delete -f experiments/hpa-baseline.yaml` after confirming it has not been replaced or taken over. Deleting the HPA does not restore the replica count or placement. With all writers stopped, compare the live Deployment with the captured state and restore only approved changed fields, then verify readiness. Remove any controller-added node preference before the baseline only as part of an approved, captured setup; do not assume disabling the controller removes it.
+
 ## Generic UE HTTP benchmark
 
 The client uses **already running** UERANSIM UE IP addresses; it does not launch, move, or terminate UEs. The supplied address groups must correspond to actual UE attachments. It issues closed-loop HTTP requests and writes per-attempt JSONL with phase boundaries and per-UE counts. It does not measure pod resources or collect controller events.
