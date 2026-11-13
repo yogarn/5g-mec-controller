@@ -4,7 +4,7 @@ Run commands from the **repository root**, not from `experiments/`. This runbook
 
 ## Stop: verify readiness first
 
-The last inspection found gNB-2 Envoy routing to the face-detection service, but gNB-3 Envoy routing elsewhere. The configured controller latency query covers only gNB-2. The live Deployment was pinned to gNB-2. Treat those observations as historical and check current state; do not run a two-site comparison until both UE paths, complete service-wide latency telemetry, and placement constraints are verified. The 500 ms SLO is exploratory. The face image in the Deployment predates the local source changes; verify the deployed image and workload identity before comparing runs.
+The historical gNB-2 Envoy route targets the old `open5gs` face-detection Service, not the separate project workload in `services`; gNB-3 was routing elsewhere. The old Deployment was pinned to gNB-2. Check current state, and leave the old workload untouched. The new query aggregates only `mec_placement_face` listener series from gNB-2 and gNB-3: count series appear after each edge Envoy rollout and request samples require traffic. The query returns no result until both sites expose count series. Do not run a two-site comparison until both routes are authorized, switched and verified, complete service-wide latency telemetry is established, and placement constraints are verified. The 500 ms SLO is exploratory. The image predates local source changes; verify image and workload identity before comparing runs.
 
 The default schedule is two 30-second phases with one UE per site. It is a **connectivity smoke test**, not a justified research campaign. The runner stops and reattaches UEs between phases; it does not perform 5G handover. Closed-loop UE counts are not fixed offered request rates.
 
@@ -13,6 +13,8 @@ Never run the HPA and a mutating controller, KEDA, or any other replica writer a
 ## 1. Core host setup and preflight
 
 **On core**, with Kubernetes access:
+
+After authorization, verify the `services` namespace and project Deployment and Service exist. If both resources are absent, create them with `kubectl create -f apps/face-detection/manifest.yaml`; if either already exists, inspect ownership and state rather than overwriting it. The desired replica count is 1; zero running or ready pods during cold start is acceptable while Kubernetes starts it, not scale-to-zero. The controller and HPA bounds remain 1–3. Wait for a ready endpoint and verify the traffic path before a campaign. UPFs and their ConfigMaps remain in `open5gs`; changing their Envoy route requires an authorized UPF rollout and recovery plan.
 
 ```sh
 cd /home/member/skripsi_yoga/5g-mec-controller
@@ -26,12 +28,12 @@ pip install -r requirements.txt
 python -m experiments.preflight
 python -m experiments.preflight --node gnb-3
 
-kubectl -n open5gs get deployment mec-placement-face-detection -o wide
-kubectl -n open5gs get hpa
-kubectl -n open5gs top pods -l app=mec-placement-face-detection
+kubectl -n services get deployment mec-placement-face-detection -o wide
+kubectl -n services get hpa
+kubectl -n services top pods -l app=mec-placement-face-detection
 ```
 
-The preflight defaults to gNB-2; `--node gnb-3` checks the other UPF. Both currently use the configured latency query, so a successful gNB-3 preflight alone does not prove gNB-3 telemetry. `--json` gives the detailed report and disables interactive prompts. A NaN p95 with a confirmed zero request count in the last two minutes is an idle warning, not a preflight failure; other telemetry errors still fail. The controller waits for a finite p95 from real requests before making latency-based decisions. No dummy traffic or synthetic zero latency is needed, but an idle warning does not verify the request path.
+The preflight defaults to gNB-2; `--node gnb-3` checks the other UPF. Its proxy namespace defaults to `open5gs`, independently of the workload namespace `services`. Both checks use the aggregate latency query, so a successful gNB-3 preflight alone does not prove gNB-3 telemetry. `--json` gives the detailed report and disables interactive prompts. Missing new-workload metrics during proxy rollout or NaN p95 with confirmed zero request count are reported as unverified telemetry warnings; other telemetry errors still fail. The controller waits for a finite p95 from real requests before making latency-based decisions. No dummy traffic or synthetic zero latency is needed, but an unverified or idle warning does not verify the request path.
 
 If the proxy configuration differs, preflight can offer to back up the current ConfigMap under `results/` and restart the shared UPF. **Restarting interrupts 5G traffic and applying the configuration replaces existing proxy routes.** Only confirm after reviewing the impact and recovery plan. A matching config is not a reason to restart.
 
@@ -40,10 +42,10 @@ Before the first run, capture the current Deployment and HPA state. Use a new di
 ```sh
 mkdir -p results
 mkdir results/campaign-01
-kubectl -n open5gs get deployment mec-placement-face-detection -o yaml \
+kubectl -n services get deployment mec-placement-face-detection -o yaml \
   > results/campaign-01/deployment-before.yaml
-kubectl -n open5gs get hpa -o yaml > results/campaign-01/hpas-before.yaml
-kubectl -n open5gs get pods -l app=mec-placement-face-detection -o wide \
+kubectl -n services get hpa -o yaml > results/campaign-01/hpas-before.yaml
+kubectl -n services get pods -l app=mec-placement-face-detection -o wide \
   > results/campaign-01/pods-before.txt
 ```
 
@@ -78,9 +80,9 @@ If any path differs, set the corresponding `--ue-config`, `--image` or `--nr-ue`
 
 ```sh
 cd /home/member/skripsi_yoga/5g-mec-controller
-kubectl -n open5gs get hpa
+kubectl -n services get hpa
 kubectl create -f experiments/hpa-baseline.yaml
-kubectl -n open5gs describe hpa mec-placement-face-detection-baseline
+kubectl -n services describe hpa mec-placement-face-detection-baseline
 ```
 
 The baseline targets 80% of CPU **request**, has 1–3 replicas, and uses a 180-second scale-down window. With a 100m CPU request, 80% is 80m per pod, not 80% of the 500m CPU limit. Confirm Metrics Server reports valid data and all pods have CPU requests. This threshold is an experimental choice, not a calibrated latency SLO.
@@ -108,18 +110,18 @@ Capture HPA status, pod placement, resource use and events during the run. The r
 
 ```sh
 cd /home/member/skripsi_yoga/5g-mec-controller
-kubectl -n open5gs get hpa mec-placement-face-detection-baseline -o yaml \
+kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml \
   > results/campaign-01/hpa-after.yaml
 kubectl delete -f experiments/hpa-baseline.yaml
-kubectl -n open5gs get hpa
+kubectl -n services get hpa
 ```
 
 If the approved starting state is one replica and no other writer is running:
 
 ```sh
-kubectl -n open5gs scale deployment mec-placement-face-detection --replicas=1
-kubectl -n open5gs rollout status deployment/mec-placement-face-detection
-kubectl -n open5gs get deployment mec-placement-face-detection -o yaml \
+kubectl -n services scale deployment mec-placement-face-detection --replicas=1
+kubectl -n services rollout status deployment/mec-placement-face-detection
+kubectl -n services get deployment mec-placement-face-detection -o yaml \
   > results/campaign-01/deployment-after-reset.yaml
 ```
 

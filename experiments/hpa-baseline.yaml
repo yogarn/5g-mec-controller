@@ -3,7 +3,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: mec-placement-face-detection-baseline
-  namespace: open5gs
+  namespace: services
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

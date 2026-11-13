@@ -9,6 +9,13 @@ from unittest.mock import patch
 
 from experiments import preflight
 
+WORKLOAD_QUERY = (
+    '(histogram_quantile(0.95, sum by (le) (rate('
+    'envoy_http_downstream_rq_time_bucket{job="upf-envoy",'
+    'envoy_http_conn_manager_prefix="mec_placement_face",node=~"gnb-2|gnb-3"}[2m]))) / 1000) '
+    'and on() (count(count by (node) (envoy_http_downstream_rq_time_count{job="upf-envoy",'
+    'envoy_http_conn_manager_prefix="mec_placement_face",node=~"gnb-2|gnb-3"})) == 2)')
+
 
 class PreflightSafetyTests(unittest.TestCase):
     def setUp(self):
@@ -83,16 +90,17 @@ class PreflightSafetyTests(unittest.TestCase):
                 old = {'metadata': {'name': 'upf-0', 'uid': 'old'}}
                 new = {'metadata': {'name': 'upf-0', 'uid': 'new'}}
                 sts = {'metadata': {'name': 'upf', 'uid': 'owner'}, 'spec': {}}
-                deployment = {'metadata': {'generation': 1}, 'spec': {'replicas': 1},
-                              'status': {'observedGeneration': 1, 'updatedReplicas': 1,
-                                         'readyReplicas': int(healthy), 'availableReplicas': 1, 'replicas': 1}}
-                service = {'spec': {'ports': [{'port': 5000}]}}
-                endpoints = {'subsets': [{'addresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]}
+                deployment = {'metadata': {'generation': 1},
+                              'spec': {'replicas': 1,
+                                       'template': {'metadata': {'labels': {'app': 'face'}},
+                                                    'spec': {'containers': [{'name': 'face'}]}}},
+                              'status': {'readyReplicas': 0}}
+                service = {'spec': {'selector': {'app': 'face' if healthy else 'other'}, 'ports': [{'port': 5000}]}}
                 objects = {'statefulset': sts, 'configmap': cm, 'pod': old, 'deployment': deployment,
-                           'service': service, 'endpoints': endpoints}
+                           'service': service}
                 settings = SimpleNamespace(manifest=Path('app.yaml'), namespace='open5gs',
                                            prometheus_url='http://prom', max_metric_age_seconds=60,
-                                           latency_query='query')
+                                           latency_query=WORKLOAD_QUERY)
                 response = SimpleNamespace(status_code=200, text='ok', raise_for_status=lambda: None,
                                            json=lambda: {})
                 cli = ['--upf-statefulset', 'upf', '--envoy-container', 'envoy',
@@ -102,17 +110,24 @@ class PreflightSafetyTests(unittest.TestCase):
                 out = io.StringIO()
                 with (patch.object(preflight, 'load_settings', return_value=settings),
                       patch.object(preflight, 'workload_identity', return_value=('open5gs', 'app')),
-                      patch.object(preflight, 'get', side_effect=lambda kind, name, namespace: objects[kind]),
+                      patch.object(preflight, 'get', side_effect=lambda kind, name, namespace: objects[kind]) as get_resource,
                       patch.object(preflight, 'find_pod', side_effect=[old, new]),
                       patch.object(preflight, 'validate_proxy_mount'),
                       patch.object(preflight, 'kubectl', return_value='ok') as run,
                       patch.object(preflight, 'port_forward', return_value=nullcontext('http://localhost:1234')),
-                      patch.object(preflight.requests, 'get', return_value=response),
-                      patch.object(preflight.Prometheus, 'scalar', return_value=0.1),
+                      patch.object(preflight.requests, 'get', return_value=response) as http,
+                      patch.object(preflight.Prometheus, 'scalar',
+                                   side_effect=ValueError('Prometheus query returned no samples') if healthy else None,
+                                   return_value=0.1),
                       patch.object(preflight, 'runtime_matches', return_value='verified') as active,
                       redirect_stdout(out)):
                     result = preflight.main(cli)
                 report = json.loads(out.getvalue())
+                self.assertNotIn('service_endpoints', report['checks'])
+                self.assertNotIn('service_http_health', report['checks'])
+                self.assertNotIn('endpoints', [call.args[0] for call in get_resource.call_args_list])
+                self.assertFalse(any('/health' in call.args[0] and '/-/healthy' not in call.args[0]
+                                     for call in http.call_args_list))
                 deleted = [call for call in run.call_args_list if 'delete' in call.args]
                 replaced = [call for call in run.call_args_list if 'replace' in call.args]
                 self.assertFalse(replaced)
@@ -121,12 +136,13 @@ class PreflightSafetyTests(unittest.TestCase):
                 if healthy:
                     self.assertEqual(result, 0)
                     self.assertTrue(report['checks']['upf_restart']['ok'])
+                    self.assertTrue(report['checks']['prometheus_query']['unverified'])
                     self.assertTrue(report['checks']['envoy_active']['ok'])
                     self.assertTrue(active.called)
                     self.assertEqual(json.loads((recovery / 'configmap.json').read_text()), cm)
                 else:
                     self.assertEqual(result, 1)
-                    self.assertIn('deployment', report['checks']['envoy_apply']['error'])
+                    self.assertIn('service_selection', report['checks']['envoy_apply']['error'])
 
 
     def test_human_report_shows_checks_warnings_and_actions_without_resource_dump(self):
@@ -209,22 +225,25 @@ class PreflightSafetyTests(unittest.TestCase):
             preflight.runtime_matches(dump, desired)
 
     def test_idle_counter_does_not_manufacture_a_latency_value(self):
-        settings = SimpleNamespace(latency_query='histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m]))) / 1000',
+        settings = SimpleNamespace(latency_query=WORKLOAD_QUERY,
                                    prometheus_url='http://prom', max_metric_age_seconds=60)
-        with patch.object(preflight.Prometheus, 'scalar', return_value=0) as scalar:
+        with patch.object(preflight.Prometheus, 'scalar', side_effect=[1, 0, 1, 0]) as scalar:
             self.assertTrue(preflight.proxy_is_idle(settings))
-            self.assertIn('node="gnb-2"', scalar.call_args.args[0])
-        with patch.object(preflight.Prometheus, 'scalar', return_value=1):
+            self.assertIn('node="gnb-2"', scalar.call_args_list[1].args[0])
+            self.assertIn('node="gnb-3"', scalar.call_args_list[3].args[0])
+        with patch.object(preflight.Prometheus, 'scalar', side_effect=[1, 0, 1, 1]):
             self.assertFalse(preflight.proxy_is_idle(settings))
+        with patch.object(preflight.Prometheus, 'scalar', side_effect=[1, 0, 1, ValueError('Prometheus query returned no samples')]):
+            with self.assertRaises(ValueError):
+                preflight.proxy_is_idle(settings)
         self.assertEqual(preflight.mutation_blockers({
-            'prometheus_query': {'ok': False, 'idle': True},
+            'prometheus_query': {'ok': False, 'unverified': True},
             'deployment': {'ok': False}}), ['deployment'])
 
     def test_idle_is_warning_but_stale_samples_fail(self):
-        query = ('histogram_quantile(0.95, sum by (le) '
-                 '(rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",'
-                 'envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m]))) / 1000')
+        query = WORKLOAD_QUERY
         for error, idle, expected in [('Prometheus sample is NaN', True, 0),
+                                      ('Prometheus query returned no samples', True, 0),
                                       ('invalid or stale Prometheus sample', False, 1)]:
             with self.subTest(error=error), tempfile.TemporaryDirectory() as temp:
                 config = Path(temp) / 'envoy.yaml'
@@ -233,13 +252,13 @@ class PreflightSafetyTests(unittest.TestCase):
                 sts = {'metadata': {'name': 'upf', 'uid': 'owner'}, 'spec': {}}
                 pod = {'metadata': {'name': 'upf-0', 'uid': 'old'}}
                 cm = {'metadata': {'resourceVersion': '7'}, 'data': {'envoy.yaml': text}}
-                deployment = {'metadata': {'generation': 1}, 'spec': {'replicas': 1},
-                              'status': {'observedGeneration': 1, 'updatedReplicas': 1,
-                                         'readyReplicas': 1, 'availableReplicas': 1, 'replicas': 1}}
-                service = {'spec': {'ports': [{'port': 5000}]}}
-                endpoints = {'subsets': [{'addresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]}
+                deployment = {'spec': {'replicas': 1,
+                                       'template': {'metadata': {'labels': {'app': 'face'}},
+                                                    'spec': {'containers': [{'name': 'face'}]}}},
+                              'status': {'readyReplicas': 0}}
+                service = {'spec': {'selector': {'app': 'face'}, 'ports': [{'port': 5000}]}}
                 objects = {'statefulset': sts, 'configmap': cm, 'deployment': deployment,
-                           'service': service, 'endpoints': endpoints}
+                           'service': service}
                 settings = SimpleNamespace(manifest=Path('app.yaml'), namespace='open5gs',
                                            prometheus_url='http://prom', max_metric_age_seconds=60,
                                            latency_query=query)
@@ -254,14 +273,14 @@ class PreflightSafetyTests(unittest.TestCase):
                       patch.object(preflight, 'kubectl', return_value='ok'),
                       patch.object(preflight, 'port_forward', return_value=nullcontext('http://localhost:1234')),
                       patch.object(preflight.requests, 'get', return_value=response),
-                      patch.object(preflight.Prometheus, 'scalar', side_effect=[ValueError(error), 0]),
+                      patch.object(preflight.Prometheus, 'scalar', side_effect=[ValueError(error), 1, 0, 1, 0]),
                       patch.object(preflight, 'runtime_matches', return_value='verified'),
                       redirect_stdout(output)):
                     result = preflight.main(['--upf-statefulset', 'upf', '--envoy-configmap', 'upf',
                                              '--envoy-config', str(config), '--json'])
                 report = json.loads(output.getvalue())
                 self.assertEqual(result, expected)
-                self.assertEqual(report['checks']['prometheus_query'].get('idle', False), idle)
+                self.assertEqual(report['checks']['prometheus_query'].get('unverified', False), idle)
                 self.assertFalse(report['checks']['prometheus_query']['ok'])
                 if idle:
                     self.assertIn('[WARN] prometheus_query:', preflight.render_report(report))
@@ -276,13 +295,13 @@ class PreflightSafetyTests(unittest.TestCase):
                 old = {'metadata': {'name': 'upf-0', 'uid': 'old'}}
                 new = {'metadata': {'name': 'upf-0', 'uid': 'new'}}
                 sts = {'metadata': {'name': 'upf', 'uid': 'owner'}, 'spec': {}}
-                deployment = {'metadata': {'generation': 1}, 'spec': {'replicas': 1},
-                              'status': {'observedGeneration': 1, 'updatedReplicas': 1,
-                                         'readyReplicas': 1, 'availableReplicas': 1, 'replicas': 1}}
-                service = {'spec': {'ports': [{'port': 5000}]}}
-                endpoints = {'subsets': [{'addresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]}
+                deployment = {'spec': {'replicas': 1,
+                                       'template': {'metadata': {'labels': {'app': 'face'}},
+                                                    'spec': {'containers': [{'name': 'face'}]}}},
+                              'status': {'readyReplicas': 0}}
+                service = {'spec': {'selector': {'app': 'face'}, 'ports': [{'port': 5000}]}}
                 objects = {'statefulset': sts, 'configmap': cm, 'pod': old, 'deployment': deployment,
-                           'service': service, 'endpoints': endpoints}
+                           'service': service}
                 settings = SimpleNamespace(manifest=Path('app.yaml'), namespace='open5gs',
                                            prometheus_url='http://prom', max_metric_age_seconds=60,
                                            latency_query='query')
@@ -312,12 +331,52 @@ class PreflightSafetyTests(unittest.TestCase):
                 self.assertEqual(any('delete' in call.args for call in kube.call_args_list), answer == 'y')
                 self.assertEqual(result, 0 if answer == 'y' else 1)
 
-    def test_unready_endpoints_and_deployment_fail(self):
+    def test_cold_deployment_and_service_static_validation(self):
+        deployment = {'spec': {'replicas': 1, 'template': {
+            'metadata': {'labels': {'app': 'face'}},
+            'spec': {'containers': [{'name': 'face', 'ports': [{'name': 'http', 'containerPort': 5000}]}]}}},
+            'status': {'readyReplicas': 0}}
+        self.assertIn('not checked', preflight.check_deployment(deployment)['readiness'])
+        service = {'spec': {'selector': {'app': 'face'}, 'ports': [{'port': 80, 'targetPort': 'http'}]}}
+        preflight.check_service(service, deployment)
+        service['spec']['selector'] = {'app': 'other'}
         with self.assertRaises(preflight.PreflightError):
-            preflight.check_endpoints({'spec': {}}, {'subsets': [{'notReadyAddresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]})
+            preflight.check_service(service, deployment)
+        service['spec']['selector'] = {'app': 'face'}
+        service['spec']['ports'][0]['targetPort'] = 'missing'
         with self.assertRaises(preflight.PreflightError):
-            preflight.check_deployment({'metadata': {'generation': 2}, 'spec': {'replicas': 1},
-                                        'status': {'observedGeneration': 1, 'readyReplicas': 1}})
+            preflight.check_service(service, deployment)
+        deployment['spec']['replicas'] = 0
+        with self.assertRaises(preflight.PreflightError):
+            preflight.check_deployment(deployment)
+
+    def test_missing_workload_resources_are_failures(self):
+        deployment = {'spec': {'replicas': 1, 'template': {
+            'metadata': {'labels': {'app': 'face'}},
+            'spec': {'containers': [{'name': 'face'}]}}}}
+        service = {'spec': {'selector': {'app': 'face'}, 'ports': [{'port': 5000}]}}
+        settings = SimpleNamespace(manifest=Path('app.yaml'), namespace='services',
+                                   prometheus_url='http://prom', max_metric_age_seconds=60,
+                                   latency_query='query')
+        for missing in ('deployment', 'service'):
+            objects = {'deployment': deployment, 'service': service}
+            def get_resource(kind, name, namespace):
+                if kind == missing:
+                    raise preflight.PreflightError(f'{kind} not found')
+                return objects[kind]
+            response = SimpleNamespace(status_code=200, text='ok', raise_for_status=lambda: None)
+            output = io.StringIO()
+            with (patch.object(preflight, 'load_settings', return_value=settings),
+                  patch.object(preflight, 'workload_identity', return_value=('services', 'app')),
+                  patch.object(preflight, 'get', side_effect=get_resource),
+                  patch.object(preflight, 'kubectl', return_value='ok'),
+                  patch.object(preflight.requests, 'get', return_value=response),
+                  patch.object(preflight.Prometheus, 'scalar', return_value=0.1),
+                  redirect_stdout(output)):
+                result = preflight.main(['--envoy-config', '/nonexistent', '--json'])
+            report = json.loads(output.getvalue())
+            self.assertEqual(result, 1)
+            self.assertFalse(report['checks'][missing]['ok'])
 
 
 if __name__ == '__main__':

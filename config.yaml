@@ -1,8 +1,10 @@
-# Calibration applies only to the gnb-2 face workload and proxy path below.
+# Calibration below is historical; validate the new workload and proxy paths.
 # The manifest must contain exactly one apps/v1 Deployment. It is read, not applied.
 manifest: apps/face-detection/manifest.yaml
 prometheus_url: "http://10.34.211.140:30990"
-latency_query: 'histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m]))) / 1000'
+latency_query: '(histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="mec_placement_face",node=~"gnb-2|gnb-3"}[2m]))) / 1000) and on() (count(count by (node) (envoy_http_downstream_rq_time_count{job="upf-envoy",envoy_http_conn_manager_prefix="mec_placement_face",node=~"gnb-2|gnb-3"})) == 2)'
+# Both sites must expose new-prefix count series before the query can return a
+# value. Series appear after each edge rollout; request samples require traffic.
 # Calibration, 2026-11-13: one pod on gnb-2, 500m CPU limit, 512Mi memory
 # limit, 100m CPU / 128Mi memory requests. Client on core reached the UPF
 # Envoy directly, not through a UE. Fixed 547x365 JPEG; SHA-256:
@@ -23,8 +25,8 @@ latency_query: 'histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream
 #   attempts.jsonl and refinement.jsonl.
 #
 # The controller uses Envoy histogram p95, not the client-measured SLO above;
-# its query includes all traffic on the gnb-2 face listener and excludes UE
-# network latency. Recalibrate for the actual route and image workload.
+# it aggregates the new listener across reporting UPFs and excludes UE network
+# latency. Recalibrate and verify coverage for the actual routes and workload.
 # Mutation is disabled until the SLO and metric coverage are validated.
 slo_seconds: 0.5
 min_replicas: 1

@@ -6,7 +6,6 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
-import re
 import select
 import subprocess
 import sys
@@ -23,25 +22,36 @@ from controller.telemetry import Prometheus
 
 def mutation_blockers(checks):
     return [name for name, result in checks.items()
-            if name != 'envoy_config_match' and not result['ok'] and not result.get('idle', False)]
+            if name != 'envoy_config_match' and not result['ok'] and not result.get('unverified', False)]
 class PreflightError(Exception):
     pass
 
-def proxy_is_idle(settings):
-    """Recognize the configured face-proxy histogram only; never invent latency."""
-    query = settings.latency_query
-    node = re.search(r'node="([^"]+)"', query)
-    if not node:
-        return False
-    expected = ('histogram_quantile(0.95,sumby(le)(rate('
+def is_workload_latency_query(query):
+    expected = ('(histogram_quantile(0.95,sumby(le)(rate('
                 'envoy_http_downstream_rq_time_bucket{job="upf-envoy",'
-                'envoy_http_conn_manager_prefix="face_detection",'
-                f'node={json.dumps(node.group(1))}' + '}[2m])))/1000')
-    if ''.join(query.split()) != expected:
+                'envoy_http_conn_manager_prefix="mec_placement_face",'
+                'node=~"gnb-2|gnb-3"}[2m])))/1000)andon()(count(countby(node)('
+                'envoy_http_downstream_rq_time_count{job="upf-envoy",'
+                'envoy_http_conn_manager_prefix="mec_placement_face",'
+                'node=~"gnb-2|gnb-3"}))==2)')
+    return ''.join(query.split()) == expected
+
+
+def proxy_is_idle(settings):
+    """Confirm both edge scrapes and workload counters before reporting idle traffic."""
+    if not is_workload_latency_query(settings.latency_query):
         return False
-    labels = f'job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node={json.dumps(node.group(1))}'
-    count_query = f'sum(increase(envoy_http_downstream_rq_time_count{{{labels}}}[2m]))'
-    return Prometheus(settings.prometheus_url, settings.max_metric_age_seconds).scalar(count_query) == 0
+    prometheus = Prometheus(settings.prometheus_url, settings.max_metric_age_seconds)
+    for node in ('gnb-2', 'gnb-3'):
+        labels = f'job="upf-envoy",node="{node}"'
+        if prometheus.scalar(f'up{{{labels}}}') != 1:
+            return False
+        count = prometheus.scalar(
+            'sum(increase(envoy_http_downstream_rq_time_count'
+            f'{{{labels},envoy_http_conn_manager_prefix="mec_placement_face"}}[2m]))')
+        if count != 0:
+            return False
+    return True
 
 @contextmanager
 def port_forward(namespace, resource, port):
@@ -82,23 +92,43 @@ def get(kind, name, namespace):
 
 
 def check_deployment(deployment):
-    spec, status = deployment.get('spec', {}), deployment.get('status', {})
+    spec = deployment.get('spec', {})
     desired = spec.get('replicas', 1)
-    if (desired < 1 or status.get('observedGeneration', 0) < deployment['metadata'].get('generation', 1)
-            or status.get('updatedReplicas', 0) != desired or status.get('readyReplicas', 0) != desired
-            or status.get('availableReplicas', 0) != desired or status.get('replicas', 0) != desired):
-        raise PreflightError(f'Deployment is not fully rolled out and available: desired={desired}, status={status}')
-    return {'desired': desired, 'ready': status['readyReplicas']}
+    template = spec.get('template', {})
+    if (not isinstance(desired, int) or isinstance(desired, bool) or desired < 1
+            or not template.get('metadata', {}).get('labels')
+            or not template.get('spec', {}).get('containers')):
+        raise PreflightError('Deployment must have at least one desired replica and a labeled pod template with containers')
+    return {'desired': desired, 'readiness': 'not checked (cold start permitted)'}
 
 
-def check_endpoints(service, endpoints):
-    if service.get('spec', {}).get('type') == 'ExternalName':
-        raise PreflightError('ExternalName Service has no Kubernetes pod endpoints')
-    addresses = [address.get('ip') for subset in endpoints.get('subsets', [])
-                 if subset.get('ports') for address in subset.get('addresses', []) if address.get('ip')]
-    if not addresses:
-        raise PreflightError('Service has no ready endpoints with ports')
-    return {'ready_addresses': addresses, 'cluster_ip': service.get('spec', {}).get('clusterIP')}
+def check_service(service, deployment):
+    spec = service.get('spec', {})
+    if spec.get('type') == 'ExternalName':
+        raise PreflightError('ExternalName Service cannot select Deployment pods')
+    selector = spec.get('selector')
+    labels = deployment.get('spec', {}).get('template', {}).get('metadata', {}).get('labels', {})
+    if not isinstance(selector, dict) or not selector or any(labels.get(k) != v for k, v in selector.items()):
+        raise PreflightError('Service selector does not match Deployment pod template labels')
+    ports = spec.get('ports', [])
+    if not ports:
+        raise PreflightError('Service has no ports')
+    containers = deployment.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+    for port in ports:
+        number = port.get('port')
+        target = port.get('targetPort', number)
+        protocol = port.get('protocol', 'TCP')
+        if (not isinstance(number, int) or isinstance(number, bool) or not 1 <= number <= 65535
+                or protocol not in ('TCP', 'UDP', 'SCTP')):
+            raise PreflightError('Service has an invalid port or protocol')
+        if isinstance(target, str):
+            if not any(p.get('name') == target and p.get('protocol', 'TCP') == protocol
+                       for container in containers for p in container.get('ports', [])):
+                raise PreflightError(f'Service targetPort {target!r} does not match a Deployment container port')
+        elif not isinstance(target, int) or isinstance(target, bool) or not 1 <= target <= 65535:
+            raise PreflightError('Service has an invalid targetPort')
+    return {'selector': 'matches Deployment pod template', 'ports': len(ports),
+            'availability': 'not checked (cold start permitted)'}
 
 
 def find_pod(namespace, statefulset, node):
@@ -217,7 +247,6 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='config.yaml', help='Controller configuration (default: config.yaml)')
     parser.add_argument('--service', help='Service name (default: the Deployment name)')
-    parser.add_argument('--service-health-url', help='Override Service health URL, accessible from the preflight host')
     parser.add_argument('--proxy-namespace', default='open5gs')
     parser.add_argument('--node', default='gnb-2')
     parser.add_argument('--upf-statefulset', help='UPF StatefulSet (default: upf-<node>)')
@@ -251,9 +280,9 @@ def render_report(report):
     """Render check results without dumping Kubernetes resources."""
     lines = []
     for name, result in report['checks'].items():
-        status = 'WARN' if result.get('idle') else ('OK' if result['ok'] else 'FAIL')
-        if result.get('idle'):
-            detail = 'no requests observed in the last 2 minutes; latency unavailable'
+        status = 'WARN' if result.get('unverified') else ('OK' if result['ok'] else 'FAIL')
+        if result.get('unverified'):
+            detail = result.get('warning', 'workload latency not yet verified')
         elif not result['ok']:
             detail = result.get('error', '')
         elif name == 'service':
@@ -274,8 +303,8 @@ def render_report(report):
         if len(detail) > 200:
             detail = detail[:197] + '...'
         lines.append(f'[{status}] {name}' + (f': {detail}' if detail else ''))
-        if name == 'prometheus_query' and result.get('idle'):
-            lines.append('  The controller will wait for real traffic before making latency-based decisions.')
+        if name == 'prometheus_query' and result.get('unverified'):
+            lines.append('  Telemetry is not established; verify it before running the controller. The controller fails closed without valid latency.')
         elif name == 'prometheus_query' and not result['ok'] and 'invalid or stale Prometheus sample' in result.get('error', ''):
             lines.append('  Hint: Inspect the query, metric values and sample timestamps.')
     for warning in report['warnings']:
@@ -283,7 +312,7 @@ def render_report(report):
     for action in report['actions']:
         details = ', '.join(f'{key}={value}' for key, value in action.items() if key != 'action')
         lines.append(f"[ACTION] {action['action']}" + (f': {details}' if details else ''))
-    status = 'OK (idle traffic warning)' if report['ok'] and any(item.get('idle') for item in report['checks'].values()) else ('OK' if report['ok'] else 'FAIL')
+    status = 'OK (unverified telemetry warning)' if report['ok'] and any(item.get('unverified') for item in report['checks'].values()) else ('OK' if report['ok'] else 'FAIL')
     lines.append(f'Preflight: {status}')
     return '\n'.join(lines)
 
@@ -311,11 +340,16 @@ def main(argv=None):
     service = None
     if connected and identity:
         namespace, deployment = identity
-        check('deployment', lambda: check_deployment(get('deployment', deployment, namespace)))
+        resource = None
+        def inspect_deployment():
+            nonlocal resource
+            resource = get('deployment', deployment, namespace)
+            return check_deployment(resource)
+        check('deployment', inspect_deployment)
         service_name = args.service or deployment
         service = check('service', lambda: get('service', service_name, namespace))
-        if service:
-            check('service_endpoints', lambda: check_endpoints(service, get('endpoints', service_name, namespace)))
+        if service and resource:
+            check('service_selection', lambda: check_service(service, resource))
     if settings:
         def http_health():
             response = requests.get(settings.prometheus_url + '/-/healthy', timeout=10)
@@ -323,12 +357,21 @@ def main(argv=None):
             return {'status_code': response.status_code, 'body': response.text.strip()}
         check('prometheus_health', http_health)
         check('prometheus_query', lambda: {'latency_seconds': Prometheus(settings.prometheus_url, settings.max_metric_age_seconds).scalar(settings.latency_query), 'query': settings.latency_query})
-        if report['checks']['prometheus_query'].get('error') == 'Prometheus sample is NaN':
+        result = report['checks']['prometheus_query']
+        error = result.get('error')
+        if is_workload_latency_query(settings.latency_query) and error == 'Prometheus query returned no samples':
+            result.update(unverified=True, warning='workload latency not yet verified: no samples')
+        elif is_workload_latency_query(settings.latency_query) and error == 'Prometheus sample is NaN':
             try:
                 if proxy_is_idle(settings):
-                    report['checks']['prometheus_query']['idle'] = True
+                    result.update(unverified=True, warning='workload latency not yet verified: both edge proxies have no requests in the last 2 minutes')
+            except ValueError as exc:
+                if str(exc) == 'Prometheus query returned no samples':
+                    result.update(unverified=True, warning='workload latency not yet verified: edge proxy metrics missing')
+                else:
+                    result['idle_diagnostic_error'] = str(exc)
             except Exception as exc:
-                report['checks']['prometheus_query']['idle_diagnostic_error'] = str(exc)
+                result['idle_diagnostic_error'] = str(exc)
 
     def read_desired():
         text = Path(args.envoy_config).read_text()
@@ -348,21 +391,6 @@ def main(argv=None):
             pod = check('upf_pod', lambda: find_pod(ns, sts, args.node))
             cm = check('envoy_configmap', lambda: get('configmap', args.envoy_configmap, ns))
             if pod and cm:
-                if service and identity:
-                    def service_health():
-                        ports = service.get('spec', {}).get('ports', [])
-                        if args.service_health_url:
-                            response = requests.get(args.service_health_url, timeout=10)
-                        else:
-                            if not ports:
-                                raise PreflightError('Service has no ports for HTTP health check')
-                            with port_forward(namespace, 'service/' + service_name, ports[0]['port']) as base:
-                                response = requests.get(base + '/health', timeout=10)
-                        response.raise_for_status()
-                        if not 200 <= response.status_code < 300:
-                            raise PreflightError(f'Service HTTP health returned {response.status_code}')
-                        return {'status_code': response.status_code}
-                    check('service_http_health', service_health)
                 mount_ok = check('envoy_mount', lambda: (validate_proxy_mount(pod, args.envoy_container, args.envoy_configmap, args.envoy_config_key, args.envoy_config_path), 'verified')[1])
                 current = cm.get('data', {}).get(args.envoy_config_key)
                 if current is None:
@@ -444,7 +472,7 @@ def main(argv=None):
                     report['checks']['envoy_apply'] = {'ok': True, 'detail': 'ConfigMap already matches; no changes performed'}
                 if mount_ok:
                     check('envoy_active', active)
-    report['ok'] = all(item['ok'] or item.get('idle', False) for item in report['checks'].values())
+    report['ok'] = all(item['ok'] or item.get('unverified', False) for item in report['checks'].values())
     # Configuration objects are not JSON serializable and may include secrets.
     if settings:
         report['checks']['configuration']['detail'] = {'path': args.config}

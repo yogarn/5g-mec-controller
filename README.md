@@ -6,15 +6,15 @@ For step-by-step setup, HPA and controller runs, resets, and result collection, 
 
 ## Face-detection workload
 
-`apps/face-detection/` contains the app adapted from the Open5GS testbed's `05-edge-apps/face-detection`, its Dockerfile, and a dedicated Deployment and Service manifest. The manifest removes the original edge node selector and uses the digest-pinned image and resource values from the testbed's face benchmark draft. The image predates the local source changes; build and publish a new image to deploy this source. Verify registry reachability on eligible nodes. The Dockerfile installs unpinned dependencies and runs Flask's development server.
+`apps/face-detection/` contains the app adapted from the Open5GS testbed's `05-edge-apps/face-detection`, its Dockerfile, and a dedicated Deployment and Service manifest. The manifest removes the original edge node selector and uses the digest-pinned image and resource values from the testbed's face benchmark draft. The configured registry is `10.34.211.140:30500`; the previously referenced `10.34.211.194:30500` was unreachable at the latest check. The image predates the local source changes; build and publish a new image to deploy this source. Verify registry reachability on eligible nodes. The Dockerfile installs unpinned dependencies and runs Flask's development server.
 
-The controller reads the configured manifest but does not deploy it. Review the namespace, image, resource settings, routing and node eligibility before a separate, authorized deployment. The app accepts `POST /detect` with a multipart `image` field, returns face bounding boxes, and exposes `/health`.
+The controller reads the configured manifest but does not deploy it. The project workload is a separate Deployment and Service named `mec-placement-face-detection` in `services`; the similarly named workload in `open5gs` is a different resource and must be left untouched. After authorization, verify that `services` exists and the names are available, then create the workload with `kubectl create -f apps/face-detection/manifest.yaml`. Review the image, resources, routing and node eligibility first. The Deployment desires one replica; during cold start it can have zero running or ready pods while Kubernetes creates it. This is not scale-to-zero: the controller and baseline HPA have a minimum of one replica and a maximum of three. Wait for readiness and verify the request path before running traffic. The app accepts `POST /detect` with a multipart `image` field, returns face bounding boxes, and exposes `/health`.
 
 Prometheus can supply proxy-observed response time; app-side inference timing is not required. Configure `latency_query` from the actual Envoy metrics and labels for detection traffic, checking units and aggregation. Proxy time excludes client-to-proxy network latency and may include upstream waiting and network time; validate the exact Envoy metric's boundaries. Avoid duplicate proxy observations and health traffic. Measure end-to-end latency independently at the UE.
 
-For the gnb-2 calibration, `apps/face-detection/envoy-gnb2.yaml` replaces the UPF's static Envoy configuration and routes port 8000 to this Service; it does not preserve the previous proxy routes. The live UPF was restarted to activate it. The pre-change ConfigMap and StatefulSet snapshot are on `core` under `/home/member/mec-face-calibration-14UkXB/`; restoring the ConfigMap and restarting the UPF requires a planned interruption. The live workload was temporarily pinned to gnb-2 for calibration, unlike the unpinned manifest.
+The historical gnb-2 calibration used an Envoy route to the `open5gs` workload; that live route is not the new `services` workload. The supplied `apps/face-detection/envoy-gnb2.yaml` instead routes port 8000 to `mec-placement-face-detection.services.svc.cluster.local` and replaces the UPF's static Envoy configuration without preserving previous routes. UPFs and their ConfigMaps remain in `open5gs`. Switching the live route requires an authorized ConfigMap change and UPF rollout, with an interruption and recovery plan; merely creating the Service does not switch traffic. The pre-calibration ConfigMap and StatefulSet snapshot are on `core` under `/home/member/mec-face-calibration-14UkXB/`. The historical workload was temporarily pinned to gnb-2, unlike the unpinned manifest.
 
-The supplied Prometheus query observes the gnb-2 face Envoy listener only, including any non-detection requests sent to that listener; other proxies and direct requests are not counted. Envoy's duration histogram is in milliseconds; the query converts its p95 to seconds. Scrape and histogram windows introduce lag and quantile approximation; no traffic can produce a non-finite p95. This query does not measure UE-to-proxy time or all-attempt SLO attainment.
+The supplied Prometheus query aggregates the `mec_placement_face` Envoy listener across gnb-2 and gnb-3 UPFs, including non-detection requests on those listeners; direct requests and other proxies are not counted. The old `face_detection` listener is excluded. New-prefix count series appear after each edge Envoy rollout, and request samples require traffic. The query returns no result until both sites expose count series; even then, verify both routes and telemetry coverage. Envoy's duration histogram is in milliseconds; the query converts its p95 to seconds. Scrape and histogram windows introduce lag and quantile approximation; no traffic can produce a non-finite p95. This query does not measure UE-to-proxy time or all-attempt SLO attainment.
 
 The 500 ms SLO in `config.yaml` is an exploratory proxy-path target, not a validated production objective; mutation remains disabled.
 
@@ -46,14 +46,14 @@ Before an authorized run, use the same workload, image, resources, replica bound
 
 ```sh
 mkdir baseline-state
-kubectl -n open5gs get deployment mec-placement-face-detection -o yaml > baseline-state/deployment-before.yaml
-kubectl -n open5gs get hpa -o yaml > baseline-state/hpas-before.yaml
-kubectl -n open5gs get hpa
-kubectl -n open5gs top pods -l app=mec-placement-face-detection
-kubectl -n open5gs get hpa mec-placement-face-detection-baseline
+kubectl -n services get deployment mec-placement-face-detection -o yaml > baseline-state/deployment-before.yaml
+kubectl -n services get hpa -o yaml > baseline-state/hpas-before.yaml
+kubectl -n services get hpa
+kubectl -n services top pods -l app=mec-placement-face-detection
+kubectl -n services get hpa mec-placement-face-detection-baseline
 ```
 
-The last command must report NotFound; if it exists, stop and inspect ownership. After checking Metrics Server, workload readiness and the preflight results, create the baseline HPA with `kubectl create -f experiments/hpa-baseline.yaml`. Inspect `kubectl -n open5gs describe hpa mec-placement-face-detection-baseline` for valid CPU metrics and scaling conditions. Run the same `experiments.experiment` schedule and `experiments.summarize` commands documented below; retain HPA status/events and pod resources separately.
+The last command must report NotFound; if it exists, stop and inspect ownership. After checking Metrics Server, workload readiness and the preflight results, create the baseline HPA with `kubectl create -f experiments/hpa-baseline.yaml`. Inspect `kubectl -n services describe hpa mec-placement-face-detection-baseline` for valid CPU metrics and scaling conditions. Run the same `experiments.experiment` schedule and `experiments.summarize` commands documented below; retain HPA status/events and pod resources separately.
 
 After the run, capture the HPA status, then delete **only this experiment's** HPA with `kubectl delete -f experiments/hpa-baseline.yaml` after confirming it has not been replaced or taken over. Deleting the HPA does not restore the replica count or placement. With all writers stopped, compare the live Deployment with the captured state and restore only approved changed fields, then verify readiness. Remove any controller-added node preference before the baseline only as part of an approved, captured setup; do not assume disabling the controller removes it.
 
@@ -95,6 +95,8 @@ Provisioning prints a short subscriber count by default; use `--verbose` for the
 
 From a host with `kubectl` access to the testbed, check the workload, proxy, and Prometheus without changing the cluster:
 
+The workload is checked in `services`; the UPF StatefulSet and Envoy ConfigMap remain in `open5gs`, the preflight proxy namespace default. A newly created Deployment with desired replicas 1 may temporarily have zero running or ready pods during cold start; this alone is not scale-to-zero. Wait for a ready endpoint before running a campaign.
+
 ```sh
 python3 -m experiments.preflight --upf-statefulset upf-gnb-2 \
   --envoy-container envoy --envoy-configmap upf-gnb-2-envoy-config \
@@ -103,9 +105,9 @@ python3 -m experiments.preflight --upf-statefulset upf-gnb-2 \
 
 The command prints concise status checks and exits nonzero on failure; use `--json` for the full machine-readable report. In an interactive terminal, if the Envoy configuration differs and other prerequisites are satisfied, it offers to back up the ConfigMap under `results/` and redeploy the UPF after confirmation. Redeployment replaces proxy routes and interrupts 5G traffic. Non-interactive changes require `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. `OnDelete` does not reload the static configuration automatically.
 
-This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The current controller latency query only covers gnb-2; the gnb-3 proxy route and complete service-wide telemetry must be configured and verified before interpreting a two-site run.
+This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The controller query aggregates new-prefix series across the two UPFs, but each site must be rolled out and verified before interpreting it as complete service-wide telemetry.
 
-An idle service can yield no finite latency histogram. For the supplied face-proxy query, preflight reports a warning rather than failure only when the latency is NaN and its request counter confirms zero traffic in the last two minutes. The JSON report retains the failed latency check with `idle: true`, while the overall result can be OK with a warning. Other telemetry errors still fail. The controller does not invent a latency or scale without one; it resumes latency-based decisions when real requests arrive and Prometheus reports a finite value. Idle traffic does not prove the full path is ready for a campaign.
+An idle service can yield no finite latency histogram. Preflight reports a warning when the new workload's telemetry is not yet established, including missing metrics during rollout or confirmed zero traffic. The JSON report retains the failed latency check with `unverified: true`, while the overall result can be OK with a warning. Other telemetry errors still fail. The controller does not invent a latency or scale without one; it resumes latency-based decisions when real requests arrive and Prometheus reports a finite value. An unverified or idle warning does not prove the full path is ready for a campaign.
 
 ## Automated UE ramp and switching
 

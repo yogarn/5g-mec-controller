@@ -12,7 +12,7 @@ static_resources:
             - name: envoy.filters.network.http_connection_manager
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: face_detection
+                stat_prefix: mec_placement_face
                 route_config:
                   name: face_detection_route
                   virtual_hosts:
@@ -39,7 +39,7 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: mec-placement-face-detection.open5gs.svc.cluster.local
+                      address: mec-placement-face-detection.services.svc.cluster.local
                       port_value: 5000
 admin:
   address:
