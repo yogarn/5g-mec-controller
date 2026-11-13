@@ -1,0 +1,33 @@
+# Calibration applies only to the gnb-2 face workload and proxy path below.
+# The manifest must contain exactly one apps/v1 Deployment. It is read, not applied.
+manifest: apps/face-detection/manifest.yaml
+prometheus_url: "http://10.34.211.140:30990"
+latency_query: 'histogram_quantile(0.95, sum by (le) (rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m]))) / 1000'
+# Calibration, 2026-11-13: one pod on gnb-2, 500m CPU limit, 512Mi memory
+# limit, 100m CPU / 128Mi memory requests. Client on core reached the UPF
+# Envoy directly, not through a UE. Fixed 547x365 JPEG; SHA-256:
+# 5b2e247d82ea373c50d8cd826abc4487634fe6e06b770e6d8278ab0476485e17
+# SLO: >=95% of all attempts succeed within 500ms, measured at the client.
+# Closed-loop clients; 5s warm-up and 15-20s measurement per tier.
+#
+# Concurrent clients | Successful requests/s | p95 client RT | SLO attainment
+#                  1 |                 21.0 |         73ms  | 100%
+#                  2 |            17.4-18.5 |    163-185ms  | 100%
+#                  3 |            15.3-15.5 |    275-291ms  | 100%
+#                  4 |                 10.7 |        532ms  | 91.1%
+#
+# All attempts returned HTTP 200. Levels 2 and 3 were repeated; 3 was the
+# highest tested passing concurrency, 4 failed, and 2 is a cautious starting
+# point. The 21 rps maximum observed is not a sustained capacity estimate.
+# Raw attempts: ssh://core/home/member/mec-face-calibration-14UkXB/
+#   attempts.jsonl and refinement.jsonl.
+#
+# The controller uses Envoy histogram p95, not the client-measured SLO above;
+# its query includes all traffic on the gnb-2 face listener and excludes UE
+# network latency. Recalibrate for the actual route and image workload.
+# Mutation is disabled until the SLO and metric coverage are validated.
+slo_seconds: 0.5
+min_replicas: 1
+max_replicas: 3
+mode: scaling-only
+mutate: false
