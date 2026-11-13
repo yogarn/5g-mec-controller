@@ -59,7 +59,7 @@ def run(args):
         lifecycle = OwnedUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
         try:
             for phase in phases:
-                print(f"Switching {phase['phase']}: {phase['gnb2_ues']} gnb-2, {phase['gnb3_ues']} gnb-3", flush=True)
+                print(f"[..] {phase['phase']}: switching to {phase['gnb2_ues']} gNB-2, {phase['gnb3_ues']} gNB-3", flush=True)
                 g2, g3 = lifecycle.switch_counts(phase['workload_ue'], phase['gnb2_ues'], phase['gnb3_ues'])
                 if len(g2) != phase['gnb2_ues'] or len(g3) != phase['gnb3_ues']:
                     raise RuntimeError('registered UE count differs from requested split')
@@ -90,9 +90,12 @@ def run(args):
                       'generation_duration_s': args.phase_duration, 'end_time': time.time(),
                       'attempts': sum(ue['attempts'] for ue in per_ue),
                       'successes': sum(ue['successes'] for ue in per_ue), 'per_ue': per_ue})
-                print(f"Completed {phase['phase']}: {sum(ue['attempts'] for ue in per_ue)} attempts", flush=True)
+                attempts = sum(ue['attempts'] for ue in per_ue)
+                successes = sum(ue['successes'] for ue in per_ue)
+                print(f"[--] {phase['phase']}: {attempts} requests, {successes} successful, {attempts - successes} failed", flush=True)
         finally:
             lifecycle.close()
+    print(f"Results: {out / 'requests.jsonl'}")
 
 
 def main(argv=None):

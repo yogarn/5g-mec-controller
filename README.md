@@ -87,6 +87,8 @@ python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --app
 
 The command checks the database for existing IMSIs and static IPs and inserts only new subscribers; it never updates or deletes existing records. Authentication values come from the private UE configurations and are not printed. **MongoDB writes are not transactional:** if insertion fails, some subscribers may already have been created. Inspect the database before retrying; resolve partial results manually under the site's recovery procedures. The conflict check cannot prevent races with other writers, so exclusive provisioning is required. Successful insertion does not prove UE registration, IP pool correctness or connectivity; verify those separately.
 
+Provisioning prints a short subscriber count by default; use `--verbose` for the IMSI/DNN/IP list or `--json` for machine-readable output. No authentication keys are printed.
+
 ## Preflight
 
 From a host with `kubectl` access to the testbed, check the workload, proxy, and Prometheus without changing the cluster:
@@ -97,7 +99,7 @@ python3 -m experiments.preflight --upf-statefulset upf-gnb-2 \
   --envoy-config-key envoy.yaml --envoy-config-path /etc/envoy-config/envoy.yaml
 ```
 
-The command emits JSON checks and exits nonzero on failure. Applying a differing Envoy configuration requires `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. Applying replaces the existing proxy routes, and restarting interrupts 5G traffic. Inspect the JSON and backup before a separately authorized change; `OnDelete` does not reload the static configuration automatically.
+The command prints concise status checks and exits nonzero on failure; use `--json` for the full machine-readable report. Applying a differing Envoy configuration requires `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. Applying replaces the existing proxy routes, and restarting interrupts 5G traffic. Inspect the checks and backup before a separately authorized change; `OnDelete` does not reload the static configuration automatically.
 
 This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The current controller latency query only covers gnb-2; the gnb-3 proxy route and complete service-wide telemetry must be configured and verified before interpreting a two-site run.
 

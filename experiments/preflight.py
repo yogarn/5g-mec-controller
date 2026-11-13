@@ -211,6 +211,7 @@ def parse_args(argv=None):
     parser.add_argument('--recovery-dir', help='New, nonexisting directory for the live ConfigMap backup (required for apply)')
     parser.add_argument('--restart-upf', action='store_true', help='Separately opt in to deleting the target UPF pod after apply; interrupts traffic')
     parser.add_argument('--restart-timeout', type=int, default=180)
+    parser.add_argument('--json', action='store_true', help='Print the structured JSON report')
     args = parser.parse_args(argv)
     if args.upf_statefulset is None:
         args.upf_statefulset = f'upf-{args.node}'
@@ -223,6 +224,42 @@ def parse_args(argv=None):
     if args.restart_timeout <= 0:
         parser.error('--restart-timeout must be positive')
     return args
+
+
+def render_report(report):
+    """Render check results without dumping Kubernetes resources."""
+    lines = []
+    for name, result in report['checks'].items():
+        status = 'OK' if result['ok'] else 'FAIL'
+        if not result['ok']:
+            detail = result.get('error', '')
+        elif name == 'service':
+            resource = result.get('detail', {})
+            metadata = resource.get('metadata', {})
+            spec = resource.get('spec', {})
+            detail = ', '.join(f'{key}={value}' for key, value in (
+                ('name', metadata.get('name')), ('namespace', metadata.get('namespace')),
+                ('cluster_ip', spec.get('clusterIP'))) if value is not None)
+        else:
+            detail = result.get('detail', '')
+            if isinstance(detail, dict):
+                detail = ', '.join(f'{key}={value}' for key, value in detail.items()
+                                   if isinstance(value, (str, int, float, bool)))
+            elif isinstance(detail, (tuple, list)):
+                detail = '/'.join(str(value) for value in detail)
+        detail = ' '.join(str(detail).split())
+        if len(detail) > 200:
+            detail = detail[:197] + '...'
+        lines.append(f'[{status}] {name}' + (f': {detail}' if detail else ''))
+        if name == 'prometheus_query' and not result['ok'] and 'invalid or stale Prometheus sample' in result.get('error', ''):
+            lines.append('  Hint: May be no recent traffic; inspect the query and sample timestamps.')
+    for warning in report['warnings']:
+        lines.append(f'[WARN] {warning}')
+    for action in report['actions']:
+        details = ', '.join(f'{key}={value}' for key, value in action.items() if key != 'action')
+        lines.append(f"[ACTION] {action['action']}" + (f': {details}' if details else ''))
+    lines.append(f"Preflight: {'OK' if report['ok'] else 'FAIL'}")
+    return '\n'.join(lines)
 
 
 def main(argv=None):
@@ -364,7 +401,10 @@ def main(argv=None):
         report['checks']['envoy_configmap']['detail'] = {'name': args.envoy_configmap, 'namespace': args.proxy_namespace}
     if isinstance(report['checks'].get('upf_restart', {}).get('detail'), dict):
         report['checks']['upf_restart']['detail'] = {'name': report['checks']['upf_restart']['detail']['metadata']['name'], 'node': args.node}
-    print(json.dumps(report, indent=2, allow_nan=False))
+    if args.json:
+        print(json.dumps(report, indent=2, allow_nan=False))
+    else:
+        print(render_report(report))
     return 0 if report['ok'] else 1
 
 

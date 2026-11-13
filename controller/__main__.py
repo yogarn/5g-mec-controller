@@ -28,11 +28,11 @@ def main():
     while True:
         try:
             controller.run_once()
-        except Exception:
+        except Exception as exc:
             controller.policy.down_since = None
-            logging.exception('Reconciliation failed; no further action in this cycle')
+            logging.error('Reconciliation failed: %s', exc)
             if args.once:
-                raise
+                raise SystemExit(1) from None
         if args.once:
             return
         time.sleep(settings.interval_seconds)

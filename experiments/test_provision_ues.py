@@ -1,9 +1,13 @@
 import copy
+import json
+import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
-from experiments.provision_ues import build_documents, provision
+from experiments.provision_ues import build_documents, main, provision
 
 
 class Collection:
@@ -68,3 +72,38 @@ def test_mismatched_authentication_is_rejected(tmp_path):
     other.write_text(yaml.safe_dump(config))
     with pytest.raises(ValueError, match='authentication'):
         build_documents(path)
+
+
+@pytest.mark.parametrize('apply', [False, True])
+@pytest.mark.parametrize('mode', ['default', 'verbose', 'json'])
+def test_cli_output_is_readable_or_json_without_secrets(tmp_path, monkeypatch, capsys, apply, mode):
+    collection = Collection([])
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.__getitem__.return_value.__getitem__.return_value = collection
+    monkeypatch.setitem(sys.modules, 'pymongo', SimpleNamespace(MongoClient=lambda *a, **kw: client))
+    args = ['--inventory', str(inventory(tmp_path))]
+    if apply:
+        args.append('--apply')
+    if mode != 'default':
+        args.append(f'--{mode}')
+    main(args)
+    output = capsys.readouterr().out
+    action = 'inserted' if apply else 'check-only'
+    if mode == 'default':
+        assert '001015000000001' not in output
+        assert 'site2.testbed' not in output and '10.63.1.101' not in output
+    else:
+        assert ('001015000000001' in output and 'site2.testbed' in output
+                and '10.63.1.101' in output and 'site3.testbed' in output
+                and '10.64.1.101' in output)
+    assert 'a' * 32 not in output and 'b' * 32 not in output and '8000' not in output
+    assert bool(collection.inserted) == apply
+    if mode == 'json':
+        result = json.loads(output)
+        assert result['action'] == action
+        assert result['subscribers'][0]['sst'] == 1
+    else:
+        assert f'Provisioning {action}: 1 subscriber(s)' in output
+        if mode == 'verbose':
+            assert 'IMSI 001015000000001' in output

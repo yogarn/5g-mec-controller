@@ -243,6 +243,11 @@ def main(argv=None):
         ue_results = []
         phases = summarize(args.input, args.slo_ms, ue_results)
         write_results(phases, args.output_prefix, ue_results)
+        print(f'Summarized {len(phases)} phase(s) and {len(ue_results)} per-UE result(s)')
+        print(f'  Phase JSON: {args.output_prefix}.json')
+        print(f'  Phase CSV:  {args.output_prefix}.csv')
+        print(f'  Per-UE JSON: {args.output_prefix}-ues.json')
+        print(f'  Per-UE CSV:  {args.output_prefix}-ues.csv')
     except (OSError, UnicodeError, ValueError) as exc:
         parser.exit(2, f'error: {exc}\n')
 

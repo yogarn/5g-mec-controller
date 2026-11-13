@@ -1,5 +1,7 @@
 import csv
 import json
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
@@ -164,6 +166,22 @@ class SummaryTests(unittest.TestCase):
             summarize.write_results(phases, self.prefix)
         self.assertEqual(json_path.read_text(), 'existing json')
         self.assertFalse(csv_path.exists())
+
+    def test_cli_reports_counts_and_all_output_paths(self):
+        self.source.write_text(''.join(json.dumps(event) + '\n' for event in records()), encoding='utf-8')
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            summarize.main([str(self.source), '--output-prefix', str(self.prefix)])
+        output = stdout.getvalue()
+        self.assertIn('1 phase(s) and 2 per-UE result(s)', output)
+        for suffix in ('.json', '.csv', '-ues.json', '-ues.csv'):
+            self.assertIn(f'{self.prefix}{suffix}', output)
+            self.assertTrue(Path(f'{self.prefix}{suffix}').is_file())
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as exit_status:
+            summarize.main([str(self.source), '--output-prefix', str(self.prefix)])
+        self.assertEqual(exit_status.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), '')
 
     def test_cli_reports_bad_input_without_creating_outputs(self):
         self.source.write_text('not json\n')

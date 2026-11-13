@@ -98,7 +98,7 @@ class PreflightSafetyTests(unittest.TestCase):
                 cli = ['--upf-statefulset', 'upf', '--envoy-container', 'envoy',
                        '--envoy-configmap', 'upf', '--envoy-config-key', 'envoy.yaml',
                        '--envoy-config-path', '/etc/envoy/envoy.yaml', '--envoy-config', str(config),
-                       '--apply-envoy-config', '--recovery-dir', str(recovery), '--restart-upf']
+                       '--apply-envoy-config', '--recovery-dir', str(recovery), '--restart-upf', '--json']
                 out = io.StringIO()
                 with (patch.object(preflight, 'load_settings', return_value=settings),
                       patch.object(preflight, 'workload_identity', return_value=('open5gs', 'app')),
@@ -128,6 +128,65 @@ class PreflightSafetyTests(unittest.TestCase):
                     self.assertEqual(result, 1)
                     self.assertIn('deployment', report['checks']['envoy_apply']['error'])
 
+
+    def test_human_report_shows_checks_warnings_and_actions_without_resource_dump(self):
+        report = {
+            'ok': False,
+            'checks': {
+                'deployment': {'ok': True, 'detail': {'desired': 2, 'ready': 2}},
+                'service': {'ok': True, 'detail': {
+                    'metadata': {'name': 'app', 'namespace': 'open5gs', 'annotations': {'secret': 'hidden'}},
+                    'spec': {'clusterIP': '10.0.0.1', 'ports': [{'port': 80}]}}},
+                'envoy_active': {'ok': False, 'error': 'active configuration differs'},
+                'prometheus_query': {'ok': False, 'error': 'invalid or stale Prometheus sample'},
+            },
+            'warnings': ['UPF was not restarted'],
+            'actions': [{'action': 'configmap_replaced', 'backup': '/tmp/backup'}],
+        }
+        output = preflight.render_report(report)
+        self.assertIn('[OK] deployment: desired=2, ready=2', output)
+        self.assertIn('[OK] service: name=app, namespace=open5gs, cluster_ip=10.0.0.1', output)
+        self.assertIn('[FAIL] envoy_active: active configuration differs', output)
+        self.assertIn('[WARN] UPF was not restarted', output)
+        self.assertIn('[FAIL] prometheus_query: invalid or stale Prometheus sample', output)
+        self.assertIn('May be no recent traffic; inspect the query and sample timestamps', output)
+        self.assertIn('[ACTION] configmap_replaced: backup=/tmp/backup', output)
+        self.assertTrue(output.endswith('Preflight: FAIL'))
+        self.assertNotIn('annotations', output)
+        self.assertNotIn('hidden', output)
+        self.assertNotIn('ports', output)
+
+    def test_default_output_reports_actual_failures(self):
+        out = io.StringIO()
+        with (patch.object(preflight, 'load_settings', side_effect=preflight.PreflightError('bad config')),
+              patch.object(preflight, 'kubectl', side_effect=preflight.PreflightError('cluster unavailable')),
+              patch.object(preflight.Path, 'read_text', side_effect=OSError('missing envoy config')),
+              redirect_stdout(out)):
+            result = preflight.main([])
+        self.assertEqual(result, 1)
+        self.assertIn('[FAIL] configuration: bad config', out.getvalue())
+        self.assertIn('[FAIL] kubernetes: cluster unavailable', out.getvalue())
+        self.assertIn('[FAIL] envoy_source: missing envoy config', out.getvalue())
+        self.assertTrue(out.getvalue().strip().endswith('Preflight: FAIL'))
+
+    def test_json_option_preserves_structured_failure_report(self):
+        out = io.StringIO()
+        with (patch.object(preflight, 'load_settings', side_effect=preflight.PreflightError('bad config')),
+              patch.object(preflight, 'kubectl', side_effect=preflight.PreflightError('cluster unavailable')),
+              patch.object(preflight.Path, 'read_text', side_effect=OSError('missing envoy config')),
+              redirect_stdout(out)):
+            result = preflight.main(['--json'])
+        self.assertEqual(result, 1)
+        self.assertEqual(json.loads(out.getvalue()), {
+            'ok': False,
+            'checks': {
+                'configuration': {'ok': False, 'error': 'bad config'},
+                'kubernetes': {'ok': False, 'error': 'cluster unavailable'},
+                'envoy_source': {'ok': False, 'error': 'missing envoy config'},
+            },
+            'actions': [],
+            'warnings': [],
+        })
 
     def test_running_config_requires_active_matching_resources(self):
         desired = {'static_resources': {'listeners': [{'name': 'listener', 'port': 8000}],

@@ -25,7 +25,7 @@ class FakeUEs:
         self.closed = True
 
 
-def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch):
+def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys):
     bodies = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -54,6 +54,10 @@ def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch):
         thread.join()
         server.server_close()
     phases = summarize.summarize(tmp_path / 'run' / 'requests.jsonl', 500)
+    output = capsys.readouterr().out
+    assert '[..] phase_01:' in output
+    assert 'successful, 0 failed' in output
+    assert f"Results: {tmp_path / 'run' / 'requests.jsonl'}" in output
     assert [phase['phase'] for phase in phases] == ['phase_01', 'phase_02']
     assert all(phase['attempts'] > 0 for phase in phases)
     records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]

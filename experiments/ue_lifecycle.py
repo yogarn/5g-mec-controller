@@ -405,7 +405,11 @@ def _main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--recover', required=True, type=Path, metavar='STATE_DIR')
     args = parser.parse_args()
-    recover_owned_ues(args.recover)
+    try:
+        recover_owned_ues(args.recover)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        parser.exit(2, f'Recovery failed: {exc}\n')
+    print(f'Recovery complete: {args.recover}')
 
 
 if __name__ == '__main__':

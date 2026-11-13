@@ -95,6 +95,8 @@ def main(argv=None):
     parser.add_argument('--inventory', default=str(defaults.INVENTORY), help='private UE inventory YAML')
     parser.add_argument('--database', default='open5gs', help='Open5GS MongoDB database')
     parser.add_argument('--apply', action='store_true', help='insert new subscribers after conflict checks')
+    parser.add_argument('--json', action='store_true', help='print the machine-readable provisioning plan')
+    parser.add_argument('--verbose', action='store_true', help='show each subscriber and session')
     args = parser.parse_args(argv)
     try:
         docs = build_documents(args.inventory)
@@ -108,7 +110,16 @@ def main(argv=None):
                 if args.apply and not isinstance(exc, ValueError):
                     raise RuntimeError('insert may have partially succeeded; inspect the database before retrying') from exc
                 raise
-        print(json.dumps({'action': 'inserted' if args.apply else 'check-only', 'subscribers': plan}, indent=2))
+        action = 'inserted' if args.apply else 'check-only'
+        if args.json:
+            print(json.dumps({'action': action, 'subscribers': plan}, indent=2))
+        else:
+            print(f"Provisioning {action}: {len(plan)} subscriber(s)")
+            if args.verbose:
+                for subscriber in plan:
+                    print(f"  IMSI {subscriber['imsi']}")
+                    for session in subscriber['sessions']:
+                        print(f"    {session['dnn']}: {session['ipv4']}")
     except (OSError, ValueError, RuntimeError, ImportError) as exc:
         parser.exit(2, f'error: {exc}\n')
     except Exception:

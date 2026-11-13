@@ -177,6 +177,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         run(args)
+        print(f'Results: {args.output}')
     except (ValueError, OSError) as exc:
         parser.exit(2, f'error: {exc}\n')
 
