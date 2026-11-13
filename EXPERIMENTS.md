@@ -4,7 +4,9 @@ Run commands from the **repository root**, not from `experiments/`. This runbook
 
 ## Stop: verify readiness first
 
-Verify the direct NodePort path independently from both gNBs. The controller reads successful full-response UE p90 from the single telemetry collector; this does not establish the 95%-of-all-attempts SLO. Keep mutation disabled until both UE paths, telemetry coverage, and calibration are verified.
+Verify the direct NodePort path independently from both gNBs. The controller targets the actual elapsed-time p90 of all UE attempts, including failures and timeouts, from the single telemetry collector. Fast failures can lower this p90; monitor failures separately. Keep mutation disabled until both UE paths, telemetry coverage, and policy are validated.
+
+The current testbed's core, gNB-2 and gNB-3 UPFs were rolled out without their Envoy sidecars and 8000/30090 redirect rules. The old Envoy ConfigMaps and Prometheus scrape job remain as unused references; applying older UPF manifests can restore the sidecars and redirects. Recovery snapshots from the smoke test are under `/home/member/5g-mec-telemetry-recovery/smoke-39TIpOuh` on core. The currently allocated application and collector NodePorts are 30998 and 31669 respectively; inspect the live Services before each run because allocated ports can change.
 
 The default schedule is two 30-second phases with one UE per site. It is a **connectivity smoke test**, not a justified research campaign. The runner stops and reattaches UEs between phases; it does not perform 5G handover. Closed-loop UE counts are not fixed offered request rates.
 
@@ -81,11 +83,11 @@ The copied Prometheus manifest uses NodePort 30990; resolve any port collision i
 
 Supply both `--telemetry-url http://NODE_IP:COLLECTOR_NODEPORT/observations` and `--telemetry-token-file PATH` to either UE runner. Without both options, telemetry is disabled. Delivery and drop totals appear on stderr; compare them with JSONL attempts.
 
-The rolling window uses collector arrival time, not request start time. Delivery loss, queue overflow, and collector restart skew coverage; counts are partial while `ue_request_window_complete` is zero, and p90 is omitted until the window is complete. The p90 is nearest-rank over successful requests, not an all-attempt SLO. Failures are represented by attempts minus successes. One replica is essential: per-replica p90 values cannot be aggregated into a global p90.
+The rolling window uses collector arrival time, not request start time. Delivery loss, queue overflow, and collector restart skew coverage; counts are partial while `ue_request_window_complete` is zero, and both p90 gauges are omitted until the window is complete. `ue_request_attempt_duration_p90_seconds` is nearest-rank over all attempts, using their actual duration without penalties; `ue_request_duration_p90_seconds` remains successful-only. Failures are attempts minus successes. One replica is essential: per-replica p90 values cannot be aggregated into a global p90.
 
 Each UE observation contains `ue_ip`, full-response `duration_ms`, `http_status` (null if no response status was received), and `success`. Success remains separate because reading a response can fail after a 2xx status. The collector converts milliseconds to seconds for its existing Prometheus p90 and SLO metrics. The observation format is not compatible with the previous collector image; update the collector and UE code together.
 
-Protect the collector network and token: payload IPs are client asserted and do not authenticate UEs or prove attachment. Before any live mutation, verify NodePort reachability and telemetry source/payload at both gNBs, a known SMF-IP-to-AMF-gNB join (gNB-3 remains unverified), scrape health, delivery loss, and p90 against raw JSONL. Unknown or stale mappings contribute only to global metrics. Keep mutation disabled if any check fails.
+Protect the collector network and token: payload IPs are client asserted and do not authenticate UEs or prove attachment. Before any live mutation, reverify NodePort reachability and telemetry source/payload at both gNBs, the SMF-IP-to-AMF-gNB join, scrape health, delivery loss, and p90 against raw JSONL. Unknown or stale mappings contribute only to global metrics. Keep mutation disabled if any check fails.
 
 
 Before the first run, capture the current Deployment and HPA state. Use a new directory for each campaign; if `mkdir` fails, stop and choose a different name:
@@ -104,7 +106,7 @@ Review existing HPAs, controller processes, Deployment replicas, node selectors,
 
 ## 2. UE host setup
 
-**On the intended UE host**, log in separately. If the checkout does not exist, create its parent and clone it; `git clone` refuses an existing destination:
+**On the UE host** (`member@10.34.211.6`), log in separately. The former `10.34.7.38` host is retired. If the checkout does not exist, create its parent and clone it; `git clone` refuses an existing destination:
 
 ```sh
 mkdir -p ~/skripsi_yoga
@@ -115,13 +117,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If the checkout already exists, `cd` into it and use `git pull --ff-only` instead of cloning. Use the same revision on both hosts. Install UERANSIM and prepare the existing subscriber pool and a private inventory; the expected default paths are:
+If the checkout is a Git clone, use `git pull --ff-only`; the smoke-test copy was transferred without `.git`, so synchronize it deliberately instead. Use the same revision on both hosts. The current UE host's private assets can be inspected with:
 
 ```sh
 ls -l ~/.config/5g-mec/ue-inventory.yaml
-ls -l ~/.config/5g-mec/face.jpg
-ls -l ~/ueransim/build/nr-ue
+ls -l ~/.config/5g-mec/smoke.png
+ls -l ~/5g-ai-edge/ueransim/build/nr-ue
 ```
+
+On the current UE host, pass `/home/member/5g-ai-edge/ueransim/build/nr-ue` with `--nr-ue` and `~/.config/5g-mec/smoke.png` with `--image`. The 64×64 synthetic image is for connectivity checks, not representative performance measurements. The private inventory contains one reserved subscriber with paired site configurations; protect it and expand it only using verified reservations.
+
+For a representative workload, pass `--image /path/to/image-directory`. Supported image filenames are sorted and assigned by subscriber index modulo the image count, so images are reused when UEs outnumber them and a subscriber retains its image across phases. `run.json` records names, hashes and assignments; each request record identifies its image. Use the same directory and assignments in matched runs.
+
+The eight selected images in `apps/face-detection/images` are from [Syn-Vis-v0](https://huggingface.co/datasets/retowyss/Syn-Vis-v0), Reto Wyss (2025), revision `100262732989e77f38cd831d70a376a93735006a`. Its dataset card dedicates individual images to CC0 and licenses the dataset compilation/documentation under CC-BY-SA 4.0; retain provenance and check the source terms. These 1024×1024 headshots are synthetic, female-presenting CGI portraits and are not representative of all real-world faces. The images are unchanged from the source; record their hashes and keep the image set fixed across compared runs.
 
 If any path differs, set the corresponding `--ue-config`, `--image` or `--nr-ue` option. The inventory schema and first-time subscriber provisioning instructions are in `README.md`. The insert-only provisioning tool refuses existing IMSIs/IPs; **do not re-provision an existing pool**. Confirm the UE host has no unrelated running `nr-ue` processes, the chosen subscribers are free, and both site's registered sessions and packet paths work before load testing.
 

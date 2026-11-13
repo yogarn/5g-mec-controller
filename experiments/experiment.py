@@ -36,20 +36,37 @@ def run(args):
             raise ValueError('invalid URL port')
     except ValueError as exc:
         raise ValueError(f'invalid URL port: {exc}') from exc
-    image = Path(args.image).read_bytes()
-    if not image:
-        raise ValueError('image is empty')
-    boundary = 'mec-face-' + hashlib.sha256(image).hexdigest()[:32]
-    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="image"\r\n'
-            f'Content-Type: application/octet-stream\r\n\r\n').encode() + image + f'\r\n--{boundary}--\r\n'.encode()
-    headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
+    image_path = Path(args.image)
+    if image_path.is_dir():
+        paths = sorted(path for path in image_path.iterdir()
+                       if path.is_file() and path.suffix.lower() in
+                       {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif', '.tif', '.tiff'})
+    else:
+        paths = [image_path]
+    if not paths:
+        raise ValueError('image directory contains no image files')
+    images = []
+    for path in paths:
+        image = path.read_bytes()
+        if not image:
+            raise ValueError(f'image is empty: {path}')
+        digest = hashlib.sha256(image).hexdigest()
+        boundary = 'mec-face-' + digest[:32]
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="image"\r\n'
+                f'Content-Type: application/octet-stream\r\n\r\n').encode() + image + f'\r\n--{boundary}--\r\n'.encode()
+        images.append({'filename': path.name, 'sha256': digest, 'bytes': len(image),
+                       'body': body, 'headers': {'Content-Type': f'multipart/form-data; boundary={boundary}'}})
+    assignments = [i % len(images) for i in range(max(phase['workload_ue'] for phase in phases))]
     out = Path(args.output_dir)
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     metadata = {'url': args.url, 'schedule': phases, 'phase_duration_s': args.phase_duration,
-                'timeout_s': args.timeout, 'image_sha256': hashlib.sha256(image).hexdigest(),
-                'image_bytes': len(image), 'ue_config': str(Path(args.ue_config).resolve()),
+                'timeout_s': args.timeout, 'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
                 'workload': 'closed-loop', 'switching': 'stop-and-reattach; not handover'}
+    metadata['images'] = [{key: image[key] for key in ('filename', 'sha256', 'bytes')} for image in images]
+    metadata['image_assignments'] = [
+        {'ue_index': index, 'image_index': image_index, 'filename': images[image_index]['filename']}
+        for index, image_index in enumerate(assignments)]
     if telemetry:
         metadata['telemetry_url'] = args.telemetry_url
     (out / 'run.json').write_text(json.dumps(metadata, indent=2) + '\n')
@@ -67,8 +84,10 @@ def run(args):
                 g2, g3 = lifecycle.switch_counts(phase['workload_ue'], phase['gnb2_ues'], phase['gnb3_ues'])
                 if len(g2) != phase['gnb2_ues'] or len(g3) != phase['gnb3_ues']:
                     raise RuntimeError('registered UE count differs from requested split')
-                selected = [(group, ue['ip']) for group, ues in (('gnb-2', g2), ('gnb-3', g3)) for ue in ues]
-                publisher = TelemetryPublisher(telemetry, [source for _, source in selected]) if telemetry else None
+                selected = [(group, ue['ip'], index)
+                            for index, (group, ue) in enumerate(
+                                (group, ue) for group, ues in (('gnb-2', g2), ('gnb-3', g3)) for ue in ues)]
+                publisher = TelemetryPublisher(telemetry, [source for _, source, _ in selected]) if telemetry else None
                 start = time.time()
                 deadline = time.monotonic() + args.phase_duration
                 emit({'event': 'phase_start', **phase, 'start_time': start,
@@ -76,21 +95,24 @@ def run(args):
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}
                           for group, ues in (('gnb-2', g2), ('gnb-3', g3)) for ue in ues]})
 
-                def worker(group, source):
+                def worker(group, source, ue_index):
+                    image = images[assignments[ue_index]]
                     count = successes = 0
                     while time.monotonic() < deadline:
-                        record = request_with_telemetry(attempt, publisher, url, 'POST', body, headers, source, args.timeout)
+                        record = request_with_telemetry(attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout)
                         count += 1
                         successes += record['success']
                         emit({'event': 'request', 'phase': phase['phase'], 'group': group,
                               'source_address': source, 'url': args.url, 'method': 'POST',
+                              'ue_index': ue_index, 'image_index': assignments[ue_index],
+                              'image_filename': image['filename'],
                               'attempt': count, **record})
                     return {'group': group, 'source_address': source,
                             'attempts': count, 'successes': successes}
 
                 try:
                     with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-                        futures = [executor.submit(worker, group, source) for group, source in selected]
+                        futures = [executor.submit(worker, group, source, index) for group, source, index in selected]
                         per_ue = [future.result() for future in futures]
                 finally:
                     if publisher:
@@ -110,7 +132,7 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', required=True, help='Face-detection URL using a reachable Kubernetes node IP and Service NodePort, e.g. http://NODE_IP:NODEPORT/detect')
-    parser.add_argument('--image', default=str(defaults.IMAGE), help='Fixed image file sent as multipart field image')
+    parser.add_argument('--image', default=str(defaults.IMAGE), help='Image file or directory of JPG, PNG, BMP, WebP, GIF or TIFF files; assigned in sorted order')
     parser.add_argument('--ue-config', default=str(defaults.INVENTORY), help='Private UE inventory YAML')
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
     parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb2:gnb3 counts, comma separated')

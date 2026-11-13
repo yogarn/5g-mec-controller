@@ -6,10 +6,11 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from collector.server import Collector, load_settings as load_collector_settings
 from experiments import preflight
 
 
-QUERY = 'ue_request_duration_p90_seconds{job="ue-telemetry"}'
+QUERY = 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 DEPLOYMENT = {'spec': {'replicas': 1, 'template': {
     'metadata': {'labels': {'app': 'face'}},
     'spec': {'containers': [{'name': 'face', 'ports': [{'name': 'http', 'containerPort': 5000}]}]}}}}
@@ -89,6 +90,30 @@ class PreflightTests(unittest.TestCase):
         code, text = self.run_preflight(values, ValueError('Prometheus query returned no samples'), json_output=False)
         self.assertIn('[WARN] prometheus_query:', text)
         self.assertIn('fails closed', text)
+
+    def test_all_attempt_latency_with_failure_only_traffic_is_verified(self):
+        collector = Collector(load_collector_settings('collector/config.yaml'))
+        for duration, status in [(100, None), (800, 503), (200, 200)]:
+            self.assertTrue(collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': duration,
+                                              'http_status': status, 'success': False}))
+        metrics = dict(line.split(' ', 1) for line in collector.metrics().splitlines()
+                       if line and not line.startswith('#') and '{' not in line)
+        self.assertEqual(metrics['ue_request_window_successes'], '0')
+        values = {'up': 1, 'ue_request_window_complete': float(metrics['ue_request_window_complete']),
+                  'ue_request_window_attempts': float(metrics['ue_request_window_attempts'])}
+        code, report = self.run_preflight(values, latency=float(metrics[QUERY.split('{')[0]]))
+        self.assertEqual(code, 0)
+        self.assertEqual(report['checks']['prometheus_query']['detail'],
+                         {'latency_seconds': 0.8, 'query': QUERY})
+        self.assertFalse(report['checks']['prometheus_query'].get('unverified', False))
+
+    def test_old_success_only_query_is_not_treated_as_collector_idle(self):
+        values = {'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 0}
+        code, report = self.run_preflight(
+            values, ValueError('Prometheus query returned no samples'),
+            query='ue_request_duration_p90_seconds{job="ue-telemetry"}')
+        self.assertEqual(code, 1)
+        self.assertFalse(report['checks']['prometheus_query'].get('unverified', False))
 
     def test_missing_latency_only_idle_when_collector_is_healthy(self):
         no_samples = ValueError('Prometheus query returned no samples')

@@ -154,6 +154,9 @@ class Collector:
                  f'ue_telemetry_overflow_evictions_total {overflow}']
         if complete and successes:
             lines.append(f'ue_request_duration_p90_seconds {successes[math.ceil(0.9 * len(successes)) - 1]}')
+        if complete and samples:
+            durations = sorted(duration for _, duration, _, _ in samples)
+            lines.append(f'ue_request_attempt_duration_p90_seconds {durations[math.ceil(0.9 * len(durations)) - 1]}')
         counts = Counter(node for _, _, _, node in samples)
         for node in self.settings['gnb_nodes'].values():
             lines.append(f'ue_request_node_window_attempts{{node="{node}"}} {counts[node]}')

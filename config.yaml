@@ -2,8 +2,8 @@
 # The manifest must contain exactly one apps/v1 Deployment. It is read, not applied.
 manifest: apps/face-detection/manifest.yaml
 prometheus_url: "http://10.34.211.140:30990"
-latency_query: 'ue_request_duration_p90_seconds{job="ue-telemetry"}'
-# Collector p90 is emitted only for complete windows with successful requests.
+latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
+# Collector p90 includes every measured attempt and requires a complete, nonempty window.
 # Calibration, 2026-11-13: one pod on gnb-2, 500m CPU limit, 512Mi memory
 # limit, 100m CPU / 128Mi memory requests. Client on core reached the UPF
 # Envoy directly, not through a UE. Fixed 547x365 JPEG; SHA-256:
@@ -23,7 +23,8 @@ latency_query: 'ue_request_duration_p90_seconds{job="ue-telemetry"}'
 # Raw attempts: ssh://core/home/member/mec-face-calibration-14UkXB/
 #   attempts.jsonl and refinement.jsonl.
 #
-# The controller uses successful-request p90, not the all-attempt SLO above.
+# The controller uses all-attempt p90, not the success-based SLO above;
+# fast failures can lower p90, so monitor failures separately.
 # Recalibrate and verify delivery coverage for the actual UE routes and workload.
 # Mutation is disabled until the SLO and metric coverage are validated.
 slo_seconds: 0.5

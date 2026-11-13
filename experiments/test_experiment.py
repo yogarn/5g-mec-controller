@@ -1,7 +1,9 @@
 import argparse
+import hashlib
 import http.server
 import json
 import threading
+import time
 
 import pytest
 
@@ -92,3 +94,68 @@ def test_cli_requires_explicit_nodeport_url(tmp_path, monkeypatch):
         experiment.main(['--armed'])
     assert error.value.code == 2
     assert not (tmp_path / 'results').exists()
+
+
+def test_directory_images_assigned_by_subscriber_order_across_phases(tmp_path, monkeypatch):
+    images = tmp_path / 'images'
+    images.mkdir()
+    (images / 'b.png').write_bytes(b'second-image')
+    (images / 'a.jpg').write_bytes(b'first-image')
+    (images / 'notes.txt').write_text('not an image')
+    calls = []
+    call_lock = threading.Lock()
+
+    class OrderedUEs(FakeUEs):
+        def switch_counts(self, total, g2, g3):
+            # The lifecycle groups the first g2 subscribers followed by the rest,
+            # with site-specific addresses that can change on reattachment.
+            return tuple([
+                {'ip': f'127.0.{site}.{index + 1}', 'iface': f'ue{index}'}
+                for index in indices
+            ] for site, indices in ((2, range(g2)), (3, range(g2, total))))
+
+    def fake_attempt(url, method, body, headers, source, timeout):
+        with call_lock:
+            calls.append((source, body))
+        time.sleep(0.001)
+        return {'success': True}
+
+    args = argparse.Namespace(url='http://127.0.0.1/detect', image=str(images),
+                              ue_config='ue.yaml', nr_ue='/bin/nr-ue',
+                              phase_schedule='3:2:1,3:1:2',
+                              phase_duration=0.01, timeout=1, output_dir=str(tmp_path / 'run'), armed=True)
+    monkeypatch.setattr(experiment, 'OwnedUELifecycle', OrderedUEs)
+    monkeypatch.setattr(experiment, 'attempt', fake_attempt)
+    experiment.run(args)
+
+    metadata = json.loads((tmp_path / 'run' / 'run.json').read_text())
+    assert [image['filename'] for image in metadata['images']] == ['a.jpg', 'b.png']
+    assert [image['sha256'] for image in metadata['images']] == [
+        hashlib.sha256(b'first-image').hexdigest(),
+        hashlib.sha256(b'second-image').hexdigest()]
+    assert [entry['image_index'] for entry in metadata['image_assignments']] == [0, 1, 0]
+    records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]
+    requests = [record for record in records if record['event'] == 'request']
+    assert {(r['phase'], r['ue_index']) for r in requests} == {
+        (phase, index) for phase in ('phase_01', 'phase_02') for index in range(3)}
+    assert all(r['image_index'] == r['ue_index'] % 2 for r in requests)
+    assert all(r['image_filename'] == ('b.png' if r['ue_index'] == 1 else 'a.jpg') for r in requests)
+    assert calls
+    assert all((b'second-image' if source.endswith('.2') else b'first-image') in body
+               for source, body in calls)
+
+
+@pytest.mark.parametrize('contents', [None, b''])
+def test_empty_images_rejected_before_creating_results_or_ues(tmp_path, monkeypatch, contents):
+    images = tmp_path / 'images'
+    images.mkdir()
+    if contents is not None:
+        (images / 'empty.jpg').write_bytes(contents)
+    args = argparse.Namespace(url='http://127.0.0.1/detect', image=str(images),
+                              ue_config='ue.yaml', nr_ue='/bin/nr-ue', phase_schedule='1:1:0',
+                              phase_duration=1, timeout=1, output_dir=str(tmp_path / 'run'), armed=True)
+    monkeypatch.setattr(experiment, 'OwnedUELifecycle',
+                        lambda *args: pytest.fail('UE lifecycle must not be created'))
+    with pytest.raises(ValueError, match='image'):
+        experiment.run(args)
+    assert not (tmp_path / 'run').exists()

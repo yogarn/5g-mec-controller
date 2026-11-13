@@ -11,6 +11,7 @@ def test_window_overflow_and_expiry():
         assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': duration, 'http_status': status, 'success': success})
     metrics = collector.metrics()
     assert 'ue_request_duration_p90_seconds 0.8\n' in metrics
+    assert 'ue_request_attempt_duration_p90_seconds 0.8\n' in metrics
     assert 'ue_request_window_attempts 3\n' in metrics
     assert 'ue_request_window_successes 2\n' in metrics
     assert 'ue_request_window_success_within_slo 1\n' in metrics
@@ -18,6 +19,7 @@ def test_window_overflow_and_expiry():
         assert all('ue_request_window_attempts 3' in value for value in pool.map(lambda _: collector.metrics(), range(50)))
     now[0] = 15
     assert 'ue_request_duration_p90_seconds' not in collector.metrics()
+    assert 'ue_request_attempt_duration_p90_seconds' not in collector.metrics()
     assert 'ue_request_window_attempts 0\n' in collector.metrics()
     settings['max_observations'] = 1
     collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 1000, 'http_status': 200, 'success': True})
@@ -25,6 +27,7 @@ def test_window_overflow_and_expiry():
     collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 2000, 'http_status': 200, 'success': True})
     assert 'ue_request_window_complete 0\n' in collector.metrics()
     assert 'ue_request_duration_p90_seconds' not in collector.metrics()
+    assert 'ue_request_attempt_duration_p90_seconds' not in collector.metrics()
     assert 'ue_telemetry_overflow_evictions_total 1\n' in collector.metrics()
     now[0] = 30
     assert 'ue_request_window_complete 1\n' in collector.metrics()
@@ -68,3 +71,62 @@ def test_status_validation_and_failed_response_body():
         assert not collector.ingest({**sample, **invalid})
     assert 'ue_request_window_attempts 2\n' in collector.metrics()
     assert 'ue_request_window_successes 0\n' in collector.metrics()
+
+
+def test_all_attempt_p90_includes_fast_and_slow_failures():
+    collector = Collector(load_settings('collector/config.yaml'))
+    assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 100,
+                             'http_status': 200, 'success': True})
+    assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 5000,
+                             'http_status': 503, 'success': False})
+    metrics = collector.metrics()
+    assert 'ue_request_duration_p90_seconds 0.1\n' in metrics
+    assert 'ue_request_attempt_duration_p90_seconds 5.0\n' in metrics
+
+    collector = Collector(load_settings('collector/config.yaml'))
+    for duration in range(1, 10):
+        assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': duration * 100,
+                                 'http_status': 200, 'success': True})
+    assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 5000,
+                             'http_status': 503, 'success': False})
+    metrics = collector.metrics()
+    assert 'ue_request_duration_p90_seconds 0.9\n' in metrics
+    assert 'ue_request_attempt_duration_p90_seconds 0.9\n' in metrics
+    assert 'ue_request_window_attempts 10\n' in metrics
+    assert 'ue_request_window_successes 9\n' in metrics
+    assert 'ue_request_window_success_within_slo 5\n' in metrics
+
+    collector = Collector(load_settings('collector/config.yaml'))
+    assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 900,
+                             'http_status': 200, 'success': True})
+    assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 10,
+                             'http_status': None, 'success': False})
+    metrics = collector.metrics()
+    assert 'ue_request_attempt_duration_p90_seconds 0.9\n' in metrics
+    assert 'ue_request_duration_p90_seconds 0.9\n' in metrics
+    for _ in range(9):
+        assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': 10,
+                                 'http_status': None, 'success': False})
+    metrics = collector.metrics()
+    assert 'ue_request_attempt_duration_p90_seconds 0.01\n' in metrics
+    assert 'ue_request_duration_p90_seconds 0.9\n' in metrics
+    assert 'ue_request_window_attempts 11\n' in metrics
+    assert 'ue_request_window_successes 1\n' in metrics
+    assert 'ue_request_window_success_within_slo 0\n' in metrics
+
+
+def test_failure_only_window_reports_actual_attempt_p90():
+    now = [0.0]
+    collector = Collector(load_settings('collector/config.yaml'), lambda: now[0])
+    for duration, status in [(100, None), (800, 503), (200, 200)]:
+        assert collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': duration,
+                                 'http_status': status, 'success': False})
+    metrics = collector.metrics()
+    assert '# TYPE ue_request_attempt_duration_p90_seconds gauge\n' in metrics
+    assert 'ue_request_attempt_duration_p90_seconds 0.8\n' in metrics
+    assert 'ue_request_duration_p90_seconds' not in metrics
+    assert 'ue_request_window_attempts 3\n' in metrics
+    assert 'ue_request_window_successes 0\n' in metrics
+    assert 'ue_request_window_success_within_slo 0\n' in metrics
+    now[0] = 15
+    assert 'ue_request_attempt_duration_p90_seconds' not in collector.metrics()

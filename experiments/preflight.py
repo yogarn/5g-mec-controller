@@ -172,7 +172,7 @@ def main(argv=None):
             'query': settings.latency_query})
         result = report['checks']['prometheus_query']
         if (collector is not None and collector['attempts'] == 0
-                and ''.join(settings.latency_query.split()) == 'ue_request_duration_p90_seconds{job="ue-telemetry"}'
+                and ''.join(settings.latency_query.split()) == 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
                 and result.get('error') == 'Prometheus query returned no samples'):
             result.update(unverified=True, warning='collector latency not yet verified: no attempts in the window')
         report['checks']['configuration']['detail'] = {'path': args.config}
