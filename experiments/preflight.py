@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import re
 import select
 import subprocess
 import sys
@@ -22,9 +23,22 @@ from controller.telemetry import Prometheus
 
 def mutation_blockers(checks):
     return [name for name, result in checks.items()
-            if name != 'envoy_config_match' and not result['ok']]
+            if name != 'envoy_config_match' and not result['ok'] and not result.get('idle', False)]
 class PreflightError(Exception):
     pass
+
+def proxy_is_idle(settings):
+    """Recognize the configured face-proxy histogram only; never invent latency."""
+    query = settings.latency_query
+    node = re.search(r'node="([^"]+)"', query)
+    if ('envoy_http_downstream_rq_time_bucket' not in query or
+            'job="upf-envoy"' not in query or
+            'envoy_http_conn_manager_prefix="face_detection"' not in query or
+            '[2m]' not in query or not node):
+        return False
+    labels = f'job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node={json.dumps(node.group(1))}'
+    count_query = f'sum(increase(envoy_http_downstream_rq_time_count{{{labels}}}[2m]))'
+    return Prometheus(settings.prometheus_url, settings.max_metric_age_seconds).scalar(count_query) == 0
 
 @contextmanager
 def port_forward(namespace, resource, port):
@@ -142,6 +156,10 @@ def runtime_matches(dump, desired):
         if not expected:
             raise PreflightError(f'configured Envoy has no {kind}')
         for resource in expected:
+            # Envoy's protobuf JSON omits ROUND_ROBIN, the default cluster policy.
+            if kind == 'clusters' and resource.get('lb_policy') == 'ROUND_ROBIN':
+                active = [dict(candidate, lb_policy=candidate.get('lb_policy', 'ROUND_ROBIN'))
+                          for candidate in active]
             if not any(contains(candidate, resource) for candidate in active):
                 raise PreflightError(f"active Envoy {kind} does not match configured resource {resource.get('name')!r}")
     return 'configured listener and cluster fields found in active Envoy resources'
@@ -251,7 +269,9 @@ def render_report(report):
         if len(detail) > 200:
             detail = detail[:197] + '...'
         lines.append(f'[{status}] {name}' + (f': {detail}' if detail else ''))
-        if name == 'prometheus_query' and not result['ok'] and 'invalid or stale Prometheus sample' in result.get('error', ''):
+        if name == 'prometheus_query' and result.get('idle'):
+            lines.append('  No requests observed in the last 2 minutes; latency is unavailable until traffic arrives.')
+        elif name == 'prometheus_query' and not result['ok'] and 'invalid or stale Prometheus sample' in result.get('error', ''):
             lines.append('  Hint: May be no recent traffic; inspect the query and sample timestamps.')
     for warning in report['warnings']:
         lines.append(f'[WARN] {warning}')
@@ -297,6 +317,12 @@ def main(argv=None):
             return {'status_code': response.status_code, 'body': response.text.strip()}
         check('prometheus_health', http_health)
         check('prometheus_query', lambda: {'latency_seconds': Prometheus(settings.prometheus_url, settings.max_metric_age_seconds).scalar(settings.latency_query), 'query': settings.latency_query})
+        if report['checks']['prometheus_query'].get('error') == 'invalid or stale Prometheus sample':
+            try:
+                if proxy_is_idle(settings):
+                    report['checks']['prometheus_query']['idle'] = True
+            except Exception as exc:
+                report['checks']['prometheus_query']['idle_diagnostic_error'] = str(exc)
 
     def read_desired():
         text = Path(args.envoy_config).read_text()
@@ -340,6 +366,37 @@ def main(argv=None):
                 else:
                     report['checks']['envoy_config_match'] = {'ok': False, 'error': 'ConfigMap key differs from repository configuration'}
                     report['ok'] = False
+                def active():
+                    admin = urlsplit(args.envoy_admin_url)
+                    if admin.scheme != 'http' or admin.hostname not in ('127.0.0.1', 'localhost') or admin.path not in ('', '/'):
+                        raise PreflightError('Envoy admin URL must be a local HTTP URL without a path')
+                    with port_forward(ns, 'pod/' + pod['metadata']['name'], admin.port or 80) as base:
+                        response = requests.get(base + '/config_dump', timeout=10)
+                        response.raise_for_status()
+                        return runtime_matches(response.json(), desired[1])
+
+                if mount_ok and current is not None and not args.apply_envoy_config and not args.json and sys.stdin.isatty():
+                    mismatch = current != desired[0]
+                    if not mismatch:
+                        try:
+                            active()
+                        except PreflightError as exc:
+                            mismatch = str(exc).startswith('active Envoy ')
+                        except (requests.RequestException, OSError, ValueError):
+                            pass  # The normal check below reports the access failure.
+                    if mismatch:
+                        blockers = mutation_blockers(report['checks'])
+                        if blockers:
+                            print('[WARN] Envoy differs, but rollout is blocked by: ' + ', '.join(blockers))
+                        else:
+                            print(f'[WARN] Envoy on {args.node} differs from the desired configuration.')
+                            print('Redeployment replaces proxy routes and restarts the shared UPF, interrupting 5G traffic.')
+                            if input('Back up the current ConfigMap and redeploy? [y/N] ').strip().lower() == 'y':
+                                backup_root = Path('results')
+                                backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                                args.recovery_dir = str(backup_root / f'envoy-backup-{args.node}-{time.time_ns()}')
+                                args.apply_envoy_config = True
+                                args.restart_upf = True
                 blockers = mutation_blockers(report['checks'])
                 if args.apply_envoy_config and blockers:
                     report['checks']['envoy_apply'] = {'ok': False, 'error': 'Mutation blocked by failed preflight checks: ' + ', '.join(blockers)}
@@ -380,14 +437,6 @@ def main(argv=None):
                 elif args.apply_envoy_config and mount_ok and current == desired[0]:
                     report['checks']['envoy_apply'] = {'ok': True, 'detail': 'ConfigMap already matches; no changes performed'}
                 if mount_ok:
-                    def active():
-                        admin = urlsplit(args.envoy_admin_url)
-                        if admin.scheme != 'http' or admin.hostname not in ('127.0.0.1', 'localhost') or admin.path not in ('', '/'):
-                            raise PreflightError('Envoy admin URL must be a local HTTP URL without a path')
-                        with port_forward(ns, 'pod/' + pod['metadata']['name'], admin.port or 80) as base:
-                            response = requests.get(base + '/config_dump', timeout=10)
-                            response.raise_for_status()
-                            return runtime_matches(response.json(), desired[1])
                     check('envoy_active', active)
     report['ok'] = all(item['ok'] for item in report['checks'].values())
     # Configuration objects are not JSON serializable and may include secrets.

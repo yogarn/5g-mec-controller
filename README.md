@@ -99,11 +99,11 @@ python3 -m experiments.preflight --upf-statefulset upf-gnb-2 \
   --envoy-config-key envoy.yaml --envoy-config-path /etc/envoy-config/envoy.yaml
 ```
 
-The command prints concise status checks and exits nonzero on failure; use `--json` for the full machine-readable report. Applying a differing Envoy configuration requires `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. Applying replaces the existing proxy routes, and restarting interrupts 5G traffic. Inspect the checks and backup before a separately authorized change; `OnDelete` does not reload the static configuration automatically.
+The command prints concise status checks and exits nonzero on failure; use `--json` for the full machine-readable report. In an interactive terminal, if the Envoy configuration differs and other prerequisites are satisfied, it offers to back up the ConfigMap under `results/` and redeploy the UPF after confirmation. Redeployment replaces proxy routes and interrupts 5G traffic. Non-interactive changes require `--apply-envoy-config --recovery-dir NEW_DIRECTORY`; replacing the UPF pod additionally requires `--restart-upf`. `OnDelete` does not reload the static configuration automatically.
 
 This example checks only gnb-2. For a two-site campaign, also check gnb-3 with its own StatefulSet and ConfigMap arguments. The current controller latency query only covers gnb-2; the gnb-3 proxy route and complete service-wide telemetry must be configured and verified before interpreting a two-site run.
 
-An idle service can yield no finite latency histogram; preflight reports that as a failed telemetry check rather than inventing a value. Generate authorized test traffic and recheck when validating the query.
+An idle service can yield no finite latency histogram; preflight reports that as a failed telemetry check rather than inventing a value. For the supplied face-proxy query, it checks whether the request counter has increased in the last two minutes and reports confirmed idle traffic separately. A confirmed idle latency query does not block an explicitly approved Envoy redeployment; other failed prerequisites do. Send a real face-detection request through the intended proxy path, then recheck. The controller cannot scale from a missing or non-finite latency value; idle traffic is not evidence of readiness for a campaign.
 
 ## Automated UE ramp and switching
 

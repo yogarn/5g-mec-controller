@@ -198,6 +198,74 @@ class PreflightSafetyTests(unittest.TestCase):
         with self.assertRaises(preflight.PreflightError):
             preflight.runtime_matches(dump, desired)
 
+    def test_envoy_default_round_robin_is_equivalent_but_other_values_are_not(self):
+        desired = {'static_resources': {'listeners': [{'name': 'listener'}],
+                                       'clusters': [{'name': 'face', 'lb_policy': 'ROUND_ROBIN'}]}}
+        dump = {'configs': [{'static_listeners': [{'listener': {'name': 'listener'}}],
+                             'static_clusters': [{'cluster': {'name': 'face'}}]}]}
+        preflight.runtime_matches(dump, desired)
+        dump['configs'][0]['static_clusters'][0]['cluster']['lb_policy'] = 'RANDOM'
+        with self.assertRaises(preflight.PreflightError):
+            preflight.runtime_matches(dump, desired)
+
+    def test_idle_counter_does_not_manufacture_a_latency_value(self):
+        settings = SimpleNamespace(latency_query='histogram_quantile(0.95, sum(rate(envoy_http_downstream_rq_time_bucket{job="upf-envoy",envoy_http_conn_manager_prefix="face_detection",node="gnb-2"}[2m])))',
+                                   prometheus_url='http://prom', max_metric_age_seconds=60)
+        with patch.object(preflight.Prometheus, 'scalar', return_value=0) as scalar:
+            self.assertTrue(preflight.proxy_is_idle(settings))
+            self.assertIn('node="gnb-2"', scalar.call_args.args[0])
+        with patch.object(preflight.Prometheus, 'scalar', return_value=1):
+            self.assertFalse(preflight.proxy_is_idle(settings))
+        self.assertEqual(preflight.mutation_blockers({
+            'prometheus_query': {'ok': False, 'idle': True},
+            'deployment': {'ok': False}}), ['deployment'])
+
+    def test_interactive_rollout_requires_confirmation(self):
+        text = 'static_resources: {}\n'
+        for answer in ('n', 'y'):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as temp:
+                config = Path(temp) / 'envoy.yaml'
+                config.write_text(text)
+                cm = {'metadata': {'resourceVersion': '7'}, 'data': {'envoy.yaml': text}}
+                old = {'metadata': {'name': 'upf-0', 'uid': 'old'}}
+                new = {'metadata': {'name': 'upf-0', 'uid': 'new'}}
+                sts = {'metadata': {'name': 'upf', 'uid': 'owner'}, 'spec': {}}
+                deployment = {'metadata': {'generation': 1}, 'spec': {'replicas': 1},
+                              'status': {'observedGeneration': 1, 'updatedReplicas': 1,
+                                         'readyReplicas': 1, 'availableReplicas': 1, 'replicas': 1}}
+                service = {'spec': {'ports': [{'port': 5000}]}}
+                endpoints = {'subsets': [{'addresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]}
+                objects = {'statefulset': sts, 'configmap': cm, 'pod': old, 'deployment': deployment,
+                           'service': service, 'endpoints': endpoints}
+                settings = SimpleNamespace(manifest=Path('app.yaml'), namespace='open5gs',
+                                           prometheus_url='http://prom', max_metric_age_seconds=60,
+                                           latency_query='query')
+                response = SimpleNamespace(status_code=200, text='ok', raise_for_status=lambda: None,
+                                           json=lambda: {})
+                mismatch = preflight.PreflightError('active Envoy clusters does not match configured resource')
+                matches = [mismatch, 'verified'] if answer == 'y' else [mismatch, mismatch]
+                with (patch.object(preflight, 'load_settings', return_value=settings),
+                      patch.object(preflight, 'workload_identity', return_value=('open5gs', 'app')),
+                      patch.object(preflight, 'get', side_effect=lambda kind, name, namespace: objects[kind]),
+                      patch.object(preflight, 'find_pod', side_effect=[old, new]),
+                      patch.object(preflight, 'validate_proxy_mount'),
+                      patch.object(preflight, 'kubectl', return_value='ok') as kube,
+                      patch.object(preflight, 'port_forward', return_value=nullcontext('http://localhost:1234')),
+                      patch.object(preflight.requests, 'get', return_value=response),
+                      patch.object(preflight.Prometheus, 'scalar', return_value=0.1),
+                      patch.object(preflight, 'runtime_matches', side_effect=matches),
+                      patch.object(preflight, 'apply_config', return_value='/tmp/backup') as apply,
+                      patch.object(preflight.Path, 'mkdir'),
+                      patch('sys.stdin.isatty', return_value=True),
+                      patch('builtins.input', return_value=answer),
+                      redirect_stdout(io.StringIO())):
+                    result = preflight.main(['--upf-statefulset', 'upf', '--envoy-configmap', 'upf',
+                                             '--envoy-config-path', '/etc/envoy/envoy.yaml',
+                                             '--envoy-config', str(config)])
+                self.assertEqual(bool(apply.called), answer == 'y')
+                self.assertEqual(any('delete' in call.args for call in kube.call_args_list), answer == 'y')
+                self.assertEqual(result, 0 if answer == 'y' else 1)
+
     def test_unready_endpoints_and_deployment_fail(self):
         with self.assertRaises(preflight.PreflightError):
             preflight.check_endpoints({'spec': {}}, {'subsets': [{'notReadyAddresses': [{'ip': '10.0.0.1'}], 'ports': [{'port': 5000}]}]})
