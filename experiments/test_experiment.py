@@ -71,3 +71,12 @@ def test_unarmed_never_creates_results(tmp_path):
     with pytest.raises(ValueError, match='--armed'):
         experiment.run(args)
     assert not (tmp_path / 'run').exists()
+
+
+def test_default_cli_refuses_noninteractive_execution(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(experiment.sys.stdin, 'isatty', lambda: False)
+    with pytest.raises(SystemExit) as error:
+        experiment.main([])
+    assert error.value.code == 2
+    assert not (tmp_path / 'results').exists()

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from experiments import summarize
 
@@ -171,6 +172,20 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(exit_status.exception.code, 2)
         self.assertFalse(self.prefix.with_suffix('.json').exists())
         self.assertFalse(self.prefix.with_suffix('.csv').exists())
+
+    def test_default_summary_selects_only_unambiguous_run(self):
+        run = self.directory / 'run-1'
+        run.mkdir()
+        (run / 'requests.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records()))
+        with patch.object(summarize.defaults, 'RESULTS', self.directory):
+            summarize.main([])
+            self.assertTrue((run / 'summary.csv').is_file())
+            second = self.directory / 'run-2'
+            second.mkdir()
+            (second / 'requests.jsonl').write_text((run / 'requests.jsonl').read_text())
+            with self.assertRaises(SystemExit):
+                summarize.main([])
+            self.assertFalse((second / 'summary.csv').exists())
 
 
 if __name__ == '__main__':

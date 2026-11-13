@@ -28,6 +28,14 @@ Scaling computes `ceil(replicas * latency / SLO)` within the configured replica 
 
 Optional settings include `interval_seconds`, `cpu_saturation`, `locality_weight`, `improvement_factor`, `cooldown_seconds`, `scale_down_seconds`, and `max_metric_age_seconds`. Cooldown and stabilization state are in memory and reset on restart.
 
+## Default commands
+
+From the repository root, `python3 -m experiments.preflight` checks gNB-2; add `--node gnb-3` for gNB-3. `python3 -m experiments.provision_ues` checks the inventory without writing to MongoDB. `python3 -m experiments.experiment` previews a two-phase smoke test and asks for confirmation before creating UE sessions. `python3 -m experiments.summarize` summarizes the only run under `results/`; if there are multiple runs, specify the input explicitly.
+
+Defaults are in `experiments/defaults.py`: UE inventory `~/.config/5g-mec/ue-inventory.yaml`, image `~/.config/5g-mec/face.jpg`, UERANSIM `~/ueransim/build/nr-ue`, URL `http://10.34.211.196:30090/detect`, two 30-second phases (`1:1:0,1:0:1`), and a 500 ms summary SLO. With sudo, `~` refers to the invoking user's home. Supply the private inventory, image and executable and verify the URL on both UE paths before running. The default schedule is a connectivity smoke test, **not** a justified research campaign; gNB-3's route and complete latency metrics are not yet validated.
+
+All options remain overridable. MongoDB writes still require `--apply`; proxy changes and UPF restarts still require their explicit flags and backup. Non-interactive experiments still require `--armed`, and UE recovery requires the exact journal path to avoid touching another run. The generic benchmark also requires explicit existing UE addresses.
+
 ## Experimental HPA baseline
 
 `experiments/hpa-baseline.yaml` is a standalone Kubernetes HPA for the same face-detection Deployment; it is not part of the controller or its production configuration. It uses CPU utilization at 80% of each container's CPU **request**, with 1–3 replicas and a 180-second scale-down stabilization window. With the manifest's `100m` request, the target is 80m average CPU per pod, not 80% of its `500m` limit. This is a proposed experimental setting, not a calibrated equivalent of the latency SLO. Metrics Server and CPU requests for all containers are required.

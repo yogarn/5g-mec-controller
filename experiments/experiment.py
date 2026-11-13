@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import signal
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from benchmark.client import attempt, parse_schedule
+from experiments import defaults
 from experiments.ue_lifecycle import OwnedUELifecycle
 
 
@@ -40,7 +42,7 @@ def run(args):
             f'Content-Type: application/octet-stream\r\n\r\n').encode() + image + f'\r\n--{boundary}--\r\n'.encode()
     headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
     out = Path(args.output_dir)
-    out.mkdir(mode=0o700, parents=False, exist_ok=False)
+    out.mkdir(mode=0o700, parents=True, exist_ok=False)
     metadata = {'url': args.url, 'schedule': phases, 'phase_duration_s': args.phase_duration,
                 'timeout_s': args.timeout, 'image_sha256': hashlib.sha256(image).hexdigest(),
                 'image_bytes': len(image), 'ue_config': str(Path(args.ue_config).resolve()),
@@ -95,16 +97,25 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--url', required=True, help='Face-detection /detect URL through the intended UE path')
-    parser.add_argument('--image', required=True, help='Fixed image file sent as multipart field image')
-    parser.add_argument('--ue-config', required=True, help='UE inventory YAML; contains paths to private subscriber configs')
-    parser.add_argument('--nr-ue', required=True, help='Absolute path to the UERANSIM nr-ue executable')
-    parser.add_argument('--phase-schedule', required=True, help='Ordered total:gnb2:gnb3 counts, comma separated')
-    parser.add_argument('--phase-duration', required=True, type=float, help='Request-generation seconds per phase')
+    parser.add_argument('--url', default=defaults.URL, help='Face-detection /detect URL through the intended UE path')
+    parser.add_argument('--image', default=str(defaults.IMAGE), help='Fixed image file sent as multipart field image')
+    parser.add_argument('--ue-config', default=str(defaults.INVENTORY), help='Private UE inventory YAML')
+    parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
+    parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb2:gnb3 counts, comma separated')
+    parser.add_argument('--phase-duration', type=float, default=defaults.PHASE_DURATION, help='Request-generation seconds per phase')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
-    parser.add_argument('--output-dir', required=True, help='New private output directory; must not exist')
+    parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')
     parser.add_argument('--armed', action='store_true', help='Authorize creation and replacement of UE sessions')
     args = parser.parse_args(argv)
+    if args.output_dir is None:
+        args.output_dir = str(defaults.RESULTS / f'run-{time.time_ns()}')
+    if not args.armed:
+        print(f'UE sessions will be created and replaced; traffic will be sent to {args.url}.')
+        print(f'Schedule: {args.phase_schedule}; {args.phase_duration}s per phase; output: {args.output_dir}')
+        print(f'Inventory: {args.ue_config}; image: {args.image}; nr-ue: {args.nr_ue}')
+        if not sys.stdin.isatty() or input('Start this experiment? [y/N] ').strip().lower() != 'y':
+            parser.exit(2, 'Experiment not started; pass --armed for non-interactive execution.\n')
+        args.armed = True
     def stop(_signal, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)

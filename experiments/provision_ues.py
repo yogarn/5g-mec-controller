@@ -8,6 +8,7 @@ import sys
 
 import yaml
 
+from experiments import defaults
 from experiments.ue_lifecycle import _load_config
 
 
@@ -91,7 +92,7 @@ def provision(collection, documents, apply=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--inventory', required=True, help='private UE inventory YAML')
+    parser.add_argument('--inventory', default=str(defaults.INVENTORY), help='private UE inventory YAML')
     parser.add_argument('--database', default='open5gs', help='Open5GS MongoDB database')
     parser.add_argument('--apply', action='store_true', help='insert new subscribers after conflict checks')
     args = parser.parse_args(argv)

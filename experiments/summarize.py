@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 import sys
 
+from experiments import defaults
+
 
 def number(value, name, *, minimum=None):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -226,11 +228,18 @@ def write_results(phases, prefix, ue_results=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Convert benchmark JSONL into per-phase and per-UE JSON and CSV. Latency percentiles use linear interpolation over successful requests; SLO attainment counts successful requests at or below the threshold over all attempts. Throughput uses phase end minus phase start (including drain time). Empty percentiles and zero-attempt attainment are null/blank.')
-    parser.add_argument('input', help='benchmark/client.py JSONL input')
-    parser.add_argument('--output-prefix', required=True, help='output prefix; creates PREFIX.json, PREFIX.csv, PREFIX-ues.json and PREFIX-ues.csv exclusively')
-    parser.add_argument('--slo-ms', type=float, required=True, help='inclusive successful request latency SLO in milliseconds')
+    parser.add_argument('input', nargs='?', help='request JSONL; defaults to the sole run in results/')
+    parser.add_argument('--output-prefix', help='output prefix; defaults to summary beside the input')
+    parser.add_argument('--slo-ms', type=float, default=defaults.SLO_MS, help='inclusive latency SLO in milliseconds')
     args = parser.parse_args(argv)
     try:
+        if args.input is None:
+            runs = sorted(defaults.RESULTS.glob('*/requests.jsonl'))
+            if len(runs) != 1:
+                raise ValueError(f'expected exactly one results/*/requests.jsonl, found {len(runs)}; specify input explicitly')
+            args.input = str(runs[0])
+        if args.output_prefix is None:
+            args.output_prefix = str(Path(args.input).parent / 'summary')
         ue_results = []
         phases = summarize(args.input, args.slo_ms, ue_results)
         write_results(phases, args.output_prefix, ue_results)

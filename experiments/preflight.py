@@ -199,11 +199,11 @@ def parse_args(argv=None):
     parser.add_argument('--service-health-url', help='Override Service health URL, accessible from the preflight host')
     parser.add_argument('--proxy-namespace', default='open5gs')
     parser.add_argument('--node', default='gnb-2')
-    parser.add_argument('--upf-statefulset', required=True, help='StatefulSet owning the UPF on the target node')
-    parser.add_argument('--envoy-container', required=True)
-    parser.add_argument('--envoy-configmap', required=True)
-    parser.add_argument('--envoy-config-key', required=True)
-    parser.add_argument('--envoy-config-path', required=True, help='Mounted path of the Envoy configuration in the container')
+    parser.add_argument('--upf-statefulset', help='UPF StatefulSet (default: upf-<node>)')
+    parser.add_argument('--envoy-container', default='envoy')
+    parser.add_argument('--envoy-configmap', help='Envoy ConfigMap (default: upf-<node>-envoy-config)')
+    parser.add_argument('--envoy-config-key', default='envoy.yaml')
+    parser.add_argument('--envoy-config-path', default='/etc/envoy-config/envoy.yaml', help='Mounted Envoy configuration path')
     parser.add_argument('--envoy-binary', default='envoy')
     parser.add_argument('--envoy-admin-url', default='http://127.0.0.1:9901')
     parser.add_argument('--envoy-config', default='apps/face-detection/envoy-gnb2.yaml')
@@ -212,6 +212,10 @@ def parse_args(argv=None):
     parser.add_argument('--restart-upf', action='store_true', help='Separately opt in to deleting the target UPF pod after apply; interrupts traffic')
     parser.add_argument('--restart-timeout', type=int, default=180)
     args = parser.parse_args(argv)
+    if args.upf_statefulset is None:
+        args.upf_statefulset = f'upf-{args.node}'
+    if args.envoy_configmap is None:
+        args.envoy_configmap = f'upf-{args.node}-envoy-config'
     if args.apply_envoy_config and not args.recovery_dir:
         parser.error('--apply-envoy-config requires --recovery-dir')
     if args.restart_upf and not args.apply_envoy_config:

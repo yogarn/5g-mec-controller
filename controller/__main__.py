@@ -11,7 +11,7 @@ from .telemetry import Prometheus
 
 def main():
     parser = argparse.ArgumentParser(description='Generic MEC placement and scaling controller')
-    parser.add_argument('--config', required=True)
+    parser.add_argument('--config', default='config.yaml', help='configuration file (default: config.yaml)')
     parser.add_argument('--once', action='store_true', help='perform one observation/reconciliation')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')

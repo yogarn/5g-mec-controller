@@ -19,6 +19,14 @@ class PreflightSafetyTests(unittest.TestCase):
         self.cm = {'metadata': {'name': 'upf', 'resourceVersion': '7'},
                    'data': {'envoy.yaml': 'old', 'other': 'preserve'}}
 
+    def test_site_defaults_and_overrides(self):
+        default = preflight.parse_args([])
+        self.assertEqual(default.upf_statefulset, 'upf-gnb-2')
+        self.assertEqual(default.envoy_configmap, 'upf-gnb-2-envoy-config')
+        other = preflight.parse_args(['--node', 'gnb-3'])
+        self.assertEqual(other.upf_statefulset, 'upf-gnb-3')
+        self.assertEqual(other.envoy_configmap, 'upf-gnb-3-envoy-config')
+
     def test_mutation_requires_explicit_backup_and_restart_opt_in(self):
         required = ['--upf-statefulset', 'upf', '--envoy-container', 'envoy',
                     '--envoy-configmap', 'upf', '--envoy-config-key', 'envoy.yaml',
