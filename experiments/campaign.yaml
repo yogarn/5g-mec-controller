@@ -5,7 +5,10 @@ inventory: /home/member/skripsi_yoga/5g-mec-controller/.private/ue-paper-24/inve
 nr_ue: /home/member/5g-ai-edge/ueransim/build/nr-ue
 token: /home/member/.config/5g-mec/ue-telemetry-token
 image: /home/member/skripsi_yoga/5g-mec-controller/apps/face-detection/images
-node_ip: 10.34.211.140
+site_node_ips:
+  gnb-1: 10.34.211.157
+  gnb-2: 10.34.211.196
+  gnb-3: 10.34.210.3
 telemetry_url: http://10.34.211.140:31669/observations
 schedule: '3:1:1:1,9:3:3:3,9:1:2:6,9:1:1:7,15:5:5:5,15:1:4:10,15:1:1:13,24:8:8:8,24:1:7:16,24:1:1:22'
 phase_duration: 180

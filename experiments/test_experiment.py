@@ -225,3 +225,66 @@ def test_empty_images_rejected_before_creating_results_or_ues(tmp_path, monkeypa
     with pytest.raises(ValueError, match='image'):
         experiment.run(args)
     assert not (tmp_path / 'run').exists()
+
+
+def test_site_urls_route_each_group_and_record_destination(tmp_path, monkeypatch):
+    image = tmp_path / 'input.jpg'
+    image.write_bytes(b'image')
+    site_urls = {f'gnb-{site}': f'http://127.0.0.{site}:30000/detect' for site in (1, 2, 3)}
+    calls = []
+
+    def fake_attempt(url, method, body, headers, source, timeout):
+        calls.append((source, url.geturl()))
+        time.sleep(0.001)
+        return {'success': True}
+
+    args = argparse.Namespace(url=None, site_urls=site_urls, image=str(image),
+                              ue_config='ue.yaml', nr_ue='/bin/nr-ue',
+                              phase_schedule='3:1:1:1', phase_duration=0.02, timeout=1,
+                              output_dir=str(tmp_path / 'run'), armed=True)
+    monkeypatch.setattr(experiment, 'OwnedUELifecycle', FakeUEs)
+    monkeypatch.setattr(experiment, 'attempt', fake_attempt)
+    experiment.run(args)
+    assert json.loads((tmp_path / 'run' / 'run.json').read_text())['site_urls'] == site_urls
+    records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]
+    requests = [record for record in records if record['event'] == 'request']
+    assert {record['group'] for record in requests} == set(site_urls)
+    assert all(record['url'] == site_urls[record['group']] for record in requests)
+    assert set(calls) == {('127.0.0.3', site_urls['gnb-1']),
+                          ('127.0.0.1', site_urls['gnb-2']),
+                          ('127.0.0.2', site_urls['gnb-3'])}
+
+
+@pytest.mark.parametrize('site_urls', [
+    {}, {'gnb-1': 'http://host/detect'},
+    {'gnb-1': 'http://host/detect', 'gnb-2': 'http://host/detect', 'gnb-3': 'http://host:0/detect'},
+    {'gnb-1': 'http://host/detect', 'gnb-2': 'http://host/detect', 'gnb-3': None},
+])
+def test_invalid_site_urls_rejected_before_results(tmp_path, site_urls):
+    args = argparse.Namespace(url=None, site_urls=site_urls, phase_schedule='1:1:0:0',
+                              phase_duration=1, timeout=1, armed=True,
+                              output_dir=str(tmp_path / 'run'))
+    with pytest.raises(ValueError):
+        experiment.run(args)
+    assert not (tmp_path / 'run').exists()
+
+
+def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
+    from experiments import campaign_ue
+    site_urls = {f'gnb-{site}': f'http://node{site}:30000/detect' for site in (1, 2, 3)}
+    settings = {'campaign': 'campaign', 'method': 'hpa', 'site_urls': site_urls,
+                'image': 'image.jpg', 'inventory': 'ue.yaml', 'nr_ue': '/bin/nr-ue',
+                'schedule': '1:1:0:0', 'duration': 1,
+                'telemetry_url': 'http://collector/observations', 'token': 'token'}
+    captured = []
+    def capture(args, **kwargs):
+        captured.extend(args)
+        raise RuntimeError('captured')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(campaign_ue.subprocess, 'Popen', capture)
+    with pytest.raises(RuntimeError, match='captured'):
+        campaign_ue.run(settings)
+    assert json.loads(captured[captured.index('--site-urls') + 1]) == site_urls
+    assert '--url' not in captured
+    assert captured[captured.index('--telemetry-url') + 1] == settings['telemetry_url']
+    assert captured[captured.index('--telemetry-token-file') + 1] == settings['token']

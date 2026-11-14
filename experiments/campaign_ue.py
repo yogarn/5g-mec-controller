@@ -68,6 +68,8 @@ def check(settings):
 
 
 def run(settings):
+    from experiments.experiment import validate_site_urls
+    validate_site_urls(settings['site_urls'])
     campaign, method = settings['campaign'], settings['method']
     root = Path('results') / campaign
     root.mkdir(parents=True, exist_ok=True)
@@ -75,7 +77,7 @@ def run(settings):
     if output.exists():
         raise FileExistsError(output)
     args = [sys.executable, '-u', '-m', 'experiments.experiment', '--armed',
-            '--url', settings['url'], '--image', settings['image'],
+            '--site-urls', json.dumps(settings['site_urls']), '--image', settings['image'],
             '--ue-config', settings['inventory'], '--nr-ue', settings['nr_ue'],
             '--phase-schedule', settings['schedule'], '--phase-duration', str(settings['duration']),
             '--telemetry-url', settings['telemetry_url'], '--telemetry-token-file', settings['token'],

@@ -64,6 +64,7 @@ metadata:
   namespace: services
 spec:
   type: NodePort
+  trafficDistribution: PreferSameNode
   selector:
     app: mec-placement-face-detection
   ports:

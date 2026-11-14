@@ -18,6 +18,27 @@ from experiments import defaults
 from experiments.ue_lifecycle import OwnedUELifecycle
 
 
+def validate_url(value):
+    if not isinstance(value, str):
+        raise ValueError('URL must be a string')
+    url = urlsplit(value)
+    if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
+            or url.password is not None or url.fragment or any(c.isspace() for c in value)):
+        raise ValueError('URL must be an absolute HTTP(S) URL without credentials or fragment')
+    try:
+        if url.port == 0:
+            raise ValueError('invalid URL port')
+    except ValueError as exc:
+        raise ValueError(f'invalid URL port: {exc}') from exc
+    return url
+
+
+def validate_site_urls(site_urls):
+    if not isinstance(site_urls, dict) or set(site_urls) != {'gnb-1', 'gnb-2', 'gnb-3'}:
+        raise ValueError('site URLs must map exactly gnb-1, gnb-2 and gnb-3 to URLs')
+    return {group: validate_url(url) for group, url in site_urls.items()}
+
+
 def run(args):
     phases = parse_schedule(args.phase_schedule)
     if any(phase['workload_ue'] > 50 for phase in phases):
@@ -27,15 +48,11 @@ def run(args):
     if not all(math.isfinite(x) and x > 0 for x in (args.phase_duration, args.timeout)):
         raise ValueError('phase duration and timeout must be finite and positive')
     telemetry = telemetry_config(getattr(args, 'telemetry_url', None), getattr(args, 'telemetry_token_file', None))
-    url = urlsplit(args.url)
-    if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
-            or url.password is not None or url.fragment or any(c.isspace() for c in args.url)):
-        raise ValueError('URL must be an absolute HTTP(S) URL without credentials or fragment')
-    try:
-        if url.port == 0:
-            raise ValueError('invalid URL port')
-    except ValueError as exc:
-        raise ValueError(f'invalid URL port: {exc}') from exc
+    site_urls = getattr(args, 'site_urls', None)
+    if site_urls is not None:
+        urls = validate_site_urls(site_urls)
+    else:
+        urls = {group: validate_url(args.url) for group in ('gnb-1', 'gnb-2', 'gnb-3')}
     image_path = Path(args.image)
     if image_path.is_dir():
         paths = sorted(path for path in image_path.iterdir()
@@ -59,7 +76,7 @@ def run(args):
     assignments = [i % len(images) for i in range(max(phase['workload_ue'] for phase in phases))]
     out = Path(args.output_dir)
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
-    metadata = {'url': args.url, 'schedule': phases, 'phase_duration_s': args.phase_duration,
+    metadata = {'url': args.url, 'site_urls': site_urls, 'schedule': phases, 'phase_duration_s': args.phase_duration,
                 'timeout_s': args.timeout, 'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
                 'workload': 'closed-loop', 'switching': 'stop-and-reattach; not handover'}
@@ -102,11 +119,11 @@ def run(args):
                     image = images[assignments[ue_index]]
                     count = successes = 0
                     while not cancelled.is_set() and time.monotonic() < deadline:
-                        record = request_with_telemetry(attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout)
+                        record = request_with_telemetry(attempt, publisher, urls[group], 'POST', image['body'], image['headers'], source, args.timeout)
                         count += 1
                         successes += record['success']
                         emit({'event': 'request', 'phase': phase['phase'], 'group': group,
-                              'source_address': source, 'url': args.url, 'method': 'POST',
+                              'source_address': source, 'url': site_urls[group] if site_urls is not None else args.url, 'method': 'POST',
                               'ue_index': ue_index, 'image_index': assignments[ue_index],
                               'image_filename': image['filename'],
                               'attempt': count, **record})
@@ -138,7 +155,9 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--url', required=True, help='Face-detection URL using a reachable Kubernetes node IP and Service NodePort, e.g. http://NODE_IP:NODEPORT/detect')
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument('--url', help='Face-detection URL using a reachable Kubernetes node IP and Service NodePort, e.g. http://NODE_IP:NODEPORT/detect')
+    destination.add_argument('--site-urls', type=json.loads, help='JSON mapping gnb-1, gnb-2 and gnb-3 to face-detection URLs')
     parser.add_argument('--image', default=str(defaults.IMAGE), help='Image file or directory of JPG, PNG, BMP, WebP, GIF or TIFF files; assigned in sorted order')
     parser.add_argument('--ue-config', default=str(defaults.INVENTORY), help='Private UE inventory YAML')
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
@@ -153,7 +172,7 @@ def main(argv=None):
     if args.output_dir is None:
         args.output_dir = str(defaults.RESULTS / f'run-{time.time_ns()}')
     if not args.armed:
-        print(f'UE sessions will be created and replaced; traffic will be sent to {args.url}.')
+        print(f'UE sessions will be created and replaced; traffic will be sent to {args.site_urls or args.url}.')
         print(f'Schedule: {args.phase_schedule}; {args.phase_duration}s per phase; output: {args.output_dir}')
         print(f'Inventory: {args.ue_config}; image: {args.image}; nr-ue: {args.nr_ue}')
         if not sys.stdin.isatty() or input('Start this experiment? [y/N] ').strip().lower() != 'y':
