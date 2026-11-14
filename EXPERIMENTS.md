@@ -13,9 +13,9 @@ Never run the HPA and a mutating controller, KEDA, or any other replica writer a
 | Frequency | Required action |
 | --- | --- |
 | First installation or when assets/configuration change | Sections 1–2: install dependencies; configure the workload, collector and Prometheus only if missing or changing; provision **new** UE subscribers only if necessary. Existing resources and reservations must not be recreated for each run. |
-| Before every matched campaign | Section 3.1: verify current software, live Services, node capacity, writer ownership, all three UE paths, session mappings and telemetry; take fresh snapshots, apply the common node constraint and run a fresh smoke test. Use a new campaign name. |
-| For each baseline run | Section 3.2: start the campaign HPA and sampler, run the workload, monitor it, stop sampling and preserve results. |
-| Before each proposed run | Section 3.3: remove only the campaign HPA, reset and verify one ready replica, and repeat the active-traffic non-mutating controller check with a **new smoke output directory**. Then start the controller and sampler. |
+| Before every matched campaign | Section 3.1: check ownership and infrastructure, save the current state, clear only the experiment application's old pods and start one fresh ready application pod. |
+| For each baseline run | Section 3.2: create the baseline HPA, run preflight and the three-site smoke test, reset to one fresh pod if needed, then start the sampler and measured UE workload. |
+| Before each proposed run | Section 3.3: remove only the campaign HPA, clear the experiment application's pods, start one fresh ready pod, and validate the controller in non-mutating mode with active smoke traffic before the measured run. |
 | After each proposed run | Stop controller and sampler, recover owned resources, restore the original affinity and replica count, and verify the resulting cluster state. |
 | After each matched pair | Section 3.4: summarize, transfer and checksum raw data, produce plots and retain logs. Use new output directories for repeats. |
 
@@ -192,19 +192,47 @@ kubectl -n placement get svc,deploy ue-telemetry
 kubectl get nodes
 kubectl top nodes
 kubectl describe nodes gnb1 gnb-2 gnb-3
-.venv/bin/python -m experiments.preflight
 ```
 
-Confirm one ready app replica, collector ready, no workload HPA, no controller or other replica writer, and no owned placement groups or migration annotation. Inspect the saved Deployment's original affinity; the following temporary constraint is appropriate **only if it has no existing affinity**. Otherwise stop and design an equivalent constraint with the owner; do not overwrite existing affinity.
+Confirm the collector is ready and no workload HPA, controller or other replica writer is active. Identify any controller-owned groups and migration annotation; if present, stop and follow ownership-aware recovery below before proceeding. Inspect the saved Deployment's original affinity; the following temporary constraint is appropriate **only if it has no existing affinity**. Otherwise stop and design an equivalent constraint with the owner; do not overwrite existing affinity.
+
+Clear only this experiment's application pods by scaling its Deployment to zero. This temporarily makes the application unavailable. Do **not** delete the collector, gNB, UPF, core or other teams' pods. If the HPA or another writer is active, stop here until its owner stops it; otherwise it can recreate pods during cleanup.
+
+```sh
+kubectl -n services scale deployment/mec-placement-face-detection --replicas=0
+kubectl -n services wait --for=delete pod -l app=mec-placement-face-detection --timeout=180s
+kubectl -n services get pods -l app=mec-placement-face-detection -o wide
+```
+
+Confirm that no experiment application pods remain. Apply the common node constraint while the application is stopped, then start exactly one fresh application pod:
 
 ```sh
 kubectl -n services patch deployment mec-placement-face-detection --type=merge -p \
   '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["gnb1","gnb-2","gnb-3"]}]}]}}}}}}'
+kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
 kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
 kubectl -n services get deployment mec-placement-face-detection -o yaml > "results/$CAMPAIGN/deployment-matched.yaml"
 ```
 
-Wait until only one app pod is running and old pods have terminated. Keep this same constraint for both conditions. Verify live Services still use app NodePort 30998 and collector NodePort 31669; substitute verified addresses if they changed. Verify the collector token file on the UE host and do not print its contents. During active traffic check `/metrics`: window complete, nonzero attempts, no collector rejects or overflow, expected per-node attempts, and independent SMF/AMF session mapping for all active UEs. Compare telemetry delivery and raw request records; fail closed on missing or stale data.
+Wait until exactly one new application pod is running and ready. The Deployment creates the pod; the HPA introduced next changes its desired replica count but does not create the Deployment. Keep this same constraint for both conditions. Verify live Services still use app NodePort 30998 and collector NodePort 31669; substitute verified addresses if they changed. Verify the collector token file on the UE host and do not print its contents.
+
+
+### 3.2 Baseline HPA — each baseline run
+
+In **core `mec-control`**, after confirming no other writer:
+
+```sh
+kubectl create -f experiments/hpa-baseline.yaml
+kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-created.yaml"
+mkdir "results/$CAMPAIGN/baseline"
+```
+With the new application pod ready, the HPA active, and the collector available, run the read-only preflight on **core**:
+
+```sh
+.venv/bin/python -m experiments.preflight
+```
+
+With no UE traffic, an idle collector is reported as **unverified**, not as validated latency. The next smoke test starts temporary UEs; run preflight again while its traffic is active. It is not the measured experiment.
 
 For a three-site connectivity smoke test, run this on the **UE host** after confirming the reserved subscriber is free and the paths, token and ports are correct:
 
@@ -223,15 +251,22 @@ sudo .venv/bin/python -u -m experiments.experiment --armed \
 
 Run the read-only preflight on core while traffic is active and separately verify each site's UE IP, session, DNN, UPF anchor, route and telemetry association. The smoke reuses one subscriber at each site in turn; it does not validate every reserved subscriber or all three sites simultaneously. Verify the full pool independently. Wait for cleanup before starting the campaign.
 
-### 3.2 Baseline HPA — each baseline run
-
-In **core `mec-control`**, after confirming no other writer:
+The smoke test can cause the HPA to scale, so reset its state and start the **measured baseline** from one fresh pod. On **core**, after smoke cleanup and after confirming this is the campaign-owned HPA:
 
 ```sh
+kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-smoke-after.yaml"
+kubectl -n services delete hpa mec-placement-face-detection-baseline
+kubectl -n services scale deployment/mec-placement-face-detection --replicas=0
+kubectl -n services wait --for=delete pod -l app=mec-placement-face-detection --timeout=180s
+kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
+kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
+kubectl -n services get pods -l app=mec-placement-face-detection -o wide
 kubectl create -f experiments/hpa-baseline.yaml
-kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-created.yaml"
-mkdir "results/$CAMPAIGN/baseline"
+kubectl -n services get hpa mec-placement-face-detection-baseline
 ```
+
+Confirm exactly one fresh pod is ready before starting the measured UE workload. If the HPA has already scaled above one, stop and reset again; never scale while another replica writer is active.
+
 
 The baseline targets 80% of CPU request, with 1–100 replicas and a 180-second scale-down window. For a 200m request, the target is 160m per pod, not 80% of the CPU limit. Confirm Metrics Server reports valid data and all pods have CPU requests; the threshold is not a calibrated latency SLO.
 
@@ -274,12 +309,14 @@ Before deleting the HPA, confirm it is still the experiment-owned instance and h
 kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-after.yaml"
 kubectl -n services delete hpa mec-placement-face-detection-baseline
 kubectl -n services get hpa
+kubectl -n services scale deployment/mec-placement-face-detection --replicas=0
+kubectl -n services wait --for=delete pod -l app=mec-placement-face-detection --timeout=180s
 kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
 kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
 kubectl -n services get pods -l app=mec-placement-face-detection -o wide
 ```
 
-Wait for all scaled-down pods to terminate. Confirm the single remaining pod is ready, the temporary matched node constraint is still present, there is no HPA or other replica writer, and there are no controller-owned groups or migration annotation. Do not start the proposed condition while old pods are still terminating.
+Confirm the old application pods have terminated and the single newly created pod is ready. The temporary matched node constraint must still be present; there must be no HPA, other replica writer, controller-owned group or migration annotation.
 
 Create a campaign-specific controller config from the validated `config.yaml`; retain `max_replicas: 100`, `interval_seconds: 10`, `mode: mobility-aware`, and the verified metrics and eligible nodes. Set an absolute path to `apps/face-detection/manifest.yaml`, because relative paths are resolved relative to the config file. First use `mutate: false` and run `--once` while the three-site smoke workload is active; an idle telemetry window cannot validate p90. Check the target, per-node metrics and logs. Only after checks pass and the trial is authorized, set `mutate: true` in this campaign copy; keep the checked-in default `config.yaml` non-mutating.
 
@@ -296,7 +333,7 @@ data["mutate"] = False
 with path.open("x") as stream:
     yaml.safe_dump(data, stream, sort_keys=False)
 PY
-# On the UE host, rerun the section 3.1 smoke command with
+# On the UE host, rerun the section 3.2 smoke command with
 # --output-dir "results/$CAMPAIGN/smoke-proposed"; then run the next
 # command on core while that smoke is actively generating traffic.
 .venv/bin/python -m controller --config "results/$CAMPAIGN/controller.yaml" --once
