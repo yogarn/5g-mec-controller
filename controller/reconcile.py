@@ -72,8 +72,17 @@ class Reconciler:
 
     def _nodes(self, request):
         s = self.settings
-        cpu = self.prometheus.per_node(s.cpu_utilization_query, s.eligible_nodes)
-        mobility = self.prometheus.per_node(s.mobility_query, s.eligible_nodes)
+        zero_locality_nodes = s.zero_locality_nodes
+        try:
+            cpu = self.prometheus.per_node(s.cpu_utilization_query, s.eligible_nodes)
+        except ValueError as exc:
+            raise ValueError(
+                f'CPU utilization query requires one fresh node-labelled series per eligible node '
+                f'(including {list(zero_locality_nodes)}): {exc}'
+            ) from exc
+        locality_nodes = tuple(name for name in s.eligible_nodes if name not in zero_locality_nodes)
+        mobility = self.prometheus.per_node(s.mobility_query, locality_nodes)
+        mobility.update({name: 0.0 for name in zero_locality_nodes})
         gpu, vram = {}, {}
         if s.gpu_nodes:
             for query, values in ((s.gpu_utilization_query, gpu),

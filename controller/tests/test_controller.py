@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import yaml
 
 from controller.config import load_settings, workload_identity
 from controller.policy import LatencyRatioPolicy, Node, plan_placement, rank_nodes
@@ -14,6 +15,23 @@ WEIGHTS = {'cpu': .4, 'memory': .4, 'gpu': .1, 'vram': .1}
 
 
 class ManifestTests(unittest.TestCase):
+    def test_shipped_manifest_and_configuration_allow_all_nodes(self):
+        root = Path(__file__).resolve().parents[2]
+        settings = load_settings(str(root / 'config.yaml'))
+        documents = list(yaml.safe_load_all(settings.manifest.read_text()))
+        deployment = next(d for d in documents if d['kind'] == 'Deployment')
+        pod = deployment['spec']['template']['spec']
+        terms = pod['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
+        names = {name for term in terms for field in term['matchFields']
+                 if field['key'] == 'metadata.name' and field['operator'] == 'In'
+                 for name in field['values']}
+        self.assertEqual(names, {'gnb1', 'gnb-2', 'gnb-3', 'core-5g'})
+        self.assertEqual(set(settings.eligible_nodes), names)
+        self.assertEqual(settings.zero_locality_nodes, ('core-5g',))
+        self.assertIn('core-5g', settings.cpu_utilization_query)
+        self.assertEqual(pod['schedulerName'], 'default-scheduler')
+        self.assertNotIn('preferredDuringSchedulingIgnoredDuringExecution', pod['affinity']['nodeAffinity'])
+
     def test_multidocument_identity_and_namespace_conflict(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'workload.yaml'
@@ -67,6 +85,21 @@ class ManifestTests(unittest.TestCase):
                     config.write_text(base + extra)
                     with self.assertRaises(ValueError):
                         load_settings(str(config))
+    def test_zero_locality_configuration_is_strict(self):
+        base = ('manifest: app.yaml\nprometheus_url: http://localhost:9090\n'
+                'latency_query: latency\nslo_seconds: 1\nmin_replicas: 1\n'
+                'max_replicas: 4\nmode: mobility-aware\neligible_nodes: [a, core]\n'
+                'cpu_utilization_query: cpu\nmobility_query: traffic\ngpu_nodes: []\n')
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'config.yaml'
+            config.write_text(base + 'zero_locality_nodes: [core]\n')
+            self.assertEqual(load_settings(str(config)).zero_locality_nodes, ('core',))
+            for value in ('[other]', '[core, core]', '[a, core]', 'core'):
+                with self.subTest(value=value):
+                    config.write_text(base + f'zero_locality_nodes: {value}\n')
+                    with self.assertRaises(ValueError):
+                        load_settings(str(config))
+
 
 
 class PolicyTests(unittest.TestCase):
@@ -124,6 +157,12 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rank_nodes([Node('bad', {'cpu': 1}, {}, .2, 0, gpu_free=1.1)],
                        {'cpu': 1}, .8, .4, WEIGHTS)
+
+    def test_core_competes_with_feasible_edge_by_score(self):
+        nodes = [Node('gnb1', {'cpu': 4, 'memory': 4}, {'cpu': 3, 'memory': 3}, .1, 0),
+                 Node('core-5g', {'cpu': 4, 'memory': 4}, {}, .1, 0)]
+        result = plan_placement(nodes, {'cpu': 1, 'memory': 1}, {}, 1, .8, .4, WEIGHTS)
+        self.assertEqual(result['targets'], {'core-5g': 1, 'gnb1': 0})
 
     def test_sequential_scale_up_and_capacity(self):
         nodes = [Node('a', {'cpu': 4, 'memory': 4}, {'cpu': 1, 'memory': 1}, .1, 0),

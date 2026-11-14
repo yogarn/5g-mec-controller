@@ -12,7 +12,7 @@ class GPUReconciliationTests(unittest.TestCase):
         self.settings = SimpleNamespace(
             scale_down_seconds=20, mode='mobility-aware', latency_query='latency',
             slo_seconds=1, min_replicas=1, max_replicas=4, mutate=False,
-            cooldown_seconds=10, eligible_nodes=('gnb1', 'gnb-2', 'gnb-3'),
+            cooldown_seconds=10, eligible_nodes=('gnb1', 'gnb-2', 'gnb-3'), zero_locality_nodes=(),
             gpu_nodes=('gnb-2', 'gnb-3'), cpu_utilization_query='cpu',
             mobility_query='traffic', gpu_utilization_query='gpu',
             vram_utilization_query='vram', cpu_saturation=.8, locality_weight=.4,
@@ -76,6 +76,25 @@ class GPUReconciliationTests(unittest.TestCase):
         nodes = self.controller._nodes({'cpu': 1, 'memory': 1})
         self.assertTrue(all(n.gpu_free == n.vram_free == 0 for n in nodes))
         self.assertEqual(self.prom.vector.call_args_list, [call('cpu'), call('traffic')])
+    def test_core_has_zero_locality_but_all_cpu_and_edge_telemetry_are_required(self):
+        self.settings.eligible_nodes += ('core-5g',)
+        self.settings.zero_locality_nodes = ('core-5g',)
+        self.core.list_node.return_value['items'].append({
+            'metadata': {'name': 'core-5g'},
+            'status': {'allocatable': {'cpu': '4', 'memory': '4Gi'},
+                       'conditions': [{'type': 'Ready', 'status': 'True'}]}})
+        self.series['cpu'].append(({'node': 'core-5g'}, .3))
+        nodes = self.controller._nodes({'cpu': 1, 'memory': 1})
+        core = next(n for n in nodes if n.name == 'core-5g')
+        self.assertEqual((core.arrival_rate, core.cpu_utilization), (0, .3))
+        self.series['traffic'].pop()
+        with self.assertRaisesRegex(ValueError, 'missing eligible nodes'):
+            self.controller._nodes({'cpu': 1, 'memory': 1})
+        self.series['traffic'].append(({'node': 'gnb-3'}, 1.0))
+        self.series['cpu'].pop()
+        with self.assertRaisesRegex(ValueError, 'CPU utilization.*core-5g'):
+            self.controller._nodes({'cpu': 1, 'memory': 1})
+
 
     def test_missing_duplicate_or_unexpected_exporter_fails_closed(self):
         for query in ('gpu', 'vram'):
