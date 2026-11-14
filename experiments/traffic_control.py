@@ -145,7 +145,8 @@ class TrafficDelay:
             node, interface, ifb = record['node'], record['interface'], record['ifb']
             qdiscs = json.loads(self._exec(node, 'tc', '-j', 'qdisc', 'show', 'dev', ifb, capture_output=True).stdout)
             delays = [q.get('options', {}).get('delay', {}).get('delay') for q in qdiscs if q.get('kind') == 'netem']
-            if len(delays) != 1 or not isinstance(delays[0], (int, float)) or not math.isclose(delays[0], self.delay_ms / 1000, rel_tol=1e-9, abs_tol=0.0000005):
+            # iproute2/kernel time conversion can truncate reported microseconds.
+            if len(delays) != 1 or not isinstance(delays[0], (int, float)) or delays[0] <= 0 or not math.isclose(delays[0], self.delay_ms / 1000, rel_tol=1e-9, abs_tol=0.000002):
                 raise RuntimeError(f'{node}/{ifb} {self.delay_ms:g} ms delay is missing or changed')
             for preference, direction in record['filters']:
                 text = self._filter(node, interface, preference)

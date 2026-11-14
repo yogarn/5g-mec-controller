@@ -35,12 +35,12 @@ def test_cleanup_does_not_remove_replaced_filter_or_its_ifb():
     delay._exec.assert_not_called()
 
 
-@pytest.mark.parametrize('delay_ms', [0.5, 10, 1000])
-def test_health_check_uses_configured_delay_even_when_tc_changes_units(delay_ms):
+@pytest.mark.parametrize(('delay_ms', 'reported_seconds'), [(0.5, 0.0005), (7.5, 0.007499), (10, 0.01), (1000, 1)])
+def test_health_check_uses_configured_delay_even_when_tc_changes_units(delay_ms, reported_seconds):
     delay = TrafficDelay(delay_ms)
     delay.started = True
     delay.devices = [{'node': 'a', 'interface': 'eth0', 'ifb': 'mec123', 'filters': []}]
-    result = Mock(stdout='[{"kind":"netem","options":{"delay":{"delay":%s}}}]' % (delay_ms / 1000))
+    result = Mock(stdout='[{"kind":"netem","options":{"delay":{"delay":%s}}}]' % reported_seconds)
     delay._exec = Mock(return_value=result)
     delay.check()
     result.stdout = '[{"kind":"netem","options":{"delay":{"delay":99}}}]'
