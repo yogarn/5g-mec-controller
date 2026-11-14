@@ -75,6 +75,13 @@ def prerequisites(settings):
     from controller.config import load_settings
     config = load_settings(ROOT / 'config.yaml')
     kube('get', '--raw=/readyz')
+    nodes = json.loads(kube('get', 'nodes', '-o', 'json', capture_output=True, text=True).stdout)
+    by_name = {node['metadata']['name']: node for node in nodes['items']}
+    for site, node_name in (('gnb-1', 'gnb1'), ('gnb-2', 'gnb-2'), ('gnb-3', 'gnb-3')):
+        addresses = {item['address'] for item in by_name.get(node_name, {}).get('status', {}).get('addresses', [])
+                     if item.get('type') == 'InternalIP'}
+        if settings['site_node_ips'][site] not in addresses:
+            raise RuntimeError(f'{site} NodePort IP does not match node {node_name} InternalIP')
     collector = get('deployment', 'ue-telemetry', 'placement')
     if collector['spec']['replicas'] != 1 or collector.get('status', {}).get('readyReplicas') != 1:
         raise RuntimeError('placement/ue-telemetry must have exactly one ready replica')
@@ -195,6 +202,8 @@ def run_method(settings, campaign, root, method):
                     raise RuntimeError('controller did not deploy the workload')
             kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + APP, '--timeout=180s')
             service = get('service', APP)
+            if service['spec'].get('trafficDistribution') != 'PreferSameNode':
+                raise RuntimeError('face-detection Service lacks PreferSameNode routing')
             port = service['spec']['ports'][0]['nodePort']
             site_urls = {site: f'http://{address}:{port}/detect'
                          for site, address in settings['site_node_ips'].items()}
