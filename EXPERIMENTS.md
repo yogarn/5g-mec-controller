@@ -526,20 +526,28 @@ for method in baseline proposed; do
 done
 ```
 
-Transfer each run's `requests.jsonl`, `summary.csv`, remaining summaries, `run.json`, lifecycle journal and console log to the corresponding core campaign directory without overwriting sampler files. Check the `requests.jsonl` SHA-256 on core against the UE host before proceeding; retain the originals. On **core**:
-
-For example, from the **UE host**, with SSH access to `core` and the same `CAMPAIGN` on both machines:
+Transfer each run's `requests.jsonl`, summaries, `run.json`, lifecycle journal and console log to the corresponding core campaign directory without overwriting sampler files. The UE host does **not** necessarily have an SSH alias named `core`; on this testbed use `member@10.34.211.140`. Check connectivity and the campaign name on **UE `mec-ue`**:
 
 ```sh
+echo "CAMPAIGN=$CAMPAIGN"
+ssh member@10.34.211.140 'hostname'
+```
+
+Confirm the hostname is `core-5g`, `CAMPAIGN` matches the run you just completed, and the destination `baseline` and `proposed` directories already exist. The following transfer refuses to overwrite an existing `requests.jsonl` or `runner.log`; tar also refuses to replace any other existing file. If interrupted, inspect the destination before retrying; do not delete or overwrite existing results without checking them.
+
+```sh
+set -o pipefail
 for method in baseline proposed; do
+  DEST="/home/member/skripsi_yoga/5g-mec-controller/results/$CAMPAIGN/$method"
+  ssh member@10.34.211.140 "test -d '$DEST' && test ! -e '$DEST/requests.jsonl' && test ! -e '$DEST/runner.log'" || break
   sudo tar -C "results/$CAMPAIGN/$method" -czf - \
     requests.jsonl summary.csv summary.json summary-ues.csv summary-ues.json run.json owned_ues |
-    ssh core "tar -xzf - -C /home/member/skripsi_yoga/5g-mec-controller/results/$CAMPAIGN/$method"
-  scp "$method-$CAMPAIGN.log" "core:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMPAIGN/$method/runner.log"
+    ssh member@10.34.211.140 "tar -xkzf - -C '$DEST'" || break
+  scp "$method-$CAMPAIGN.log" "member@10.34.211.140:$DEST/runner.log" || break
 done
 ```
 
-The destination run directories must already exist and must not contain files with those names. `tar` will overwrite matching names; stop if they already exist. Transfer over a trusted channel because the lifecycle journal contains private subscriber information. Verify checksums after transfer.
+Transfer over a trusted channel because the lifecycle journal contains private subscriber information. Compare the `requests.jsonl` SHA-256 values printed on the UE host against those on core before proceeding; retain the originals.
 
 ```sh
 for method in baseline proposed; do
