@@ -33,8 +33,10 @@ max_replicas: 100
 interval_seconds: 10
 mode: mobility-aware
 mutate: false
-eligible_nodes: [gnb1, gnb-2, gnb-3]
-cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}[2m]))'
+eligible_nodes: [gnb1, gnb-2, gnb-3, core-5g]
+# The UE collector reports the three gNB sites, not the core.
+zero_locality_nodes: [core-5g]
+cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3|core-5g"}[2m]))'
 # Request attempts are a traffic-share proxy, not observed UE mobility or handovers.
 mobility_query: 'ue_request_node_window_attempts{job="ue-telemetry",node=~"gnb1|gnb-2|gnb-3"} / 15'
 locality_weight: 0.4

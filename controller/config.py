@@ -30,6 +30,7 @@ class Settings:
     gpu_nodes: tuple[str, ...]
     gpu_utilization_query: str | None
     vram_utilization_query: str | None
+    zero_locality_nodes: tuple[str, ...]
 
 
 def load_settings(path: str) -> Settings:
@@ -43,7 +44,7 @@ def load_settings(path: str) -> Settings:
                'eligible_nodes', 'cpu_utilization_query', 'mobility_query', 'cpu_saturation',
                'locality_weight', 'cooldown_seconds', 'max_metric_age_seconds',
                'scale_down_seconds', 'resource_weights', 'gpu_nodes',
-               'gpu_utilization_query', 'vram_utilization_query'}
+               'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
     for key in ('manifest', 'prometheus_url', 'latency_query', 'slo_seconds', 'min_replicas', 'max_replicas', 'mode'):
@@ -65,6 +66,14 @@ def load_settings(path: str) -> Settings:
     nodes = data.get('eligible_nodes', [])
     if not isinstance(nodes, list) or any(not isinstance(n, str) or not n for n in nodes) or len(set(nodes)) != len(nodes):
         raise ValueError('eligible_nodes must be a list of unique node names')
+    zero_locality_nodes = data.get('zero_locality_nodes', [])
+    if (not isinstance(zero_locality_nodes, list) or
+            any(not isinstance(n, str) or not n.strip() for n in zero_locality_nodes) or
+            len(set(zero_locality_nodes)) != len(zero_locality_nodes) or
+            not set(zero_locality_nodes).issubset(nodes)):
+        raise ValueError('zero_locality_nodes must be a unique subset of eligible_nodes')
+    if nodes and len(zero_locality_nodes) == len(nodes):
+        raise ValueError('at least one eligible node must require locality telemetry')
     if mode == 'mobility-aware' and 'gpu_nodes' not in data:
         raise ValueError('mobility-aware mode requires an explicit gpu_nodes inventory')
     gpu_nodes = data.get('gpu_nodes', [])
@@ -103,7 +112,8 @@ def load_settings(path: str) -> Settings:
                     number('cooldown_seconds', 120, 0),
                     number('max_metric_age_seconds', 120, 0),
                     number('scale_down_seconds', 180, 0), resource_weights, tuple(gpu_nodes),
-                    data.get('gpu_utilization_query'), data.get('vram_utilization_query'))
+                    data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
+                    tuple(zero_locality_nodes))
 
 
 def workload_identity(path: Path, namespace: str | None) -> tuple[str, str]:

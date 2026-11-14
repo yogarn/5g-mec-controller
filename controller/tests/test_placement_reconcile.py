@@ -13,7 +13,7 @@ from controller.reconcile import MIGRATION_ANNOTATION, OWNER_LABEL, Reconciler
 def world():
     settings = SimpleNamespace(mode='mobility-aware', scale_down_seconds=0, min_replicas=1,
         max_replicas=2, latency_query='latency', slo_seconds=1, mutate=True,
-        cooldown_seconds=0, eligible_nodes=('a', 'b'), cpu_saturation=.9,
+        cooldown_seconds=0, eligible_nodes=('a', 'b'), zero_locality_nodes=(), cpu_saturation=.9,
         locality_weight=.5, resource_weights={'cpu': .4, 'memory': .4, 'gpu': .1, 'vram': .1})
     original = {'metadata': {'name': 'app', 'uid': 'original-uid', 'generation': 1,
                              'resourceVersion': '1'},

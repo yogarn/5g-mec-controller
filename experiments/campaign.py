@@ -18,6 +18,7 @@ from urllib.request import urlopen
 
 import yaml
 from benchmark.client import parse_schedule
+from experiments.traffic_control import POOL_NAME, TrafficDelay
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
@@ -171,12 +172,26 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
+def _campaign_manifest(root):
+    """Write one shared, pool-isolated workload manifest for both methods."""
+    documents = list(yaml.safe_load_all((ROOT / 'apps/face-detection/manifest.yaml').read_text()))
+    deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
+    if len(deployments) != 1:
+        raise ValueError('application manifest requires exactly one Deployment')
+    metadata = deployments[0]['spec']['template'].setdefault('metadata', {})
+    metadata.setdefault('annotations', {})['cni.projectcalico.org/ipv4pools'] = json.dumps([POOL_NAME])
+    path = root / 'workload.yaml'
+    with path.open('x') as stream:
+        yaml.safe_dump_all(documents, stream, sort_keys=False)
+    return path
 
-def run_method(settings, campaign, root, method):
+
+
+def run_method(settings, campaign, root, method, delay):
     output = root / method
     output.mkdir()
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
-    config.update(manifest=str(ROOT / 'apps/face-detection/manifest.yaml'), mutate=method == 'proposed')
+    config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed')
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
@@ -186,7 +201,7 @@ def run_method(settings, campaign, root, method):
     with (output / 'controller.log').open('x') as control_log, (output / 'sampler.log').open('x') as sampler_log, (output / 'runner-ssh.log').open('x') as runner_log:
         try:
             if method == 'baseline':
-                kube('apply', '-f', ROOT / 'apps/face-detection/manifest.yaml')
+                kube('apply', '-f', root / 'workload.yaml')
                 kube('apply', '-f', ROOT / 'experiments/hpa-baseline.yaml')
             else:
                 processes.append(subprocess.Popen([sys.executable, '-u', '-m', 'controller', '--config', str(config_path), '--deploy'], stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
@@ -207,6 +222,7 @@ def run_method(settings, campaign, root, method):
             port = service['spec']['ports'][0]['nodePort']
             site_urls = {site: f'http://{address}:{port}/detect'
                          for site, address in settings['site_node_ips'].items()}
+            delay.check()
             command([sys.executable, '-m', 'experiments.preflight', '--config', config_path])
             sampler = subprocess.Popen([sys.executable, '-u', '-m', 'experiments.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(sampler)
@@ -218,6 +234,7 @@ def run_method(settings, campaign, root, method):
             verified = False
             deadline = time.monotonic() + 90
             while ue.poll() is None:
+                delay.check()
                 if any(p.poll() is not None for p in processes):
                     raise RuntimeError('controller or sampler exited during traffic; see logs')
                 if not verified:
@@ -282,14 +299,20 @@ def main(argv=None):
         def interrupted(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupted)
+        delay = TrafficDelay()
         try:
+            delay.start()
+            _campaign_manifest(root)
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset()
-                run_method(settings, args.campaign, root, method)
+                run_method(settings, args.campaign, root, method, delay)
             command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots'])
         finally:
-            reset()
+            try:
+                reset()
+            finally:
+                delay.close()
         print(f'Campaign complete. Raw data, logs and plots: {root}', flush=True)
 
 
