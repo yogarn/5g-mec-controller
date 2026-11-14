@@ -2,6 +2,7 @@
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -47,16 +48,25 @@ def remote_settings(settings):
 
 def load(path):
     data = yaml.safe_load(Path(path).read_text())
-    expected = {'ue_host', 'ue_project', 'inventory', 'nr_ue', 'token', 'image', 'node_ip',
+    expected = {'ue_host', 'ue_project', 'inventory', 'nr_ue', 'token', 'image', 'site_node_ips',
                 'telemetry_url', 'schedule', 'phase_duration'}
     if not isinstance(data, dict) or set(data) != expected:
         raise ValueError('campaign configuration keys must be: ' + ', '.join(sorted(expected)))
     if not isinstance(data['phase_duration'], (int, float)) or data['phase_duration'] < 30:
         raise ValueError('phase_duration must be at least 30 seconds for telemetry checks')
     parse_schedule(data['schedule'])
-    for key in expected - {'phase_duration'}:
+    for key in expected - {'phase_duration', 'site_node_ips'}:
         if not isinstance(data[key], str) or not data[key].strip():
             raise ValueError(f'{key} must be a nonempty string')
+    sites = data['site_node_ips']
+    if not isinstance(sites, dict) or set(sites) != {'gnb-1', 'gnb-2', 'gnb-3'}:
+        raise ValueError('site_node_ips must map gnb-1, gnb-2 and gnb-3 to node IPv4 addresses')
+    for address in sites.values():
+        try:
+            if not isinstance(address, str) or ipaddress.ip_address(address).version != 4:
+                raise ValueError
+        except ValueError:
+            raise ValueError('site_node_ips must contain valid IPv4 addresses') from None
     return data
 
 
@@ -185,11 +195,13 @@ def run_method(settings, campaign, root, method):
                     raise RuntimeError('controller did not deploy the workload')
             kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + APP, '--timeout=180s')
             service = get('service', APP)
-            url = f'http://{settings["node_ip"]}:{service["spec"]["ports"][0]["nodePort"]}/detect'
+            port = service['spec']['ports'][0]['nodePort']
+            site_urls = {site: f'http://{address}:{port}/detect'
+                         for site, address in settings['site_node_ips'].items()}
             command([sys.executable, '-m', 'experiments.preflight', '--config', config_path])
             sampler = subprocess.Popen([sys.executable, '-u', '-m', 'experiments.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(sampler)
-            payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'url': url,
+            payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
                        'schedule': settings['schedule'], 'duration': settings['phase_duration']}
             ue = subprocess.Popen(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'run']), stdin=subprocess.PIPE, stdout=runner_log, stderr=subprocess.STDOUT, text=True, start_new_session=True)
             remote_started = True
