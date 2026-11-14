@@ -3,6 +3,7 @@ import argparse
 import fcntl
 import hashlib
 import ipaddress
+import math
 import json
 import os
 from pathlib import Path
@@ -172,14 +173,15 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
-def _campaign_manifest(root):
-    """Write one shared, pool-isolated workload manifest for both methods."""
+def _campaign_manifest(root, use_tc):
+    """Write one shared workload manifest for both methods."""
     documents = list(yaml.safe_load_all((ROOT / 'apps/face-detection/manifest.yaml').read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
     if len(deployments) != 1:
         raise ValueError('application manifest requires exactly one Deployment')
-    metadata = deployments[0]['spec']['template'].setdefault('metadata', {})
-    metadata.setdefault('annotations', {})['cni.projectcalico.org/ipv4pools'] = json.dumps([POOL_NAME])
+    if use_tc:
+        metadata = deployments[0]['spec']['template'].setdefault('metadata', {})
+        metadata.setdefault('annotations', {})['cni.projectcalico.org/ipv4pools'] = json.dumps([POOL_NAME])
     path = root / 'workload.yaml'
     with path.open('x') as stream:
         yaml.safe_dump_all(documents, stream, sort_keys=False)
@@ -187,11 +189,11 @@ def _campaign_manifest(root):
 
 
 
-def run_method(settings, campaign, root, method, delay):
+def run_method(settings, campaign, root, method, delay, slo_ms):
     output = root / method
     output.mkdir()
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
-    config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed')
+    config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed', slo_seconds=slo_ms / 1000)
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
@@ -222,7 +224,8 @@ def run_method(settings, campaign, root, method, delay):
             port = service['spec']['ports'][0]['nodePort']
             site_urls = {site: f'http://{address}:{port}/detect'
                          for site, address in settings['site_node_ips'].items()}
-            delay.check()
+            if delay is not None:
+                delay.check()
             command([sys.executable, '-m', 'experiments.preflight', '--config', config_path])
             sampler = subprocess.Popen([sys.executable, '-u', '-m', 'experiments.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(sampler)
@@ -234,7 +237,8 @@ def run_method(settings, campaign, root, method, delay):
             verified = False
             deadline = time.monotonic() + 90
             while ue.poll() is None:
-                delay.check()
+                if delay is not None:
+                    delay.check()
                 if any(p.poll() is not None for p in processes):
                     raise RuntimeError('controller or sampler exited during traffic; see logs')
                 if not verified:
@@ -267,7 +271,7 @@ def run_method(settings, campaign, root, method, delay):
     with (output / 'deployments-after.json').open('x') as stream:
         kube('-n', NAMESPACE, 'get', 'deployments,pods,hpa', '-o', 'json', stdout=stream)
     transfer(settings, campaign, method, output)
-    command([sys.executable, '-m', 'experiments.summarize', output / 'requests.jsonl', '--slo-ms', '500'])
+    command([sys.executable, '-m', 'experiments.summarize', output / 'requests.jsonl', '--slo-ms', str(slo_ms)])
     command([sys.executable, '-m', 'experiments.monitor_resources', 'summarize', output / 'metrics.jsonl', output / 'requests.jsonl', output / 'summary.csv', output])
     command([sys.executable, '-m', 'experiments.telemetry_history', output / 'requests.jsonl', output, '--prometheus-url', config['prometheus_url']])
 
@@ -277,10 +281,17 @@ def main(argv=None):
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
     parser.add_argument('--check', action='store_true', help='read-only dependency and connectivity checks')
+    parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
+    parser.add_argument('--slo-ms', type=float, help='controller p90 target and reporting threshold in milliseconds (default: config.yaml)')
     args = parser.parse_args(argv)
+    if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
+        parser.error('--tc-ms must be finite and at least 0.001 ms')
+    if args.slo_ms is not None and (not math.isfinite(args.slo_ms) or args.slo_ms <= 0):
+        parser.error('--slo-ms must be finite and positive')
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
+    slo_ms = args.slo_ms if args.slo_ms is not None else yaml.safe_load((ROOT / 'config.yaml').read_text())['slo_seconds'] * 1000
     if not args.check and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
     with open('/tmp/mec-experiment-campaign.lock', 'w') as lock:
@@ -292,27 +303,29 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         command(remote(settings, ['test', '!', '-e', f'results/{args.campaign}']))
         with (root / 'campaign.yaml').open('x') as stream:
-            yaml.safe_dump(settings, stream)
+            yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms}, stream)
         ns = kube('get', 'namespace', NAMESPACE, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
         if not ns.stdout.strip():
             kube('create', 'namespace', NAMESPACE)
         def interrupted(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupted)
-        delay = TrafficDelay()
+        delay = TrafficDelay(args.tc_ms) if args.tc_ms is not None else None
         try:
-            delay.start()
-            _campaign_manifest(root)
+            if delay is not None:
+                delay.start()
+            _campaign_manifest(root, delay is not None)
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset()
-                run_method(settings, args.campaign, root, method, delay)
-            command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots'])
+                run_method(settings, args.campaign, root, method, delay, slo_ms)
+            command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:
                 reset()
             finally:
-                delay.close()
+                if delay is not None:
+                    delay.close()
         print(f'Campaign complete. Raw data, logs and plots: {root}', flush=True)
 
 

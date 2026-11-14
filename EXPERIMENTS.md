@@ -15,6 +15,14 @@ Inside that session:
 bash experiments/run.sh run_2
 ```
 
+Traffic control is **off by default**. To enable a 10 ms one-way inter-node delay and set a 750 ms controller/reporting SLO:
+
+```bash
+bash experiments/run.sh run_2 --tc-ms 10 --slo-ms 750
+```
+
+Omit `--tc-ms` for no added delay. Omit `--slo-ms` to use `slo_seconds` from `config.yaml` (currently 500 ms). Both methods use the same settings, saved in the campaign's `campaign.yaml`.
+
 Use a **new name** for each campaign (`run_2`, `run_3`, etc.). Existing result directories are never reused. You do not need another tmux session, manually started samplers, manual UE commands, file transfers, or owner-label commands.
 
 The command performs the complete sequence:
@@ -97,9 +105,9 @@ The baseline uses Kubernetes' **default scheduler** with the same required eligi
 
 For both methods, each UE group sends to its own gNB's NodePort, using `site_node_ips` from `experiments/campaign.yaml`. The runner checks these against Kubernetes node InternalIPs. The Service requests `PreferSameNode`: kube-proxy prefers a ready endpoint on the receiving node and falls back to another node when none is local. It does not spill over based on endpoint load. Routing from each UE through its UPF to its configured NodePort must be verified on the live network; preflight does not prove those paths.
 
-During both methods the runner reserves the Calico pool `mec-campaign-reserved` (`172.16.40.0/23`) for the experiment Deployment and applies 10 ms netem delay per inter-node egress interface, in both directions, only to TCP port 5000 traffic to or from that pool. It checks the filters during traffic and removes its filters and IFB devices after deleting the experiment pods. The pool and empty `clsact` hooks remain reserved after the run so that unrelated pods cannot inherit stale rules after a crash and existing filters are never removed. Explicitly assigning unrelated pods to this pool defeats isolation. A forced process kill can leave filters and IFBs; the next campaign refuses to overwrite them and requires manual cleanup.
+When `--tc-ms` is specified, both methods use the reserved Calico pool `mec-campaign-reserved` (`172.16.40.0/23`) and the runner applies the requested one-way netem delay per inter-node egress interface, in both directions, only to TCP port 5000 traffic to or from that pool. It checks the filters during traffic and removes its filters and IFB devices after deleting the experiment pods. The pool and empty `clsact` hooks remain reserved after the run so that unrelated pods cannot inherit stale rules after a crash and existing filters are never removed. Explicitly assigning unrelated pods to this pool defeats isolation. A forced process kill can leave filters and IFBs; the next campaign with `--tc-ms` refuses to overwrite them and requires manual cleanup. Without `--tc-ms`, the runner adds no shaping or pool annotation.
 
-The controller computes `ceil(current replicas × all-attempt p90 / 0.5 seconds)`, within its configured bounds. It plans added replicas individually against projected capacity and applies the resulting per-node counts without a per-step cooldown. Migration is one replacement at a time. Missing required metrics make reconciliation fail closed.
+The controller computes `ceil(current replicas × all-attempt p90 / target)`, within its configured bounds. `--slo-ms` sets that target and the threshold for both methods' summaries and plots. The collector's separately configured SLO-attainment metric is not changed by the flag; the campaign plots calculate attainment from raw attempts. The controller plans added replicas individually against projected capacity and applies the resulting per-node counts without a per-step cooldown. Migration is one replacement at a time. Missing required metrics make reconciliation fail closed.
 
 Each phase generates traffic for **180 seconds**. The schedule is `total:gnb1:gnb2:gnb3`:
 
