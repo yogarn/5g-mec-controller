@@ -412,23 +412,100 @@ sudo .venv/bin/python -u -m experiments.experiment --armed \
 
 Monitor controller errors, pending pods, node eligibility, resource pressure and telemetry while the run proceeds. A temporarily missing metric can make the controller fail closed; record it, do not silently replace data.
 
-After all phases and UE cleanup finish, stop the controller and sampler with `Ctrl-C` in their own tmux sessions and verify their processes have exited. Save the original Deployment, its owned groups, pods, endpoints and events. Follow the ownership-aware recovery below before restoring the original Deployment to one ready replica. Remove the temporary affinity **only if it was added by this campaign and the saved original had none**:
+After all phases and UE cleanup finish, stop the controller and sampler with `Ctrl-C` in their respective tmux sessions; wait for both shell prompts. The controller's node-pinned child Deployments **do not disappear when the controller stops**. Recover the app below before touching affinity. A successful rollout of the original Deployment at zero replicas does **not** mean the app has been restored.
+
+### Restore the original application and remove managed groups
+
+These commands operate only on this experiment's application, not the collector or other workloads. On **core `mec-control`**, check that no controller or HPA is still writing replicas, and capture the state before recovery:
+
+```sh
+pgrep -af '[p]ython.*-m controller|[m]onitor_resources sample' || true
+kubectl -n services get hpa
+kubectl -n services get deployment mec-placement-face-detection -o yaml > "results/$CAMPAIGN/deployment-before-recovery.yaml"
+UID_ORIGINAL=$(kubectl -n services get deployment mec-placement-face-detection -o jsonpath='{.metadata.uid}')
+export UID_ORIGINAL
+kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o yaml > "results/$CAMPAIGN/managed-before-recovery.yaml"
+kubectl -n services get pods -l app=mec-placement-face-detection -o wide > "results/$CAMPAIGN/pods-before-recovery.txt"
+kubectl -n services get endpointslices -l kubernetes.io/service-name=mec-placement-face-detection -o yaml > "results/$CAMPAIGN/endpoints-before-recovery.yaml"
+kubectl -n services get events --sort-by=.lastTimestamp > "results/$CAMPAIGN/events-before-recovery.txt"
+kubectl -n services get deployment mec-placement-face-detection -o jsonpath='original desired={.spec.replicas} ready={.status.readyReplicas} migration={.metadata.annotations.mec-placement-controller\.io/migration}{"\n"}'
+kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" \
+  -o custom-columns=NAME:.metadata.name,DESIRED:.spec.replicas,READY:.status.readyReplicas,OWNER:.metadata.ownerReferences[0].uid
+```
+
+**Stop here** if the controller or another writer is running, if any HPA targets the original or managed Deployments, if the migration annotation is nonempty, or if an owner UID does not match `$UID_ORIGINAL`. A pending migration or batch action must be inspected and resolved before manual recovery; do not blindly clear the annotation. The following commands are for a completed run with no pending action.
+
+If the original's desired replica count shown above is greater than one, stop and resolve that state first. Otherwise start one replica of the **original** Deployment and wait until it is ready. This creates a replacement before retiring managed pods; do not proceed if it fails. The combined desired count must not exceed the configured maximum plus one replacement.
+
+```sh
+kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
+kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
+kubectl -n services get deployment mec-placement-face-detection -o jsonpath='desired={.spec.replicas} ready={.status.readyReplicas}{"\n"}'
+kubectl -n services get endpointslices -l kubernetes.io/service-name=mec-placement-face-detection
+```
+
+Confirm the original reports `desired=1 ready=1` and the Service has a healthy endpoint before continuing. If the original was already at one, it remains at one.
+
+List the managed Deployment names after verifying the owner UID above. Set `GROUPS` only from those verified names; the command refuses unexpected owner references:
+
+```sh
+set -o pipefail
+GROUPS=$(kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o json |
+  python3 -c 'import json,os,sys
+d=json.load(sys.stdin)
+uid=os.environ["UID_ORIGINAL"]
+for item in d["items"]:
+    if not any(r.get("uid")==uid and r.get("kind")=="Deployment" and r.get("name")=="mec-placement-face-detection" for r in item["metadata"].get("ownerReferences",[])):
+        sys.exit("Refusing deployment with unexpected owner")
+print(" ".join(item["metadata"]["name"] for item in d["items"]))')
+```
+
+If it reports an error, stop. Otherwise print and inspect the names; an empty list means there are no managed groups to remove:
+
+```sh
+printf 'Verified managed groups: %s\n' "$GROUPS"
+```
+
+With the original pod ready and no writer running, scale **only those verified groups** to zero:
+
+```sh
+for group in $GROUPS; do
+  kubectl -n services scale "deployment/$group" --replicas=0 || break
+done
+kubectl -n services get pods -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o wide
+```
+
+Wait for every listed managed pod, including terminating pods, to disappear. Check again with the final `kubectl get pods` command above. **Do not delete the groups while any of their pods remain or if a scale command failed.** Then delete only the verified zero-replica groups:
+
+```sh
+for group in $GROUPS; do
+  kubectl -n services delete "deployment/$group" || break
+done
+```
+
+First inspect the saved original affinity and current affinity:
+
+```sh
+kubectl -n services get deployment mec-placement-face-detection -o jsonpath='{.spec.template.spec.affinity}{"\n"}'
+```
+
+Only if this campaign added an affinity, the saved original had none, and the current affinity **still exists**, run the following patch. If it is already absent, **skip this block**. If the saved original had affinity, restore that exact approved state instead.
 
 ```sh
 kubectl -n services patch deployment mec-placement-face-detection --type=json \
   -p='[{"op":"remove","path":"/spec/template/spec/affinity"}]'
+```
+
+Whether the patch was needed or not, finish with:
+
+```sh
 kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
 kubectl -n services get hpa
+kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL"
 kubectl -n services get pods -l app=mec-placement-face-detection -o wide
 ```
 
-Confirm exactly one ready app pod remains, no temporary HPA, owned groups or migration annotation remain, and the saved original affinity is restored. Do not delete unrelated resources or globally kill UE processes.
-
-### Ownership-aware recovery
-
-Stop all replica writers and capture the original Deployment, managed child Deployments, pods and Service endpoints. Identify children by the original Deployment UID (`mec-placement-controller.io/owner=<UID>`) and verify their owner references. If the original has a `mec-placement-controller.io/migration` annotation, inspect its kind and recorded replica counts; a batch scale-up records per-node targets, while a migration records a source and destination. Stop if ownership or recovery state is unclear.
-
-Scale the original up one replica at a time; wait for readiness and healthy Service endpoints before scaling a verified owned child down by one and waiting for termination. Do not exceed the configured maximum plus one temporary replacement. Repeat until the approved desired replicas are on the original. Once healthy, remove only verified zero-replica owned groups and clear the migration annotation. Confirm neither remains before enabling the HPA or scaling-only mode. Compare the Deployment with the saved original and restore only approved changed fields; do not blindly reapply snapshots.
+Confirm the original is `1/1`, exactly one application pod is running, no managed groups or migration annotation remain, and the original affinity is restored. Never delete unrelated resources or globally kill UE processes.
 
 If interrupted UE cleanup did not finish, preserve the run directory and inspect its journal. After confirming ownership, recover only that run on the UE host:
 
