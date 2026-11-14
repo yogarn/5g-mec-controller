@@ -21,7 +21,15 @@ spec:
               - matchFields:
                   - key: metadata.name
                     operator: In
-                    values: [gnb1, gnb-2, gnb-3]
+                    values: [gnb1]
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values: [gnb-2]
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values: [gnb-3]
       containers:
         - name: face-detection
           image: 10.34.211.140:30500/face-detection@sha256:e40daf875da253d2ea354f05544d45db2ae216c33bbd0fe108dbff0261ddf8f9
