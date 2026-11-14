@@ -547,15 +547,26 @@ for method in baseline proposed; do
 done
 ```
 
-Transfer over a trusted channel because the lifecycle journal contains private subscriber information. Compare the `requests.jsonl` SHA-256 values printed on the UE host against those on core before proceeding; retain the originals.
+Transfer over a trusted channel because the lifecycle journal contains private subscriber information. On **core**, compare the hashes against the UE output. The summarizers exclusively create files and must be run **once per method**; they refuse to overwrite existing files. If a command was already run, inspect its existing outputs rather than rerunning it or deleting them. An interrupted command may leave partial files: preserve them and use a fresh output directory if regeneration is required.
 
 ```sh
 for method in baseline proposed; do
   D="results/$CAMPAIGN/$method"
   sha256sum "$D/requests.jsonl"
-  .venv/bin/python -m experiments.monitor_resources summarize "$D/metrics.jsonl" "$D/requests.jsonl" "$D/summary.csv" "$D"
-  .venv/bin/python -m experiments.telemetry_history "$D/requests.jsonl" "$D"
+  .venv/bin/python -m experiments.monitor_resources summarize "$D/metrics.jsonl" "$D/requests.jsonl" "$D/summary.csv" "$D" || break
+  .venv/bin/python -m experiments.telemetry_history "$D/requests.jsonl" "$D" || break
 done
+```
+
+Plotting requires Matplotlib in the core virtual environment; it is not included in `requirements.txt`. Install it once if it is missing:
+
+```sh
+.venv/bin/python -m pip install matplotlib
+```
+
+Then, after checking that both methods have complete `ramp-summary.csv`, `pods-by-ramp.csv`, and `resource-by-ramp.csv` files, generate the plots. Choose a **new** output directory; the plotter can overwrite existing plots.
+
+```sh
 .venv/bin/python -m experiments.plot_autoscaler "results/$CAMPAIGN" "results/$CAMPAIGN/plots"
 ```
 
