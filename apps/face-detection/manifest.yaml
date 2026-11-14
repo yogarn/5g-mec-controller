@@ -68,7 +68,9 @@ metadata:
   namespace: services
 spec:
   type: NodePort
-  trafficDistribution: PreferSameNode
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+  sessionAffinity: None
   selector:
     app: mec-placement-face-detection
   ports:

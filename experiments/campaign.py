@@ -26,6 +26,20 @@ NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 
 
+def check_service_routing(service):
+    """Require cluster-wide endpoints without locality hints or client affinity."""
+    spec = service['spec']
+    annotations = service.get('metadata', {}).get('annotations') or {}
+    if (spec.get('trafficDistribution') is not None or
+            spec.get('externalTrafficPolicy', 'Cluster') != 'Cluster' or
+            spec.get('internalTrafficPolicy', 'Cluster') != 'Cluster' or
+            spec.get('sessionAffinity', 'None') != 'None' or
+            any(annotations.get(key, 'Disabled').lower() not in ('disabled', '')
+                for key in ('service.kubernetes.io/topology-mode',
+                            'service.kubernetes.io/topology-aware-hints'))):
+        raise RuntimeError('face-detection Service requires cluster-wide routing without locality preference or session affinity')
+
+
 class RunnerProgress:
     """Relay complete remote log lines while retaining the current phase."""
 
@@ -265,8 +279,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas):
                     raise RuntimeError('controller did not deploy the workload')
             kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + APP, '--timeout=180s')
             service = get('service', APP)
-            if service['spec'].get('trafficDistribution') != 'PreferSameNode':
-                raise RuntimeError('face-detection Service lacks PreferSameNode routing')
+            check_service_routing(service)
             port = service['spec']['ports'][0]['nodePort']
             site_urls = {site: f'http://{address}:{port}/detect'
                          for site, address in settings['site_node_ips'].items()}

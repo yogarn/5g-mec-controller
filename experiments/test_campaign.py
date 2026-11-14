@@ -12,6 +12,31 @@ from experiments import campaign
 from benchmark.client import parse_schedule
 
 
+def test_workload_service_accepts_cluster_wide_routing():
+    documents = yaml.safe_load_all((campaign.ROOT / 'apps/face-detection/manifest.yaml').read_text())
+    service = next(document for document in documents if document['kind'] == 'Service')
+    campaign.check_service_routing(service)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('trafficDistribution', 'PreferSameNode'),
+    ('trafficDistribution', 'PreferSameZone'),
+    ('externalTrafficPolicy', 'Local'),
+    ('internalTrafficPolicy', 'Local'),
+    ('sessionAffinity', 'ClientIP'),
+])
+def test_campaign_rejects_restricted_or_sticky_routing(field, value):
+    with pytest.raises(RuntimeError, match='cluster-wide routing'):
+        campaign.check_service_routing({'spec': {field: value}})
+
+
+@pytest.mark.parametrize('key', ['service.kubernetes.io/topology-mode',
+                                 'service.kubernetes.io/topology-aware-hints'])
+def test_campaign_rejects_legacy_topology_hints(key):
+    with pytest.raises(RuntimeError, match='cluster-wide routing'):
+        campaign.check_service_routing({'spec': {}, 'metadata': {'annotations': {key: 'Auto'}}})
+
+
 def archive_bytes(method='baseline', unsafe=False):
     data = b'{"event":"request","success":true}\n'
     stream = io.BytesIO()
