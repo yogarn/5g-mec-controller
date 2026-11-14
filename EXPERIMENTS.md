@@ -255,7 +255,13 @@ sudo .venv/bin/python -u -m experiments.experiment --armed \
   --output-dir "results/$CAMPAIGN/smoke"
 ```
 
-Run the read-only preflight on core while traffic is active and separately verify each site's UE IP, session, DNN, UPF anchor, route and telemetry association. The smoke reuses one subscriber at each site in turn; it does not validate every reserved subscriber or all three sites simultaneously. Verify the full pool independently. Wait for cleanup before starting the campaign.
+While the smoke test is sending traffic, run this on **core `mec-control`**:
+
+```sh
+.venv/bin/python -m experiments.preflight
+```
+
+Separately verify each site's UE IP, session, DNN, UPF anchor, route and telemetry association. The smoke reuses one subscriber at each site in turn; it does not validate every reserved subscriber or all three sites simultaneously. Verify the full pool independently. Wait for cleanup before starting the campaign.
 
 The smoke test can cause the HPA to scale, so reset its state and start the **measured baseline** from one fresh pod. On **core**, after smoke cleanup and after confirming this is the campaign-owned HPA:
 
@@ -303,7 +309,7 @@ sudo .venv/bin/python -u -m experiments.experiment --armed \
   --output-dir "results/$CAMPAIGN/baseline" 2>&1 | tee "baseline-$CAMPAIGN.log"
 ```
 
-Use `set -o pipefail` before the pipeline to preserve the runner's failure exit status. Watch the log, HPA, pod readiness, node usage, failures, and telemetry delivery; stop for unsafe resource pressure. After all ten phases finish and UE cleanup completes, stop the sampler and save HPA state. Verify no experiment-owned `nr-ue` processes remain. Preserve the raw JSONL, run metadata, UE lifecycle journal, telemetry delivery/drop counts, sampler and console log.
+After all ten phases finish and UE cleanup completes, stop the **baseline sampler** in **core `mec-metrics`** by pressing `Ctrl-C`. Wait until the shell prompt returns; do not leave the baseline sampler running into the proposed run. Verify no experiment-owned `nr-ue` processes remain. Preserve the raw JSONL, run metadata, UE lifecycle journal, telemetry delivery/drop counts, sampler and console log.
 
 ### 3.3 Reset and proposed condition — before and after each proposed run
 
@@ -339,11 +345,34 @@ data["mutate"] = False
 with path.open("x") as stream:
     yaml.safe_dump(data, stream, sort_keys=False)
 PY
-# On the UE host, rerun the section 3.2 smoke command with
-# --output-dir "results/$CAMPAIGN/smoke-proposed"; then run the next
-# command on core while that smoke is actively generating traffic.
+```
+
+On **UE `mec-ue`**, start a fresh proposed-condition smoke test:
+
+```sh
+cd /home/member/skripsi_yoga/5g-mec-controller
+export CAMPAIGN=gnb3-100-01
+sudo .venv/bin/python -u -m experiments.experiment --armed \
+  --url http://10.34.211.140:30998/detect \
+  --image /home/member/.config/5g-mec/smoke.png \
+  --ue-config .private/ue-paper-24/inventory.yaml \
+  --nr-ue /home/member/5g-ai-edge/ueransim/build/nr-ue \
+  --phase-schedule '1:1:0:0,1:0:1:0,1:0:0:1' --phase-duration 30 \
+  --telemetry-url http://10.34.211.140:31669/observations \
+  --telemetry-token-file /home/member/.config/5g-mec/ue-telemetry-token \
+  --output-dir "results/$CAMPAIGN/smoke-proposed"
+```
+
+While that smoke test is **actively sending traffic**, run the non-mutating controller observation on **core `mec-control`**:
+
+```sh
 .venv/bin/python -m controller --config "results/$CAMPAIGN/controller.yaml" --once
-nano "results/$CAMPAIGN/controller.yaml"  # Set mutate: true only after validation.
+```
+
+Check its output and wait for the smoke test and UE cleanup to finish. Only after validation and authorization, change `mutate` to `true` in the campaign copy:
+
+```sh
+nano "results/$CAMPAIGN/controller.yaml"
 ```
 
 In **core `mec-control`**, create the output directory and run the controller in the foreground, retaining its log:
@@ -354,13 +383,34 @@ set -o pipefail
 .venv/bin/python -u -m controller --config "results/$CAMPAIGN/controller.yaml" 2>&1 | tee "results/$CAMPAIGN/proposed/controller.log"
 ```
 
-In **core `mec-metrics`**, start a fresh sampler:
+In **core `mec-metrics`**, confirm the baseline sampler has been stopped and the shell prompt is available. Start a **separate** sampler for the proposed run:
 
 ```sh
+cd /home/member/skripsi_yoga/5g-mec-controller
+export CAMPAIGN=gnb3-100-01
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 .venv/bin/python -u -m experiments.monitor_resources sample "results/$CAMPAIGN/proposed/metrics.jsonl"
 ```
 
-In **UE `mec-ue`**, rerun the exact baseline command with only the output directory changed to `results/$CAMPAIGN/proposed` and the log name changed to `proposed-$CAMPAIGN.log`. Keep `SCHEDULE`, URLs, image, inventory, token and duration unchanged. Monitor controller errors, pending pods, node eligibility, resource pressure and telemetry while the run proceeds. A temporarily missing metric can make the controller fail closed; record it, do not silently replace data.
+In **UE `mec-ue`**, start the measured proposed run:
+
+```sh
+cd /home/member/skripsi_yoga/5g-mec-controller
+export CAMPAIGN=gnb3-100-01
+set -o pipefail
+export SCHEDULE='3:1:1:1,9:3:3:3,9:1:2:6,9:1:1:7,15:5:5:5,15:1:4:10,15:1:1:13,24:8:8:8,24:1:7:16,24:1:1:22'
+sudo .venv/bin/python -u -m experiments.experiment --armed \
+  --url http://10.34.211.140:30998/detect \
+  --image apps/face-detection/images \
+  --ue-config .private/ue-paper-24/inventory.yaml \
+  --nr-ue /home/member/5g-ai-edge/ueransim/build/nr-ue \
+  --phase-schedule "$SCHEDULE" --phase-duration 180 \
+  --telemetry-url http://10.34.211.140:31669/observations \
+  --telemetry-token-file /home/member/.config/5g-mec/ue-telemetry-token \
+  --output-dir "results/$CAMPAIGN/proposed" 2>&1 | tee "proposed-$CAMPAIGN.log"
+```
+
+Monitor controller errors, pending pods, node eligibility, resource pressure and telemetry while the run proceeds. A temporarily missing metric can make the controller fail closed; record it, do not silently replace data.
 
 After all phases and UE cleanup finish, stop the controller and sampler with `Ctrl-C` in their own tmux sessions and verify their processes have exited. Save the original Deployment, its owned groups, pods, endpoints and events. Follow the ownership-aware recovery below before restoring the original Deployment to one ready replica. Remove the temporary affinity **only if it was added by this campaign and the saved original had none**:
 
