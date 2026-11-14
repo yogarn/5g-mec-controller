@@ -96,9 +96,15 @@ def run(args):
 
         lifecycle = OwnedUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
         try:
-            for phase in phases:
+            previous_total = None
+            for index, phase in enumerate(phases, 1):
                 counts = tuple(phase[f'gnb{site}_ues'] for site in (1, 2, 3))
-                print(f"[..] {phase['phase']}: switching to {counts[0]} gNB-1, {counts[1]} gNB-2, {counts[2]} gNB-3", flush=True)
+                total = phase['workload_ue']
+                direction = ('initial' if previous_total is None else
+                             'ramp-up' if total > previous_total else
+                             'ramp-down' if total < previous_total else 'redistribution')
+                previous_total = total
+                print(f"[..] {phase['phase']}: {index}/{len(phases)} {direction}; switching to {counts[0]} gNB-1, {counts[1]} gNB-2, {counts[2]} gNB-3", flush=True)
                 sites = lifecycle.switch_counts(phase['workload_ue'], *counts)
                 if len(sites) != 3 or tuple(map(len, sites)) != counts:
                     raise RuntimeError('registered UE count differs from requested split')
@@ -109,6 +115,7 @@ def run(args):
                 publisher = TelemetryPublisher(telemetry, [source for _, source, _ in selected]) if telemetry else None
                 start = time.time()
                 deadline = time.monotonic() + args.phase_duration
+                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {args.phase_duration:g}s", flush=True)
                 emit({'event': 'phase_start', **phase, 'start_time': start,
                       'duration_s': args.phase_duration, 'ues': [
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}

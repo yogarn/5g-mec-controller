@@ -51,14 +51,15 @@ class ManifestTests(unittest.TestCase):
             self.assertFalse(settings.mutate)
             self.assertEqual(settings.manifest, Path(directory) / 'app.yaml')
             self.assertEqual(settings.locality_weight, .4)
-            self.assertEqual(settings.resource_weights, WEIGHTS)
+            self.assertEqual(settings.resource_weights, {'cpu': .5, 'memory': .5, 'gpu': 0., 'vram': 0.})
             self.assertEqual(settings.gpu_nodes, ())
 
     def test_gpu_configuration_and_weights_are_strict(self):
         base = ('manifest: app.yaml\nprometheus_url: http://localhost:9090\n'
                 'latency_query: latency\nslo_seconds: 1\nmin_replicas: 1\n'
                 'max_replicas: 4\nmode: mobility-aware\neligible_nodes: [a, b]\n'
-                'cpu_utilization_query: cpu\nmobility_query: traffic\n')
+                'cpu_utilization_query: cpu\nmobility_query: traffic\n'
+                'resource_weights: {cpu: 0.4, memory: 0.4, gpu: 0.1, vram: 0.1}\n')
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'config.yaml'
             valid = 'gpu_nodes: [b]\ngpu_utilization_query: gpu\nvram_utilization_query: vram\n'
@@ -170,7 +171,7 @@ class PolicyTests(unittest.TestCase):
         original = copy.deepcopy(nodes)
         counts = {'a': 1}
         result = plan_placement(nodes, {'cpu': 1, 'memory': 1}, counts, 4, .8, 0, WEIGHTS)
-        self.assertEqual(result, {'targets': {'a': 2, 'b': 2}, 'migration': None})
+        self.assertEqual(result, {'targets': {'a': 2, 'b': 2}, 'deschedule': None})
         self.assertEqual(nodes, original)
         self.assertEqual(counts, {'a': 1})
         with self.assertRaises(ValueError):
@@ -185,20 +186,31 @@ class PolicyTests(unittest.TestCase):
         unavailable = [Node('a', {'cpu': 4}, {'cpu': 1}, .9, 0),
                        Node('b', {'cpu': 4}, {}, .1, 0)]
         result = plan_placement(unavailable, {'cpu': 1}, {'a': 1}, 1, .8, 0, WEIGHTS)
-        self.assertEqual(result['migration'], ('a', 'b'))
+        self.assertEqual(result['deschedule'], ('a', 'b'))
 
-    def test_migration_requires_strict_improvement_and_surge_capacity(self):
+    def test_descheduling_requires_strict_improvement_and_target_capacity(self):
         nodes = [Node('a', {'cpu': 4}, {'cpu': 2}, .1, 0),
                  Node('b', {'cpu': 4}, {}, .1, 0)]
         result = plan_placement(nodes, {'cpu': 1}, {'a': 2}, 2, .8, 0, WEIGHTS)
-        self.assertEqual(result, {'targets': {'a': 2, 'b': 0}, 'migration': ('a', 'b')})
+        self.assertEqual(result, {'targets': {'a': 2, 'b': 0}, 'deschedule': ('a', 'b')})
         tied = [Node('a', {'cpu': 2}, {'cpu': 1}, .1, 0),
                 Node('b', {'cpu': 2}, {}, .1, 0)]
-        self.assertIsNone(plan_placement(tied, {'cpu': 1}, {'a': 1}, 1, .8, 0, WEIGHTS)['migration'])
+        self.assertIsNone(plan_placement(tied, {'cpu': 1}, {'a': 1}, 1, .8, 0, WEIGHTS)['deschedule'])
         full = [nodes[0], Node('b', {'cpu': 4}, {'cpu': 4}, .1, 0)]
-        self.assertIsNone(plan_placement(full, {'cpu': 1}, {'a': 2}, 2, .8, 0, WEIGHTS)['migration'])
+        self.assertIsNone(plan_placement(full, {'cpu': 1}, {'a': 2}, 2, .8, 0, WEIGHTS)['deschedule'])
         with self.assertRaises(ValueError):
             plan_placement(nodes, {'cpu': 1}, {'unknown': 1}, 1, .8, 0, WEIGHTS)
+
+    def test_descheduling_selects_highest_delta_across_all_occupied_nodes(self):
+        nodes = [Node('a', {'cpu': 10, 'memory': 10}, {'cpu': 5, 'memory': 5}, .1, 3),
+                 Node('b', {'cpu': 10, 'memory': 10}, {'cpu': 8, 'memory': 8}, .1, 1),
+                 Node('c', {'cpu': 10, 'memory': 10}, {}, .1, 6)]
+        counts = {'a': 1, 'b': 2}
+        result = plan_placement(nodes, {'cpu': 1, 'memory': 1}, counts, 3, .8, .4, WEIGHTS)
+        self.assertEqual(result['deschedule'], ('b', 'c'))
+        # A different enumeration order must not change selection.
+        self.assertEqual(plan_placement(list(reversed(nodes)), {'cpu': 1, 'memory': 1},
+                         {'b': 2, 'a': 1}, 3, .8, .4, WEIGHTS), result)
 
     def test_init_and_overhead_requests(self):
         spec = {'containers': [{'resources': {'requests': {'cpu': '500m', 'memory': '1Gi'}}}],

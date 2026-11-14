@@ -8,7 +8,9 @@ latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 # limit, 100m CPU / 128Mi memory requests. Client on core reached the UPF
 # Envoy directly, not through a UE. Fixed 547x365 JPEG; SHA-256:
 # 5b2e247d82ea373c50d8cd826abc4487634fe6e06b770e6d8278ab0476485e17
-# SLO: >=95% of all attempts succeed within 500ms, measured at the client.
+# Current control objective: all-attempt p90 <=500ms, measured at the client.
+# The historical table below reports p95 and attainment as calibration diagnostics;
+# it does not define the current p90 objective.
 # Closed-loop clients; 5s warm-up and 15-20s measurement per tier.
 #
 # Concurrent clients | Successful requests/s | p95 client RT | SLO attainment
@@ -23,7 +25,7 @@ latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 # Raw attempts: ssh://core/home/member/mec-face-calibration-14UkXB/
 #   attempts.jsonl and refinement.jsonl.
 #
-# The controller uses all-attempt p90, not the success-based SLO above;
+# The controller uses all-attempt p90;
 # fast failures can lower p90, so monitor failures separately.
 # Recalibrate and verify delivery coverage for the actual UE routes and workload.
 # Mutation is disabled until the SLO and metric coverage are validated.
@@ -40,8 +42,10 @@ cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node
 # Request attempts are a traffic-share proxy, not observed UE mobility or handovers.
 mobility_query: 'ue_request_node_window_attempts{job="ue-telemetry",node=~"gnb1|gnb-2|gnb-3"} / 15'
 locality_weight: 0.4
-# Within the resource score; effective total weights are 24%, 24%, 6%, 6%.
-resource_weights: {cpu: 0.4, memory: 0.4, gpu: 0.1, vram: 0.1}
+# Periodic highest-positive-delta check; one removal-first replacement at a time.
+deschedule_interval_seconds: 120
+# CPU-only application: effective total weights are 30% CPU and 30% RAM.
+resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
 # Only these nodes have NVIDIA GPUs; gnb1 is explicitly GPU-less.
 gpu_nodes: [gnb-2, gnb-3]
 gpu_utilization_query: 'avg by (node) (DCGM_FI_DEV_GPU_UTIL{node=~"gnb-2|gnb-3"} / 100)'

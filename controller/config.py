@@ -31,6 +31,7 @@ class Settings:
     gpu_utilization_query: str | None
     vram_utilization_query: str | None
     zero_locality_nodes: tuple[str, ...]
+    deschedule_interval_seconds: float
 
 
 def load_settings(path: str) -> Settings:
@@ -44,7 +45,8 @@ def load_settings(path: str) -> Settings:
                'eligible_nodes', 'cpu_utilization_query', 'mobility_query', 'cpu_saturation',
                'locality_weight', 'cooldown_seconds', 'max_metric_age_seconds',
                'scale_down_seconds', 'resource_weights', 'gpu_nodes',
-               'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes'}
+               'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes',
+               'deschedule_interval_seconds'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
     for key in ('manifest', 'prometheus_url', 'latency_query', 'slo_seconds', 'min_replicas', 'max_replicas', 'mode'):
@@ -81,12 +83,13 @@ def load_settings(path: str) -> Settings:
             any(not isinstance(n, str) or not n.strip() for n in gpu_nodes) or
             len(set(gpu_nodes)) != len(gpu_nodes) or not set(gpu_nodes).issubset(nodes)):
         raise ValueError('gpu_nodes must be a unique subset of eligible_nodes')
+    resource_weights = validate_resource_weights(data.get('resource_weights', DEFAULT_RESOURCE_WEIGHTS))
     for key in ('gpu_utilization_query', 'vram_utilization_query'):
         query = data.get(key)
         if (query is not None and (not isinstance(query, str) or not query.strip())) or (
-                mode == 'mobility-aware' and gpu_nodes and query is None):
+                mode == 'mobility-aware' and gpu_nodes and
+                any(resource_weights[k] > 0 for k in ('gpu', 'vram')) and query is None):
             raise ValueError(f'{key} must be a nonempty query when GPU nodes are configured')
-    resource_weights = validate_resource_weights(data.get('resource_weights', DEFAULT_RESOURCE_WEIGHTS))
     if mode == 'mobility-aware':
         if not nodes or any(not isinstance(data.get(k), str) or not data[k].strip() for k in ('cpu_utilization_query', 'mobility_query')):
             raise ValueError('mobility-aware mode requires eligible_nodes, cpu_utilization_query and mobility_query')
@@ -113,7 +116,7 @@ def load_settings(path: str) -> Settings:
                     number('max_metric_age_seconds', 120, 0),
                     number('scale_down_seconds', 180, 0), resource_weights, tuple(gpu_nodes),
                     data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
-                    tuple(zero_locality_nodes))
+                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0))
 
 
 def workload_identity(path: Path, namespace: str | None) -> tuple[str, str]:

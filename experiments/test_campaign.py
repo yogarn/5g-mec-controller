@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from experiments import campaign
+from benchmark.client import parse_schedule
 
 
 def archive_bytes(method='baseline', unsafe=False):
@@ -87,6 +88,60 @@ def test_campaign_name_cannot_escape_results(monkeypatch):
     monkeypatch.setattr(campaign, 'load', lambda _: {})
     with pytest.raises(SystemExit) as error:
         campaign.main(['../other'])
+    assert error.value.code == 2
+
+
+def test_progress_relays_phase_lines_without_duplicates_or_partial_lines(tmp_path, capsys):
+    path = tmp_path / 'runner.log'
+    path.write_text('[RUN] phase_02: 2/19 ramp-up; 9 UEs\n[--] phase_02: 10')
+    progress = campaign.RunnerProgress(path, 'proposed')
+    progress.poll()
+    first = capsys.readouterr().out
+    assert 'proposed: [RUN] phase_02: 2/19 ramp-up; 9 UEs' in first
+    assert '[--]' not in first
+    progress.poll()
+    assert capsys.readouterr().out == ''
+    with path.open('a') as stream:
+        stream.write(' requests\n[RUN] phase_03: ramp-down')
+    progress.poll()
+    assert capsys.readouterr().out == 'proposed: [--] phase_02: 10 requests\n'
+    progress.poll(final=True)
+    assert capsys.readouterr().out == 'proposed: [RUN] phase_03: ramp-down\n'
+
+
+def test_default_campaign_has_matched_ascending_and_descending_phases():
+    settings = yaml.safe_load((campaign.ROOT / 'experiments/campaign.yaml').read_text())
+    phases = parse_schedule(settings['schedule'])
+    counts = [tuple(p[f'gnb{i}_ues'] for i in (1, 2, 3)) for p in phases]
+    assert len(phases) == 19
+    assert counts[:9] == list(reversed(counts[10:]))
+    assert settings['phase_duration'] == 300
+
+
+@pytest.mark.parametrize('cap', [1, 3, 8, 100])
+def test_replica_cap_is_identical_in_saved_baseline_hpa_and_proposed_config(tmp_path, cap):
+    baseline, _, hpa_path = campaign._method_configs(tmp_path, 'baseline', 500, cap)
+    proposed, proposed_path, no_hpa = campaign._method_configs(tmp_path, 'proposed', 500, cap)
+    hpa = yaml.safe_load(hpa_path.read_text())
+    saved = yaml.safe_load(proposed_path.read_text())
+    assert baseline['max_replicas'] == proposed['max_replicas'] == saved['max_replicas'] == hpa['spec']['maxReplicas'] == cap
+    assert baseline['min_replicas'] == proposed['min_replicas'] == hpa['spec']['minReplicas']
+    assert no_hpa is None
+    assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+
+
+@pytest.mark.parametrize('cap', [0, -1, 1.5, True])
+def test_invalid_cap_does_not_write_method_configs(tmp_path, cap):
+    with pytest.raises(ValueError, match='max replicas'):
+        campaign._method_configs(tmp_path, 'baseline', 500, cap)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize('cap', ['0', '-1', '1.5'])
+def test_cli_rejects_invalid_caps_before_preflight(monkeypatch, cap):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('preflight ran'))
+    with pytest.raises(SystemExit) as error:
+        campaign.main(['run_test', '--max-replicas', cap])
     assert error.value.code == 2
 
 
