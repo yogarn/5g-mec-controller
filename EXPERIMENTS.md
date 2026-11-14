@@ -446,11 +446,11 @@ kubectl -n services get endpointslices -l kubernetes.io/service-name=mec-placeme
 
 Confirm the original reports `desired=1 ready=1` and the Service has a healthy endpoint before continuing. If the original was already at one, it remains at one.
 
-List the managed Deployment names after verifying the owner UID above. Set `GROUPS` only from those verified names; the command refuses unexpected owner references:
+List the managed Deployment names after verifying the owner UID above. Set `MANAGED_DEPLOYMENTS` only from those verified names; the command refuses unexpected owner references:
 
 ```sh
 set -o pipefail
-GROUPS=$(kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o json |
+MANAGED_DEPLOYMENTS=$(kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o json |
   python3 -c 'import json,os,sys
 d=json.load(sys.stdin)
 uid=os.environ["UID_ORIGINAL"]
@@ -463,13 +463,13 @@ print(" ".join(item["metadata"]["name"] for item in d["items"]))')
 If it reports an error, stop. Otherwise print and inspect the names; an empty list means there are no managed groups to remove:
 
 ```sh
-printf 'Verified managed groups: %s\n' "$GROUPS"
+printf 'Verified managed deployments: %s\n' "$MANAGED_DEPLOYMENTS"
 ```
 
 With the original pod ready and no writer running, scale **only those verified groups** to zero:
 
 ```sh
-for group in $GROUPS; do
+for group in $MANAGED_DEPLOYMENTS; do
   kubectl -n services scale "deployment/$group" --replicas=0 || break
 done
 kubectl -n services get pods -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o wide
@@ -478,7 +478,7 @@ kubectl -n services get pods -l "mec-placement-controller.io/owner=$UID_ORIGINAL
 Wait for every listed managed pod, including terminating pods, to disappear. Check again with the final `kubectl get pods` command above. **Do not delete the groups while any of their pods remain or if a scale command failed.** Then delete only the verified zero-replica groups:
 
 ```sh
-for group in $GROUPS; do
+for group in $MANAGED_DEPLOYMENTS; do
   kubectl -n services delete "deployment/$group" || break
 done
 ```
