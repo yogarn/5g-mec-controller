@@ -28,7 +28,8 @@ def inventory(tmp_path):
             'opType': 'OPC', 'amf': '8000',
             'sessions': [{'type': 'IPv4', 'apn': 'site2.testbed', 'slice': {'sst': 1}}]}
     pair = {}
-    for site, dnn, ip in [('gnb2', 'site2.testbed', '10.63.1.101'),
+    for site, dnn, ip in [('gnb1', 'site1.testbed', '172.16.50.251'),
+                          ('gnb2', 'site2.testbed', '10.63.1.101'),
                           ('gnb3', 'site3.testbed', '10.64.1.101')]:
         config = copy.deepcopy(base)
         config['sessions'][0]['apn'] = dnn
@@ -45,12 +46,13 @@ def test_check_and_insert_static_sessions_without_secret_output(tmp_path):
     collection = Collection([])
     checked = provision(collection, docs)
     assert not collection.inserted
-    assert checked[0]['sessions'] == [{'dnn': 'site2.testbed', 'ipv4': '10.63.1.101'},
+    assert checked[0]['sessions'] == [{'dnn': 'site1.testbed', 'ipv4': '172.16.50.251'},
+                                      {'dnn': 'site2.testbed', 'ipv4': '10.63.1.101'},
                                       {'dnn': 'site3.testbed', 'ipv4': '10.64.1.101'}]
     assert 'security' not in checked[0]
     assert provision(collection, docs, apply=True) == checked
     assert collection.inserted[0]['security']['k'] == 'a' * 32
-    assert collection.inserted[0]['slice'][0]['session'][1]['ue']['ipv4'] == '10.64.1.101'
+    assert collection.inserted[0]['slice'][0]['session'][2]['ue']['ipv4'] == '10.64.1.101'
 
 
 @pytest.mark.parametrize('existing', [

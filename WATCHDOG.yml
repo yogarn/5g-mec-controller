@@ -1,0 +1,6 @@
+advisors:
+  - name: default
+    enabled: false
+  - name: ChatGPT
+    model: openai-codex/gpt-6.1-sol:low
+    reviewMode: agent-end

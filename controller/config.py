@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import math
 import yaml
+from controller.policy import DEFAULT_RESOURCE_WEIGHTS, validate_resource_weights
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,10 @@ class Settings:
     cooldown_seconds: float
     max_metric_age_seconds: float
     scale_down_seconds: float
+    resource_weights: dict[str, float]
+    gpu_nodes: tuple[str, ...]
+    gpu_utilization_query: str | None
+    vram_utilization_query: str | None
 
 
 def load_settings(path: str) -> Settings:
@@ -38,7 +43,8 @@ def load_settings(path: str) -> Settings:
                'min_replicas', 'max_replicas', 'interval_seconds', 'mode', 'mutate',
                'eligible_nodes', 'cpu_utilization_query', 'mobility_query', 'cpu_saturation',
                'locality_weight', 'improvement_factor', 'cooldown_seconds', 'max_metric_age_seconds',
-               'scale_down_seconds'}
+               'scale_down_seconds', 'resource_weights', 'gpu_nodes',
+               'gpu_utilization_query', 'vram_utilization_query'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
     for key in ('manifest', 'prometheus_url', 'latency_query', 'slo_seconds', 'min_replicas', 'max_replicas', 'mode'):
@@ -60,6 +66,19 @@ def load_settings(path: str) -> Settings:
     nodes = data.get('eligible_nodes', [])
     if not isinstance(nodes, list) or any(not isinstance(n, str) or not n for n in nodes) or len(set(nodes)) != len(nodes):
         raise ValueError('eligible_nodes must be a list of unique node names')
+    if mode == 'mobility-aware' and 'gpu_nodes' not in data:
+        raise ValueError('mobility-aware mode requires an explicit gpu_nodes inventory')
+    gpu_nodes = data.get('gpu_nodes', [])
+    if (not isinstance(gpu_nodes, list) or
+            any(not isinstance(n, str) or not n.strip() for n in gpu_nodes) or
+            len(set(gpu_nodes)) != len(gpu_nodes) or not set(gpu_nodes).issubset(nodes)):
+        raise ValueError('gpu_nodes must be a unique subset of eligible_nodes')
+    for key in ('gpu_utilization_query', 'vram_utilization_query'):
+        query = data.get(key)
+        if (query is not None and (not isinstance(query, str) or not query.strip())) or (
+                mode == 'mobility-aware' and gpu_nodes and query is None):
+            raise ValueError(f'{key} must be a nonempty query when GPU nodes are configured')
+    resource_weights = validate_resource_weights(data.get('resource_weights', DEFAULT_RESOURCE_WEIGHTS))
     if mode == 'mobility-aware':
         if not nodes or any(not isinstance(data.get(k), str) or not data[k].strip() for k in ('cpu_utilization_query', 'mobility_query')):
             raise ValueError('mobility-aware mode requires eligible_nodes, cpu_utilization_query and mobility_query')
@@ -74,7 +93,7 @@ def load_settings(path: str) -> Settings:
     manifest = Path(data['manifest']).expanduser()
     if not manifest.is_absolute():
         manifest = config_path.parent / manifest
-    locality_weight = data.get('locality_weight', .3)
+    locality_weight = data.get('locality_weight', .4)
     if isinstance(locality_weight, bool) or not isinstance(locality_weight, (int, float)) or not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
         raise ValueError('invalid locality_weight')
     improvement_factor = number('improvement_factor', 1.1, 0)
@@ -87,7 +106,8 @@ def load_settings(path: str) -> Settings:
                     number('cpu_saturation', .8, 0, 1), float(locality_weight),
                     improvement_factor, number('cooldown_seconds', 120, 0),
                     number('max_metric_age_seconds', 120, 0),
-                    number('scale_down_seconds', 180, 0))
+                    number('scale_down_seconds', 180, 0), resource_weights, tuple(gpu_nodes),
+                    data.get('gpu_utilization_query'), data.get('vram_utilization_query'))
 
 
 def workload_identity(path: Path, namespace: str | None) -> tuple[str, str]:

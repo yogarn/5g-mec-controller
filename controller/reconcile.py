@@ -2,6 +2,7 @@
 import copy
 import json
 import logging
+import math
 import time
 from kubernetes.utils.quantity import parse_quantity
 from .policy import LatencyRatioPolicy, Node, rank_nodes
@@ -72,6 +73,20 @@ class Reconciler:
         s = self.settings
         cpu = self.prometheus.per_node(s.cpu_utilization_query, s.eligible_nodes)
         mobility = self.prometheus.per_node(s.mobility_query, s.eligible_nodes)
+        gpu, vram = {}, {}
+        if s.gpu_nodes:
+            for query, values in ((s.gpu_utilization_query, gpu),
+                                  (s.vram_utilization_query, vram)):
+                if not isinstance(query, str) or not query.strip():
+                    raise ValueError('GPU-capable nodes require GPU and VRAM queries')
+                readings = self.prometheus.per_node(query, s.gpu_nodes)
+                if not isinstance(readings, dict) or set(readings) != set(s.gpu_nodes):
+                    raise ValueError('GPU query must return one series per GPU-capable node')
+                for name, utilization in readings.items():
+                    if (isinstance(utilization, bool) or not isinstance(utilization, (int, float)) or
+                            not math.isfinite(utilization) or not 0 <= utilization <= 1):
+                        raise ValueError(f'invalid GPU or VRAM utilization for node {name}')
+                    values[name] = 1 - utilization
         all_nodes = {n['metadata']['name']: n for n in self._dict(self.core.list_node())['items']}
         if not set(s.eligible_nodes) <= set(all_nodes):
             raise ValueError('eligible node missing from Kubernetes')
@@ -92,7 +107,8 @@ class Reconciler:
             capacity = quantities(status.get('allocatable'))
             if any(capacity.get(k, 0) <= 0 for k in ('cpu', 'memory')):
                 raise ValueError(f'node {name} lacks allocatable CPU or memory')
-            nodes.append(Node(name, capacity, allocated[name], cpu[name], mobility[name], ready))
+            nodes.append(Node(name, capacity, allocated[name], cpu[name], mobility[name], ready,
+                              gpu.get(name, 0.0), vram.get(name, 0.0)))
         return nodes
 
     def run_once(self):
@@ -126,7 +142,7 @@ class Reconciler:
                 raise ValueError('Deployment containers must request CPU and memory')
             request = {k: v for k, v in request.items() if v > 0}
             nodes = self._nodes(request)
-            scores = rank_nodes(nodes, request, s.cpu_saturation, s.locality_weight)
+            scores = rank_nodes(nodes, request, s.cpu_saturation, s.locality_weight, s.resource_weights)
             if not scores:
                 raise ValueError('no eligible node passes resource and saturation filters')
             choice = max(sorted(scores), key=scores.get)

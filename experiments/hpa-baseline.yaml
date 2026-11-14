@@ -10,7 +10,7 @@ spec:
     kind: Deployment
     name: mec-placement-face-detection
   minReplicas: 1
-  maxReplicas: 3
+  maxReplicas: 50
   metrics:
     - type: Resource
       resource:
