@@ -208,7 +208,13 @@ Confirm that no experiment application pods remain. Apply the common node constr
 
 ```sh
 kubectl -n services patch deployment mec-placement-face-detection --type=merge -p \
-  '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["gnb1","gnb-2","gnb-3"]}]}]}}}}}}'
+  '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["gnb1","gnb-2","gnb-3"]}]}]}}}}}}}'
+```
+
+**Stop if the patch reports an error.** Confirm the required hostname affinity is present before starting the pod; otherwise the baseline and proposed node eligibility will differ.
+
+```sh
+kubectl -n services get deployment mec-placement-face-detection -o jsonpath='{.spec.template.spec.affinity}{"\n"}'
 kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
 kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
 kubectl -n services get deployment mec-placement-face-detection -o yaml > "results/$CAMPAIGN/deployment-matched.yaml"
