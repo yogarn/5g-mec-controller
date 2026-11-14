@@ -8,7 +8,7 @@ On core, after one-time setup:
 bash experiments/run.sh run_2
 ```
 
-That single command resets the isolated experiment app, runs baseline, resets again, runs proposed, stops its processes, transfers and checksums UE results, summarizes and plots. Each campaign requires a new name. Application resources live in **mec-experiment**; the shared collector and Prometheus remain in **placement**. No manual HPA, sampler, UE, transfer or recovery sequence is required for a normal run.
+That single command resets the experiment app, runs baseline, resets again, runs proposed, stops its processes, transfers and checksums UE results, summarizes and plots. Each campaign requires a new name. Application resources remain in **services**; the shared collector and Prometheus remain in **placement**. Cleanup is limited to the named experiment app, its dependent groups and its baseline HPA. No manual HPA, sampler, UE, transfer or recovery sequence is required for a normal run.
 
 ## Controller
 

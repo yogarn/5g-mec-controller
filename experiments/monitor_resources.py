@@ -37,7 +37,7 @@ def quantity(value, kind):
     raise ValueError(f'unsupported {kind} quantity: {value}')
 
 
-def sample(output, namespace='mec-experiment'):
+def sample(output, namespace='services'):
     stop = False
     def request_stop(signum, frame):
         nonlocal stop
@@ -151,7 +151,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('sample'); p.add_argument('output')
-    p.add_argument('--namespace', default='mec-experiment', help='workload namespace (default: mec-experiment)')
+    p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
     p = sub.add_parser('summarize'); p.add_argument('samples'); p.add_argument('requests'); p.add_argument('summary'); p.add_argument('output')
     args = parser.parse_args()
     if args.action == 'sample':

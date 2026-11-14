@@ -50,7 +50,7 @@ def test_delayed_metric_uses_historical_pods_and_missing_is_not_zero(tmp_path):
 @pytest.mark.parametrize('namespace', [None, 'custom-workload'])
 def test_sample_cli_collects_pods_and_metrics_from_selected_namespace(tmp_path, monkeypatch, namespace):
     output = tmp_path / 'metrics.jsonl'
-    selected = namespace or 'mec-experiment'
+    selected = namespace or 'services'
     argv = ['monitor_resources.py', 'sample', str(output)]
     if namespace is not None:
         argv.extend(['--namespace', namespace])

@@ -19,7 +19,7 @@ import yaml
 from benchmark.client import parse_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
-NAMESPACE = 'mec-experiment'
+NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 
 def command(args, **kwargs):
@@ -82,26 +82,19 @@ def prerequisites(settings):
     for manifest in ('apps/face-detection/manifest.yaml', 'experiments/hpa-baseline.yaml'):
         docs = [d for d in yaml.safe_load_all((ROOT / manifest).read_text()) if d]
         if any(d['metadata'].get('namespace') != NAMESPACE for d in docs):
-            raise ValueError(f'{manifest} must use the dedicated {NAMESPACE} namespace')
-    print('Prerequisites passed. Collector stays in placement; only mec-experiment app resources are reset.', flush=True)
+            raise ValueError(f'{manifest} must use the {NAMESPACE} namespace')
+    print('Prerequisites passed. App stays in services; collector stays in placement.', flush=True)
 
 
 def reset():
-    kube('-n', NAMESPACE, 'delete', 'hpa,deploy,svc', '--all', '--ignore-not-found=true', '--wait=true', '--timeout=180s')
-    pods = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-o', 'json', capture_output=True, text=True).stdout)['items']
-    if pods:
-        kube('-n', NAMESPACE, 'wait', '--for=delete', 'pod', '--all', '--timeout=180s')
-
-
-def remove_legacy_app():
-    """Remove only the previous project's named resources, never all of services."""
-    kube('-n', 'services', 'delete', 'hpa/mec-placement-face-detection-baseline',
+    """Delete only the experiment app, its HPA and dependent managed groups."""
+    kube('-n', NAMESPACE, 'delete', 'hpa/mec-placement-face-detection-baseline',
          'deployment/' + APP, 'service/' + APP, '--ignore-not-found=true',
          '--cascade=foreground', '--wait=true', '--timeout=180s')
-    pods = json.loads(kube('-n', 'services', 'get', 'pods', '-l', 'app=' + APP,
+    pods = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', 'app=' + APP,
                           '-o', 'json', capture_output=True, text=True).stdout)['items']
     if pods:
-        kube('-n', 'services', 'wait', '--for=delete', 'pod', '-l', 'app=' + APP,
+        kube('-n', NAMESPACE, 'wait', '--for=delete', 'pod', '-l', 'app=' + APP,
              '--timeout=180s')
 
 
@@ -269,7 +262,6 @@ def main(argv=None):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupted)
         try:
-            remove_legacy_app()
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset()

@@ -91,7 +91,7 @@ The tool inserts only new subscribers; do not reprovision the existing pool. Wri
 
 ## Fixed experiment conditions
 
-The application now runs in dedicated namespace **mec-experiment**. The runner resets its Deployments, Services and HPAs before each method and after completion. Do not put unrelated resources in that namespace. For migration from the previous layout, it also removes the old named `services/mec-placement-face-detection` Deployment/Service and its baseline HPA; Kubernetes removes that Deployment's dependent managed groups. It leaves all other resources in `services` alone. Existing historical data is never deleted.
+The application remains in namespace **services**. The runner deletes only the named `mec-placement-face-detection` Deployment/Service and `mec-placement-face-detection-baseline` HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
 
 The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`) as proposed. Both methods use the same digest-pinned app image, photo set, resources, 100-replica ceiling and starting replica count of one. A temporary migration replacement can exceed the desired ceiling by one. The application NodePort is discovered automatically; the UE command receives the actual allocated port.
 
