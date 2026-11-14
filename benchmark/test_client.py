@@ -10,24 +10,25 @@ from benchmark import client
 
 def options(tmp_path, **overrides):
     values = dict(url='http://127.0.0.1:12345/path?q=1', method='POST', body='hello',
-                  header=['Content-Type: text/plain'], phase_schedule='1:1:0,1:0:1',
-                  gnb2_addresses='127.0.0.1', gnb3_addresses='127.0.0.2',
+                  header=['Content-Type: text/plain'], phase_schedule='1:1:0:0,1:0:1:0,1:0:0:1',
+                  gnb1_addresses='127.0.0.3', gnb2_addresses='127.0.0.1', gnb3_addresses='127.0.0.2',
                   phase_duration=0.03, timeout=1.0, output=str(tmp_path / 'results.jsonl'))
     values.update(overrides)
     return argparse.Namespace(**values)
 
 
 def test_schedule_order_and_validation():
-    phases = client.parse_schedule('2:1:1,3:0:3')
+    phases = client.parse_schedule('3:1:1:1,3:0:0:3')
     assert [p['phase'] for p in phases] == ['phase_01', 'phase_02']
     assert [p['gnb3_ues'] for p in phases] == [1, 3]
-    for value in ('', '1:1', '2:1:0', '0:0:0', '1:-1:2', '1:1:0,'):
+    for value in ('', '1:1', '2:1:0', '2:1:0:0', '0:0:0:0', '1:-1:1:1', '1:1:0:0,'):
         with pytest.raises(ValueError):
             client.parse_schedule(value)
 
 
 @pytest.mark.parametrize('changes', [
-    {'gnb2_addresses': ''}, {'gnb3_addresses': '127.0.0.1'},
+    {'gnb1_addresses': ''}, {'gnb2_addresses': ''}, {'gnb3_addresses': '127.0.0.1'},
+    {'gnb1_addresses': '127.0.0.2'},
     {'gnb2_addresses': '0.0.0.0'}, {'phase_duration': float('nan')},
     {'timeout': 0}, {'url': 'ftp://example.com'}, {'url': 'http://example.com:bad'},
     {'method': 'GET\n'}, {'header': ['Bad Header: x']},
@@ -67,10 +68,11 @@ def test_closed_loop_records_and_binding(tmp_path):
     starts = [r for r in records if r['event'] == 'phase_start']
     ends = [r for r in records if r['event'] == 'phase_end']
     requests = [r for r in records if r['event'] == 'request']
-    assert [r['phase'] for r in starts] == ['phase_01', 'phase_02']
-    assert [r['phase'] for r in ends] == ['phase_01', 'phase_02']
+    assert [r['phase'] for r in starts] == ['phase_01', 'phase_02', 'phase_03']
+    assert [r['phase'] for r in ends] == ['phase_01', 'phase_02', 'phase_03']
     assert records.index(ends[0]) < records.index(starts[1])
-    assert {r['source_address'] for r in requests} == {'127.0.0.1', '127.0.0.2'}
+    assert {(r['group'], r['source_address']) for r in requests} == {
+        ('gnb-1', '127.0.0.3'), ('gnb-2', '127.0.0.1'), ('gnb-3', '127.0.0.2')}
     assert all(r['duration_ms'] >= 0 and r['error'] is None for r in requests)
     assert all(r['success'] == (r['http_status'] == 201) for r in requests)
     assert all(path == '/path?q=1' and body == b'hello' and header == 'text/plain'
@@ -80,7 +82,7 @@ def test_closed_loop_records_and_binding(tmp_path):
 
 
 def test_failed_attempt_and_exclusive_output(tmp_path):
-    args = options(tmp_path, phase_schedule='1:1:0', gnb3_addresses='',
+    args = options(tmp_path, phase_schedule='1:0:1:0', gnb3_addresses='',
                    url='http://127.0.0.1:1/', phase_duration=0.01)
     client.run(args)
     path = tmp_path / 'results.jsonl'

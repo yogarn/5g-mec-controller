@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from controller.config import load_settings, workload_identity
-from controller.policy import LatencyRatioPolicy, Node, rank_nodes
-from controller.reconcile import ANNOTATION, Reconciler, pod_requests, preference_patch, preferred_term
+from controller.policy import LatencyRatioPolicy, Node, plan_placement, rank_nodes
+from controller.reconcile import Reconciler, pod_requests
 from controller.telemetry import Prometheus
+
+WEIGHTS = {'cpu': .4, 'memory': .4, 'gpu': .1, 'vram': .1}
 
 
 class ManifestTests(unittest.TestCase):
@@ -30,6 +32,41 @@ class ManifestTests(unittest.TestCase):
             settings = load_settings(str(config))
             self.assertFalse(settings.mutate)
             self.assertEqual(settings.manifest, Path(directory) / 'app.yaml')
+            self.assertEqual(settings.locality_weight, .4)
+            self.assertEqual(settings.resource_weights, WEIGHTS)
+            self.assertEqual(settings.gpu_nodes, ())
+
+    def test_gpu_configuration_and_weights_are_strict(self):
+        base = ('manifest: app.yaml\nprometheus_url: http://localhost:9090\n'
+                'latency_query: latency\nslo_seconds: 1\nmin_replicas: 1\n'
+                'max_replicas: 4\nmode: mobility-aware\neligible_nodes: [a, b]\n'
+                'cpu_utilization_query: cpu\nmobility_query: traffic\n')
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'config.yaml'
+            valid = 'gpu_nodes: [b]\ngpu_utilization_query: gpu\nvram_utilization_query: vram\n'
+            config.write_text(base + valid)
+            settings = load_settings(str(config))
+            self.assertEqual(settings.gpu_nodes, ('b',))
+            config.write_text(base)
+            with self.assertRaisesRegex(ValueError, 'explicit gpu_nodes'):
+                load_settings(str(config))
+            config.write_text(base + 'gpu_nodes: []\n')
+            self.assertEqual(load_settings(str(config)).gpu_nodes, ())
+            self.assertEqual(settings.gpu_utilization_query, 'gpu')
+            for extra in (
+                'gpu_nodes: [b, b]\n',
+                'gpu_nodes: [c]\n',
+                'gpu_nodes: [b]\n',
+                'gpu_nodes: [b]\ngpu_utilization_query: gpu\nvram_utilization_query: " "\n',
+                'resource_weights: {cpu: 0.4, memory: 0.4, gpu: 0.1}\n',
+                'resource_weights: {cpu: 0.4, memory: 0.4, gpu: -0.1, vram: 0.3}\n',
+                'resource_weights: {cpu: 0.4, memory: 0.4, gpu: 0.1, vram: 0.2}\n',
+                'resource_weights: {cpu: .nan, memory: 0.4, gpu: 0.1, vram: 0.1}\n',
+            ):
+                with self.subTest(extra=extra):
+                    config.write_text(base + extra)
+                    with self.assertRaises(ValueError):
+                        load_settings(str(config))
 
 
 class PolicyTests(unittest.TestCase):
@@ -51,10 +88,78 @@ class PolicyTests(unittest.TestCase):
         nodes = [Node('a', {'cpu': 4, 'memory': 8}, {'cpu': 1, 'memory': 2}, .2, 8),
                  Node('b', {'cpu': 4, 'memory': 8}, {'cpu': 1, 'memory': 2}, .2, 2),
                  Node('c', {'cpu': 4, 'memory': 8}, {'cpu': 1, 'memory': 2}, .9, 0)]
-        scores = rank_nodes(nodes, {'cpu': 1, 'memory': 1}, .8, .3)
+        scores = rank_nodes(nodes, {'cpu': 1, 'memory': 1}, .8, .3, WEIGHTS)
         self.assertGreater(scores['a'], scores['b'])
         self.assertNotIn('c', scores)
-        self.assertEqual(rank_nodes(nodes, {'cpu': 9}, .8, .3), {})
+        self.assertEqual(set(rank_nodes(nodes, {'cpu': 9}, .8, .3, WEIGHTS)), {'a', 'b'})
+
+    def test_weighted_score_and_relative_headroom(self):
+        nodes = [
+            Node('small', {'cpu': 4, 'memory': 8}, {'cpu': 1, 'memory': 3}, .2, 3,
+                 gpu_free=.8, vram_free=.5),
+            Node('large', {'cpu': 8, 'memory': 16}, {'cpu': 3, 'memory': 7}, .2, 1,
+                 gpu_free=.8, vram_free=.5),
+            Node('no-gpu', {'cpu': 4, 'memory': 8}, {'cpu': 1, 'memory': 3}, .2, 0),
+        ]
+        scores = rank_nodes(nodes, {'cpu': 1, 'memory': 1}, .8, .4, WEIGHTS)
+        resource = .4 * .75 + .4 * .625 + .1 * .8 + .1 * .5
+        self.assertAlmostEqual(scores['small'], .6 * resource + .4 * .75)
+        large_resource = .4 * .625 + .4 * .5625 + .1 * .8 + .1 * .5
+        self.assertAlmostEqual(scores['large'], .6 * large_resource + .4 * .25)
+        self.assertAlmostEqual(scores['no-gpu'], .6 * (.4 * .75 + .4 * .625))
+        idle = [Node('a', {'cpu': 4, 'memory': 8}, {}, .1, 0)]
+        self.assertAlmostEqual(rank_nodes(idle, {'cpu': 0, 'memory': 0}, .8, .4, WEIGHTS)['a'], .48)
+
+    def test_gpu_resource_feasibility_and_invalid_inputs(self):
+        nodes = [Node('a', {'cpu': 4, 'memory': 8, 'nvidia.com/gpu': 1},
+                      {'nvidia.com/gpu': 1}, .2, 0, gpu_free=1, vram_free=1),
+                 Node('b', {'cpu': 4, 'memory': 8, 'nvidia.com/gpu': 2},
+                      {}, .2, 0, gpu_free=.5, vram_free=.5)]
+        scores = rank_nodes(nodes, {'cpu': 1, 'nvidia.com/gpu': 1}, .8, .4, WEIGHTS)
+        self.assertEqual(set(scores), {'a', 'b'})
+        for weights in ({}, {**WEIGHTS, 'gpu': float('nan')},
+                        {**WEIGHTS, 'gpu': -1}, {**WEIGHTS, 'gpu': .2}):
+            with self.subTest(weights=weights), self.assertRaises(ValueError):
+                rank_nodes(nodes, {'cpu': 1}, .8, .4, weights)
+        with self.assertRaises(ValueError):
+            rank_nodes([Node('bad', {'cpu': 1}, {}, .2, 0, gpu_free=1.1)],
+                       {'cpu': 1}, .8, .4, WEIGHTS)
+
+    def test_sequential_scale_up_and_capacity(self):
+        nodes = [Node('a', {'cpu': 4, 'memory': 4}, {'cpu': 1, 'memory': 1}, .1, 0),
+                 Node('b', {'cpu': 4, 'memory': 4}, {}, .1, 0)]
+        original = copy.deepcopy(nodes)
+        counts = {'a': 1}
+        result = plan_placement(nodes, {'cpu': 1, 'memory': 1}, counts, 4, .8, 0, WEIGHTS)
+        self.assertEqual(result, {'targets': {'a': 2, 'b': 2}, 'migration': None})
+        self.assertEqual(nodes, original)
+        self.assertEqual(counts, {'a': 1})
+        with self.assertRaises(ValueError):
+            plan_placement(nodes, {'cpu': 1, 'memory': 1}, counts, 9, .8, 0, WEIGHTS)
+
+    def test_scale_down_recomputes_and_unavailable_sources(self):
+        nodes = [Node('a', {'cpu': 4, 'memory': 4}, {'cpu': 3, 'memory': 3}, .1, 0),
+                 Node('b', {'cpu': 4, 'memory': 4}, {'cpu': 2, 'memory': 2}, .1, 0)]
+        result = plan_placement(nodes, {'cpu': 1, 'memory': 1}, {'a': 3, 'b': 2},
+                                3, .8, 0, WEIGHTS)
+        self.assertEqual(result['targets'], {'a': 1, 'b': 2})
+        unavailable = [Node('a', {'cpu': 4}, {'cpu': 1}, .9, 0),
+                       Node('b', {'cpu': 4}, {}, .1, 0)]
+        result = plan_placement(unavailable, {'cpu': 1}, {'a': 1}, 1, .8, 0, WEIGHTS)
+        self.assertEqual(result['migration'], ('a', 'b'))
+
+    def test_migration_requires_strict_improvement_and_surge_capacity(self):
+        nodes = [Node('a', {'cpu': 4}, {'cpu': 2}, .1, 0),
+                 Node('b', {'cpu': 4}, {}, .1, 0)]
+        result = plan_placement(nodes, {'cpu': 1}, {'a': 2}, 2, .8, 0, WEIGHTS)
+        self.assertEqual(result, {'targets': {'a': 2, 'b': 0}, 'migration': ('a', 'b')})
+        tied = [Node('a', {'cpu': 2}, {'cpu': 1}, .1, 0),
+                Node('b', {'cpu': 2}, {}, .1, 0)]
+        self.assertIsNone(plan_placement(tied, {'cpu': 1}, {'a': 1}, 1, .8, 0, WEIGHTS)['migration'])
+        full = [nodes[0], Node('b', {'cpu': 4}, {'cpu': 4}, .1, 0)]
+        self.assertIsNone(plan_placement(full, {'cpu': 1}, {'a': 2}, 2, .8, 0, WEIGHTS)['migration'])
+        with self.assertRaises(ValueError):
+            plan_placement(nodes, {'cpu': 1}, {'unknown': 1}, 1, .8, 0, WEIGHTS)
 
     def test_init_and_overhead_requests(self):
         spec = {'containers': [{'resources': {'requests': {'cpu': '500m', 'memory': '1Gi'}}}],
@@ -65,16 +170,6 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pod_requests(spec)
 
-    def test_preference_preserves_user_constraints(self):
-        deployment = {'metadata': {'annotations': {ANNOTATION: 'old'}}, 'spec': {'template': {'spec': {
-            'affinity': {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': []},
-                         'preferredDuringSchedulingIgnoredDuringExecution': [preferred_term('old')]},
-                         'podAntiAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': []}}}}}}
-        result = preference_patch(deployment, 'new')
-        self.assertIn('podAntiAffinity', result)
-        self.assertIn('requiredDuringSchedulingIgnoredDuringExecution', result['nodeAffinity'])
-        self.assertEqual(result['nodeAffinity']['preferredDuringSchedulingIgnoredDuringExecution'], [preferred_term('new')])
-        self.assertEqual(deployment['spec']['template']['spec']['affinity']['nodeAffinity']['preferredDuringSchedulingIgnoredDuringExecution'], [preferred_term('old')])
 
 
 class ReconciliationTests(unittest.TestCase):
@@ -114,25 +209,6 @@ class ReconciliationTests(unittest.TestCase):
             controller.run_once()
         apps.patch_namespaced_deployment.assert_not_called()
 
-    def test_mobility_preference_is_soft_and_resource_versioned(self):
-        controller, apps, _ = self.setup_controller(mutate=True)
-        controller.settings.mode = 'mobility-aware'
-        controller.settings.cpu_saturation = .8
-        controller.settings.locality_weight = .3
-        controller.settings.improvement_factor = 1.1
-        deployment = apps.read_namespaced_deployment.return_value
-        deployment['spec']['template']['spec']['containers'] = [
-            {'resources': {'requests': {'cpu': '1', 'memory': '1Gi'}}}]
-        deployment['status']['updatedReplicas'] = 2
-        controller._nodes = Mock(return_value=[
-            Node('edge-a', {'cpu': 4, 'memory': 4 * 2**30}, {}, .2, 5)])
-        controller.run_once()
-        patch = apps.patch_namespaced_deployment.call_args.args[2]
-        self.assertEqual(patch['metadata']['resourceVersion'], '42')
-        self.assertEqual(patch['metadata']['annotations'][ANNOTATION], 'edge-a')
-        affinity = patch['spec']['template']['spec']['affinity']['nodeAffinity']
-        self.assertNotIn('requiredDuringSchedulingIgnoredDuringExecution', affinity)
-        self.assertEqual(affinity['preferredDuringSchedulingIgnoredDuringExecution'], [preferred_term('edge-a')])
 
     def test_missing_node_series_fails_closed(self):
         prom = Prometheus('http://example', 60)

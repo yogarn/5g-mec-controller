@@ -1,0 +1,6 @@
+# Merge this job into the existing scrape_configs; do not replace other jobs.
+scrape_configs:
+  - job_name: ue-telemetry
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['ue-telemetry.services.svc.cluster.local:8080']

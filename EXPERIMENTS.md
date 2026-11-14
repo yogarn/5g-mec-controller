@@ -4,17 +4,19 @@ Run commands from the **repository root**, not from `experiments/`. This runbook
 
 ## Stop: verify readiness first
 
-The historical gNB-2 Envoy route targets the old `open5gs` face-detection Service, not the separate project workload in `services`; gNB-3 was routing elsewhere. The old Deployment was pinned to gNB-2. Check current state, and leave the old workload untouched. The new query aggregates only `mec_placement_face` listener series from gNB-2 and gNB-3: count series appear after each edge Envoy rollout and request samples require traffic. The query returns no result until both sites expose count series. Do not run a two-site comparison until both routes are authorized, switched and verified, complete service-wide latency telemetry is established, and placement constraints are verified. The 500 ms SLO is exploratory. The image predates local source changes; verify image and workload identity before comparing runs.
+Verify the direct NodePort path independently from both gNBs. The controller targets the actual elapsed-time p90 of all UE attempts, including failures and timeouts, from the single telemetry collector. Fast failures can lower this p90; monitor failures separately. Keep mutation disabled until both UE paths, telemetry coverage, and policy are validated.
+
+The current testbed's core, gNB-2 and gNB-3 UPFs were rolled out without their Envoy sidecars and 8000/30090 redirect rules. The old Envoy ConfigMaps and Prometheus scrape job remain as unused references; applying older UPF manifests can restore the sidecars and redirects. Recovery snapshots from the smoke test are under `/home/member/skripsi_yoga/5g-mec-telemetry-recovery/smoke-39TIpOuh` on core. The currently allocated application and collector NodePorts are 30998 and 31669 respectively; inspect the live Services before each run because allocated ports can change.
 
 The default schedule is two 30-second phases with one UE per site. It is a **connectivity smoke test**, not a justified research campaign. The runner stops and reattaches UEs between phases; it does not perform 5G handover. Closed-loop UE counts are not fixed offered request rates.
 
 Never run the HPA and a mutating controller, KEDA, or any other replica writer at the same time. Approve a campaign and recovery plan first. Keep the same workload, image, input photo, routes, SLO, starting replicas, node constraints, UE schedule and phase duration across matched runs. Repeat runs and counterbalance method order. The runner does not automatically collect pod resources, controller events, or prove actual gNB attachment.
 
-## 1. Core host setup and preflight
+## 1. Core host setup
 
-**On core**, with Kubernetes access:
+**On core**, with Kubernetes access, prepare the software without changing active experiments. Do not create, replace, restart, or reload shared resources until their owner authorizes a maintenance window.
 
-After authorization, verify the `services` namespace and project Deployment and Service exist. If both resources are absent, create them with `kubectl create -f apps/face-detection/manifest.yaml`; if either already exists, inspect ownership and state rather than overwriting it. The desired replica count is 1; zero running or ready pods during cold start is acceptable while Kubernetes starts it, not scale-to-zero. The controller and HPA bounds remain 1–3. Wait for a ready endpoint and verify the traffic path before a campaign. UPFs and their ConfigMaps remain in `open5gs`; changing their Envoy route requires an authorized UPF rollout and recovery plan.
+After authorization, inspect the `services` namespace and project Deployment and Service. If both workload resources are absent, create them with `kubectl create -f apps/face-detection/manifest.yaml`; if either exists, inspect ownership and state rather than overwriting it. The desired replica count is 1; cold start can temporarily have zero ready pods. Inspect the app NodePort with `kubectl -n services get service mec-placement-face-detection` and choose a node IP reachable from each UE path. Requests use `http://NODE_IP:APP_NODEPORT/detect` through Kubernetes kube-proxy.
 
 ```sh
 cd /home/member/skripsi_yoga/5g-mec-controller
@@ -23,19 +25,73 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Check each UPF. An interactive mismatch may offer a rollout; answer N
-# unless the UPF interruption and route replacement are authorized.
-python -m experiments.preflight
-python -m experiments.preflight --node gnb-3
+# The Python Kubernetes client does not automatically use k3s's default path.
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
+# After the collector and Prometheus are configured as described below:
+python -m experiments.preflight
 kubectl -n services get deployment mec-placement-face-detection -o wide
 kubectl -n services get hpa
 kubectl -n services top pods -l app=mec-placement-face-detection
 ```
 
-The preflight defaults to gNB-2; `--node gnb-3` checks the other UPF. Its proxy namespace defaults to `open5gs`, independently of the workload namespace `services`. Both checks use the aggregate latency query, so a successful gNB-3 preflight alone does not prove gNB-3 telemetry. `--json` gives the detailed report and disables interactive prompts. Missing new-workload metrics during proxy rollout or NaN p95 with confirmed zero request count are reported as unverified telemetry warnings; other telemetry errors still fail. The controller waits for a finite p95 from real requests before making latency-based decisions. No dummy traffic or synthetic zero latency is needed, but an unverified or idle warning does not verify the request path.
+Preflight checks the workload, NodePort configuration and global collector telemetry; it does not check UPFs or prove reachability or telemetry coverage at either site. Verify both UE paths separately. Idle is unverified only when the collector scrape is up, its window complete, and attempts are zero; scrape failures and overflow remain errors.
 
-If the proxy configuration differs, preflight can offer to back up the current ConfigMap under `results/` and restart the shared UPF. **Restarting interrupts 5G traffic and applying the configuration replaces existing proxy routes.** Only confirm after reviewing the impact and recovery plan. A matching config is not a reason to restart.
+## Collector and Prometheus startup
+
+The collector runs as **one Kubernetes pod**, not on each UE. Its image must be accessible to the Kubernetes node that runs the pod; UE hosts only need the Python workload code and token file. The collector and copied Prometheus Deployment select `site: core`. The current cluster's `core-5g` node has that label and is schedulable; recheck labels, taints and available resources before deploying. The registry avoids manually copying the image to the node.
+
+The `collector/manifest.yaml` Service already has `type: NodePort`. Kubernetes allocates the port; no fixed port is assumed. The same Service also has a ClusterIP for Prometheus. Build and push after collector code changes:
+
+```sh
+docker build -f collector/Dockerfile -t 10.34.211.140:30500/ue-telemetry-collector:latest .
+docker push 10.34.211.140:30500/ue-telemetry-collector:latest
+```
+
+If Docker is not configured for the testbed's HTTP registry, an operator may instead run `docker buildx build -f collector/Dockerfile --output type=image,name=10.34.211.140:30500/ue-telemetry-collector:latest,push=true,registry.insecure=true .` on the trusted testbed network. Publishing `latest` does not update a running pod; it may affect a future pull or restart. Coordinate image changes with other users.
+
+After authorization, copy the token securely to core if necessary. Set `TOKEN_FILE` to the protected file containing the same token used by the UE; do not put its contents in a command, manifest, or repository. If the Secret and collector resources do not already exist, create them:
+
+```sh
+TOKEN_FILE="$HOME/.config/5g-mec/ue-telemetry-token"
+kubectl -n services create secret generic ue-telemetry-token --from-file=token="$TOKEN_FILE"
+kubectl create -f collector/manifest.yaml
+kubectl -n services rollout status deployment/ue-telemetry
+kubectl -n services get service ue-telemetry -o wide
+```
+
+If any resource already exists, stop and coordinate with its owner rather than overwriting it. Review `collector/manifest.yaml`, including its ConfigMap settings, before creation; the image uses `/etc/ue-telemetry/config.yaml`. Inspect the allocated `nodePort` in the Service output. Choose a reachable node IP for `http://NODE_IP:COLLECTOR_NODEPORT/observations`. Protect the token file on both hosts; never commit it.
+
+The original shared monitoring manifests are copied under `telemetry/`: namespace, node-exporter, DCGM exporter, Prometheus, and Grafana. They are **reference snapshots**, not authoritative copies of live shared resources; the Prometheus copy additionally selects `site: core`. Prometheus retains the other team's scrape jobs and recording rules. Do not apply these copies over existing installations. vLLM and UPF/Envoy manifests are not required for this face-detection telemetry path.
+
+If shared `placement/placement-prometheus` is already running, reuse it; do not start a second instance or restart it during another team's experiment. After authorization, an operator must back up and inspect the live `placement/placement-prometheus-config` ConfigMap, merge only the `ue-telemetry` job from `collector/prometheus-scrape.yaml` into its existing `scrape_configs`, validate the complete configuration, and use the owner's approved reload procedure. Do not replace other jobs or recording rules. The copied Prometheus manifest enables `--web.enable-lifecycle`, but verify the live Deployment before using `POST /-/reload` and wait for the updated ConfigMap to reach the pod. Reloading is a shared operational change.
+
+The copied Grafana manifest provisions the existing placement dashboard and exposes NodePort 30031; it is optional for the collector and controller. It enables **anonymous Admin access and disables the login form**. Treat it as unsafe on untrusted networks: an authorized operator must review authentication and network restrictions before using it. Reuse the existing shared Grafana instead of replacing it during another team's experiments.
+
+For a new, isolated installation only, review the copied namespace and monitoring manifests, reconcile their existing jobs, rules, RBAC and NodePorts with that environment, and create the required resources in namespace-first order. Merge the collector scrape job before starting Prometheus. Do not use this procedure to replace the shared instance at `10.34.211.140:30990`.
+
+For example, after creating and validating a reviewed copy of `telemetry/03-prometheus.yaml` at `PROMETHEUS_MANIFEST` with the collector job merged, and confirming none of its resources exist:
+
+```sh
+kubectl create -f telemetry/00-namespace.yaml
+kubectl create -f telemetry/01-node-exporter.yaml
+# Only if this environment uses NVIDIA DCGM monitoring:
+kubectl create -f telemetry/02-dcgm-exporter.yaml
+kubectl create -f "$PROMETHEUS_MANIFEST"
+kubectl -n placement rollout status deployment/placement-prometheus
+kubectl -n placement get service placement-prometheus
+```
+
+The copied Prometheus manifest uses NodePort 30990; resolve any port collision in the reviewed copy before creation. These commands create shared cluster resources and must not be run during another team's experiment without authorization.
+
+Supply both `--telemetry-url http://NODE_IP:COLLECTOR_NODEPORT/observations` and `--telemetry-token-file PATH` to either UE runner. Without both options, telemetry is disabled. Delivery and drop totals appear on stderr; compare them with JSONL attempts.
+
+The rolling window uses collector arrival time, not request start time. Delivery loss, queue overflow, and collector restart skew coverage; counts are partial while `ue_request_window_complete` is zero, and both p90 gauges are omitted until the window is complete. `ue_request_attempt_duration_p90_seconds` is nearest-rank over all attempts, using their actual duration without penalties; `ue_request_duration_p90_seconds` remains successful-only. Failures are attempts minus successes. One replica is essential: per-replica p90 values cannot be aggregated into a global p90.
+
+Each UE observation contains `ue_ip`, full-response `duration_ms`, `http_status` (null if no response status was received), and `success`. Success remains separate because reading a response can fail after a 2xx status. The collector converts milliseconds to seconds for its existing Prometheus p90 and SLO metrics. The observation format is not compatible with the previous collector image; update the collector and UE code together.
+
+Protect the collector network and token: payload IPs are client asserted and do not authenticate UEs or prove attachment. Before any live mutation, reverify NodePort reachability and telemetry source/payload at both gNBs, the SMF-IP-to-AMF-gNB join, scrape health, delivery loss, and p90 against raw JSONL. Unknown or stale mappings contribute only to global metrics. Keep mutation disabled if any check fails.
+
 
 Before the first run, capture the current Deployment and HPA state. Use a new directory for each campaign; if `mkdir` fails, stop and choose a different name:
 
@@ -53,7 +109,7 @@ Review existing HPAs, controller processes, Deployment replicas, node selectors,
 
 ## 2. UE host setup
 
-**On the intended UE host**, log in separately. If the checkout does not exist, create its parent and clone it; `git clone` refuses an existing destination:
+**On the UE host** (`member@10.34.211.6`), log in separately. The former `10.34.7.38` host is retired. If the checkout does not exist, create its parent and clone it; `git clone` refuses an existing destination:
 
 ```sh
 mkdir -p ~/skripsi_yoga
@@ -64,13 +120,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If the checkout already exists, `cd` into it and use `git pull --ff-only` instead of cloning. Use the same revision on both hosts. Install UERANSIM and prepare the existing subscriber pool and a private inventory; the expected default paths are:
+If the checkout is a Git clone, use `git pull --ff-only`; the smoke-test copy was transferred without `.git`, so synchronize it deliberately instead. Use the same revision on both hosts. The current UE host's private assets can be inspected with:
 
 ```sh
 ls -l ~/.config/5g-mec/ue-inventory.yaml
-ls -l ~/.config/5g-mec/face.jpg
-ls -l ~/ueransim/build/nr-ue
+ls -l ~/.config/5g-mec/smoke.png
+ls -l ~/5g-ai-edge/ueransim/build/nr-ue
 ```
+
+On the current UE host, pass `/home/member/5g-ai-edge/ueransim/build/nr-ue` with `--nr-ue` and `~/.config/5g-mec/smoke.png` with `--image`. The 64×64 synthetic image is for connectivity checks, not representative performance measurements. The private inventory contains one reserved subscriber with paired site configurations; protect it and expand it only using verified reservations.
+
+For a representative workload, pass `--image /path/to/image-directory`. Supported image filenames are sorted and assigned by subscriber index modulo the image count, so images are reused when UEs outnumber them and a subscriber retains its image across phases. `run.json` records names, hashes and assignments; each request record identifies its image. Use the same directory and assignments in matched runs.
+
+The eight selected images in `apps/face-detection/images` are from [Syn-Vis-v0](https://huggingface.co/datasets/retowyss/Syn-Vis-v0), Reto Wyss (2025), revision `100262732989e77f38cd831d70a376a93735006a`. Its dataset card dedicates individual images to CC0 and licenses the dataset compilation/documentation under CC-BY-SA 4.0; retain provenance and check the source terms. These 1024×1024 headshots are synthetic, female-presenting CGI portraits and are not representative of all real-world faces. The images are unchanged from the source; record their hashes and keep the image set fixed across compared runs.
 
 If any path differs, set the corresponding `--ue-config`, `--image` or `--nr-ue` option. The inventory schema and first-time subscriber provisioning instructions are in `README.md`. The insert-only provisioning tool refuses existing IMSIs/IPs; **do not re-provision an existing pool**. Confirm the UE host has no unrelated running `nr-ue` processes, the chosen subscribers are free, and both site's registered sessions and packet paths work before load testing.
 
@@ -85,19 +147,21 @@ kubectl create -f experiments/hpa-baseline.yaml
 kubectl -n services describe hpa mec-placement-face-detection-baseline
 ```
 
-The baseline targets 80% of CPU **request**, has 1–3 replicas, and uses a 180-second scale-down window. With a 100m CPU request, 80% is 80m per pod, not 80% of the 500m CPU limit. Confirm Metrics Server reports valid data and all pods have CPU requests. This threshold is an experimental choice, not a calibrated latency SLO.
+The baseline targets 80% of CPU **request**, has 1–50 replicas, and uses a 180-second scale-down window. With a 200m CPU request, 80% is 160m per pod, not 80% of the 1 CPU limit. Confirm Metrics Server reports valid data and all pods have CPU requests. This threshold is an experimental choice, not a calibrated latency SLO.
 
 **On the UE host**, from the checkout root, run an initial smoke test only after both paths are ready:
 
 ```sh
 cd ~/skripsi_yoga/5g-mec-controller
-sudo .venv/bin/python -m experiments.experiment --output-dir results/hpa-smoke-01
+sudo .venv/bin/python -m experiments.experiment \
+  --url http://NODE_IP:APP_NODEPORT/detect --output-dir results/hpa-smoke-01
 ```
 
-The command previews the defaults and asks for confirmation. `--armed` is the explicit non-interactive alternative. The output directory must not exist. For a research run, specify an approved, pilot-derived schedule and duration; do not substitute the smoke test. Use the same options for HPA and controller. Example syntax (illustrative only):
+The command previews the schedule and asks for confirmation. `--url` is required; there is no default app address. `--armed` is the explicit non-interactive alternative. The output directory must not exist. For a research run, specify an approved, pilot-derived schedule and duration; do not substitute the smoke test. Use the same options for HPA and controller. Example syntax (illustrative only):
 
 ```sh
 sudo .venv/bin/python -m experiments.experiment \
+  --url http://NODE_IP:APP_NODEPORT/detect \
   --phase-schedule '2:2:0,4:3:1,4:1:3,2:0:2' \
   --phase-duration 180 --output-dir results/hpa-run-01
 ```
@@ -116,7 +180,9 @@ kubectl delete -f experiments/hpa-baseline.yaml
 kubectl -n services get hpa
 ```
 
-If the approved starting state is one replica and no other writer is running:
+Before scaling the original Deployment, check for controller-owned per-node Deployments labeled `mec-placement-controller.io/owner=<original Deployment UID>` and for the `mec-placement-controller.io/migration` annotation on the original. If either exists, do not start the baseline HPA or blindly scale the original. Stop all writers and recover the workload using the procedure below.
+
+With no owned placement groups or migration state, if the approved starting state is one replica:
 
 ```sh
 kubectl -n services scale deployment mec-placement-face-detection --replicas=1
@@ -125,7 +191,9 @@ kubectl -n services get deployment mec-placement-face-detection -o yaml \
   > results/campaign-01/deployment-after-reset.yaml
 ```
 
-Compare `deployment-after-reset.yaml` with `deployment-before.yaml` and restore only approved changed fields. Scaling does **not** restore affinity, annotations, selectors, routes or the prior replica count automatically. In particular, stopping the mobility-aware controller or changing it to scaling-only does not remove its recorded preference. Do not blindly reapply an old Deployment snapshot or delete another experiment's resources. If ownership or recovery is unclear, stop and inspect before proceeding.
+Compare `deployment-after-reset.yaml` with `deployment-before.yaml` and restore only approved changed fields. Scaling does not restore affinity, annotations, selectors or routes automatically. Do not blindly reapply an old Deployment snapshot or delete another experiment's resources.
+
+To recover from mobility-aware mode, first stop the controller and HPA and capture the original Deployment, the managed child Deployments, pods and Service endpoints. Identify children by the original Deployment UID and verify their owner references; do not touch unrelated resources. If a migration annotation is present, inspect its source, destination and replica counts before making any changes. Scale the original up one replica at a time; wait for it to become Ready and confirm healthy Service endpoints before scaling an owned child down by one and waiting for termination. Do not exceed the configured maximum plus one temporary replacement. Repeat until all desired replicas are on the original. After verifying the original is healthy, remove only verified zero-replica owned groups and clear the migration annotation. Confirm there are no owned groups or migration state before enabling scaling-only mode or the baseline HPA. Stop if ownership or recovery state is unclear.
 
 ## 5. Proposed controller condition
 
@@ -158,6 +226,7 @@ With `mutate: true`, even `--once` can change replicas. The controller needs fin
 ```sh
 cd ~/skripsi_yoga/5g-mec-controller
 sudo .venv/bin/python -m experiments.experiment \
+  --url http://NODE_IP:APP_NODEPORT/detect \
   --phase-schedule '2:2:0,4:3:1,4:1:3,2:0:2' \
   --phase-duration 180 --output-dir results/controller-run-01
 ```

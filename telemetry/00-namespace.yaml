@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: placement
+  labels:
+    app.kubernetes.io/name: placement
+    app.kubernetes.io/part-of: 5g-ai-edge-placement

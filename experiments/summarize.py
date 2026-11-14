@@ -35,16 +35,17 @@ def text(value, name):
 def counts(record):
     phase = text(record['phase'], 'phase')
     total = integer(record['workload_ue'], 'workload_ue', minimum=1)
+    gnb1 = integer(record.get('gnb1_ues', 0), 'gnb1_ues')
     gnb2 = integer(record['gnb2_ues'], 'gnb2_ues')
     gnb3 = integer(record['gnb3_ues'], 'gnb3_ues')
-    if total != gnb2 + gnb3:
+    if total != gnb1 + gnb2 + gnb3:
         raise ValueError('UE counts do not add up')
-    return phase, total, gnb2, gnb3
+    return phase, total, gnb1, gnb2, gnb3
 
 
 def ue_key(record):
     group = text(record['group'], 'group')
-    if group not in ('gnb-2', 'gnb-3'):
+    if group not in ('gnb-1', 'gnb-2', 'gnb-3'):
         raise ValueError('unknown UE group')
     return group, text(record['source_address'], 'source_address')
 
@@ -97,8 +98,9 @@ def summarize(path, slo_ms, ue_results=None):
                         raise ValueError('ues must be a list')
                     keys = [ue_key(ue) for ue in ues]
                     if (len(keys) != info[1] or len(set(keys)) != len(keys)
-                            or sum(group == 'gnb-2' for group, _ in keys) != info[2]
-                            or sum(group == 'gnb-3' for group, _ in keys) != info[3]
+                            or sum(group == 'gnb-1' for group, _ in keys) != info[2]
+                            or sum(group == 'gnb-2' for group, _ in keys) != info[3]
+                            or sum(group == 'gnb-3' for group, _ in keys) != info[4]
                             or len({address for _, address in keys}) != len(keys)):
                         raise ValueError('UE list does not match phase counts')
                     current = {'info': info, 'start': start, 'duration': duration,
@@ -161,15 +163,16 @@ def summarize(path, slo_ms, ue_results=None):
                     if integer(record['attempts'], 'attempts') != attempts or integer(record['successes'], 'successes') != successes:
                         raise ValueError('phase totals do not match requests')
                     latencies = sorted(current['latencies'])
-                    phase, total, gnb2, gnb3 = current['info']
+                    phase, total, gnb1, gnb2, gnb3 = current['info']
                     elapsed = end - start
-                    phases.append({'phase': phase, 'workload_ue': total, 'gnb2_ues': gnb2, 'gnb3_ues': gnb3,
+                    phases.append({'phase': phase, 'workload_ue': total, 'gnb1_ues': gnb1, 'gnb2_ues': gnb2, 'gnb3_ues': gnb3,
                                    'start_time': start, 'end_time': end, 'generation_duration_s': generation,
                                    'throughput_denominator_s': elapsed, 'attempts': attempts,
                                    'successes': successes, 'failures': attempts - successes,
                                    'attempt_throughput_per_s': attempts / elapsed,
                                    'success_throughput_per_s': successes / elapsed,
                                    'latency_p50_ms': percentile(latencies, .50),
+                                   'latency_p90_ms': percentile(latencies, .90),
                                    'latency_p95_ms': percentile(latencies, .95),
                                    'latency_p99_ms': percentile(latencies, .99),
                                    'slo_ms': slo_ms, 'slo_met_attempts': current['slo_met'],
@@ -180,6 +183,7 @@ def summarize(path, slo_ms, ue_results=None):
                                         'attempts': ue_attempts, 'successes': ue_successes,
                                         'failures': ue_attempts - ue_successes,
                                         'latency_p50_ms': percentile(ue_latencies, .50),
+                                        'latency_p90_ms': percentile(ue_latencies, .90),
                                         'latency_p95_ms': percentile(ue_latencies, .95),
                                         'latency_p99_ms': percentile(ue_latencies, .99),
                                         'slo_ms': slo_ms, 'slo_met_attempts': ue_slo_met,
