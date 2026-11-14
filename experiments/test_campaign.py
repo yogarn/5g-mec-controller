@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 
 import pytest
+import yaml
 
 from experiments import campaign
 
@@ -87,3 +88,16 @@ def test_campaign_name_cannot_escape_results(monkeypatch):
     with pytest.raises(SystemExit) as error:
         campaign.main(['../other'])
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize('use_tc', [False, True])
+def test_campaign_manifest_reserves_pool_only_with_tc(tmp_path, use_tc):
+    path = campaign._campaign_manifest(tmp_path, use_tc)
+    deployment = next(item for item in yaml.safe_load_all(path.read_text())
+                      if item and item.get('kind') == 'Deployment')
+    annotations = deployment['spec']['template']['metadata'].get('annotations', {})
+    key = 'cni.projectcalico.org/ipv4pools'
+    if use_tc:
+        assert json.loads(annotations[key]) == [campaign.POOL_NAME]
+    else:
+        assert key not in annotations

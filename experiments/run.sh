@@ -30,7 +30,7 @@ if [[ "${1:-}" == check ]]; then
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh setup | check | NEW_CAMPAIGN_NAME' >&2
+  echo 'Usage: bash experiments/run.sh setup | check | NEW_CAMPAIGN_NAME [--tc-ms DELAY] [--slo-ms TARGET]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"
