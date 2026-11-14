@@ -1,573 +1,115 @@
-# Three-gNB experiment runbook
+# gNB3-hotspot experiments
 
-Run commands from the **repository root**, not from `experiments/`. This runbook separates the controller on the core host from the UE workload generator on the UE host. It does not start or transfer anything over SSH automatically.
+## Run an experiment
 
-This runbook covers the current gNB3-hotspot campaign. Verify the direct NodePort path independently from all three gNBs. The controller targets the elapsed-time p90 of all UE attempts, including failures and timeouts, from one telemetry collector. Fast failures can lower this p90; monitor failures separately. Keep mutation disabled until all UE paths, telemetry coverage, and policy are validated. Inspect the live Services before each run because allocated NodePorts can change.
+On **core-5g**, in tmux, from the project root:
 
-The default schedule is three 30-second phases with one UE at each site in turn. It is a **connectivity smoke test**, not a justified research campaign. The runner stops and reattaches UEs between phases; it does not perform 5G handover. Closed-loop UE counts are not fixed offered request rates.
-
-Never run the HPA and a mutating controller, KEDA, or any other replica writer at the same time. Approve a campaign and recovery plan first. Keep the same workload, image, input photo, routes, SLO, starting replicas, node constraints, UE schedule and phase duration across matched runs. Repeat runs and counterbalance method order. The runner does not automatically collect pod resources, controller events, or prove actual gNB attachment.
-
-## When to run each section
-
-| Frequency | Required action |
-| --- | --- |
-| First installation or when assets/configuration change | Sections 1–2: install dependencies; configure the workload, collector and Prometheus only if missing or changing; provision **new** UE subscribers only if necessary. Existing resources and reservations must not be recreated for each run. |
-| Before every matched campaign | Section 3.1: check ownership and infrastructure, save the current state, clear only the experiment application's old pods and start one fresh ready application pod. |
-| For each baseline run | Section 3.2: create the baseline HPA, run preflight and the three-site smoke test, reset to one fresh pod if needed, then start the sampler and measured UE workload. |
-| Before each proposed run | Section 3.3: remove only the campaign HPA, clear the experiment application's pods, start one fresh ready pod, and validate the controller in non-mutating mode with active smoke traffic before the measured run. |
-| After each proposed run | Stop controller and sampler, recover owned resources, restore the original affinity and replica count, and verify the resulting cluster state. |
-| After each matched pair | Section 3.4: summarize, transfer and checksum raw data, produce plots and retain logs. Use new output directories for repeats. |
-
-The collector Deployment and Service are in namespace `placement` (NodePort 31669), as is Prometheus (NodePort 30990). Verify them again before a run:
-
-```sh
-kubectl -n placement get deployment,service ue-telemetry
-kubectl -n placement get deployment,service placement-prometheus
-```
-
-If they are healthy and already configured, **do not redeploy, rebuild or reprovision them**. Setup and repair require authorization and are not routine per-run steps.
-
-## 1. Core host and collector setup — first installation or change
-
-Verification commands in this section, including preflight, still apply before every campaign even when installation is skipped.
-
-**On core**, with Kubernetes access, prepare the software without changing active experiments. Do not create, replace, restart, or reload shared resources until their owner authorizes a maintenance window.
-
-After authorization, inspect the `services` namespace and project Deployment and Service. If both workload resources are absent, create them with `kubectl create -f apps/face-detection/manifest.yaml`; if either exists, inspect ownership and state rather than overwriting it. The desired replica count is 1; cold start can temporarily have zero ready pods. Inspect the app NodePort with `kubectl -n services get service mec-placement-face-detection` and choose a node IP reachable from each UE path. Requests use `http://NODE_IP:APP_NODEPORT/detect` through Kubernetes kube-proxy.
-
-```sh
+```bash
 cd /home/member/skripsi_yoga/5g-mec-controller
-# Preserve local changes before updating an existing checkout.
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# The Python Kubernetes client does not automatically use k3s's default path.
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-
-# After the collector and Prometheus are configured as described below:
-python -m experiments.preflight
-kubectl -n services get deployment mec-placement-face-detection -o wide
-kubectl -n services get hpa
-kubectl -n services top pods -l app=mec-placement-face-detection
+tmux new -s mec-experiment
 ```
 
-Preflight checks the workload, NodePort configuration and global collector telemetry; it does not check UPFs or prove reachability or telemetry coverage at any site. Verify all three UE paths separately. Idle is unverified only when the collector scrape is up, its window complete, and attempts are zero; scrape failures and overflow remain errors.
+Inside that session:
 
-### Collector and Prometheus startup
-
-The collector runs as **one Kubernetes pod**, not on each UE. Its image must be accessible to the Kubernetes node that runs the pod; UE hosts only need the Python workload code and token file. The collector and copied Prometheus Deployment select `site: core`. The current cluster's `core-5g` node has that label and is schedulable; recheck labels, taints and available resources before deploying. The registry avoids manually copying the image to the node.
-
-The `collector/manifest.yaml` Service uses NodePort 31669 and the Deployment is pinned to an image digest. Build and push after collector code changes, then update the manifest to the new verified digest; building alone does not change the running Deployment:
-
-```sh
-docker build -f collector/Dockerfile -t 10.34.211.140:30500/ue-telemetry-collector:latest .
-docker push 10.34.211.140:30500/ue-telemetry-collector:latest
+```bash
+bash experiments/run.sh run_2
 ```
 
-If Docker is not configured for the testbed's HTTP registry, an operator may instead run `docker buildx build -f collector/Dockerfile --output type=image,name=10.34.211.140:30500/ue-telemetry-collector:latest,push=true,registry.insecure=true .` on the trusted testbed network. Publishing `latest` does not update a digest-pinned Deployment. Coordinate image changes with other users.
+Use a **new name** for each campaign (`run_2`, `run_3`, etc.). Existing result directories are never reused. You do not need another tmux session, manually started samplers, manual UE commands, file transfers, or owner-label commands.
 
-After authorization, copy the token securely to core if necessary. Set `TOKEN_FILE` to the protected file containing the same token used by the UE; do not put its contents in a command, manifest, or repository. If the Secret and collector resources do not already exist, create them:
+The command performs the complete sequence:
 
-```sh
-TOKEN_FILE="$HOME/.config/5g-mec/ue-telemetry-token"
-kubectl -n placement create secret generic ue-telemetry-token --from-file=token="$TOKEN_FILE"
-kubectl create -f collector/manifest.yaml
-kubectl -n placement rollout status deployment/ue-telemetry
-kubectl -n placement get service ue-telemetry -o wide
+1. Checks dependencies, Kubernetes, collector health/scraping, SSH, passwordless sudo, reserved UE inventory and matching project revisions.
+2. Removes the old experiment's app and HPA. It never deletes the collector, gNBs, UPFs or other services.
+3. **Baseline:** applies the face-detection manifest (one fresh pod) and HPA, waits for readiness, runs preflight, starts resource sampling and remotely starts the UE workload.
+4. Verifies active latency telemetry appears, waits for UE completion and cleanup, stops the sampler, transfers results and verifies their checksums. Produces the baseline summaries.
+5. Deletes baseline HPA and app resources, including any managed groups from an earlier experiment.
+6. **Proposed:** starts the controller with `--deploy`; the controller creates its own missing face-detection Deployment and Service. Waits for readiness, runs preflight, starts a fresh sampler and the identical UE workload.
+7. Stops the controller and sampler, transfers/checksums and summarizes proposed results, generates PNG/PDF plots, and removes the experiment app/HPA resources.
+
+Progress is printed in the terminal. Per-method controller, sampler and UE logs are retained under `results/NAME/baseline/` and `results/NAME/proposed/`. UE console logs and original UE results also remain on the UE host. Final plots are in `results/NAME/plots/` on core.
+
+Detach with `Ctrl-b d`; reattach with:
+
+```bash
+tmux attach -t mec-experiment
 ```
 
-If any resource already exists, stop and coordinate with its owner rather than overwriting it. Review `collector/manifest.yaml`, including its ConfigMap settings, before creation; the image uses `/etc/ue-telemetry/config.yaml`. Confirm NodePort 31669 is free before creating the Service and inspect it afterward. Choose a reachable node IP for `http://NODE_IP:COLLECTOR_NODEPORT/observations`. Protect the token file on both hosts; never commit it.
+**Ctrl-C stops the campaign.** The runner signals only its recorded UE process, lets the UE lifecycle clean up, stops its controller/sampler and removes the isolated app resources. Errors stop the campaign rather than silently continuing. Logs and any partial data remain; use a new campaign name after fixing the error. Do not rerun old summary commands on the same directory.
 
-The shared monitoring manifests copied under `telemetry/` are **reference snapshots**, not authoritative copies of live resources; the Prometheus copy additionally selects `site: core`. Prometheus retains the other team's scrape jobs and recording rules. Do not apply these copies over existing installations.
+## One-time setup
 
-If shared `placement/placement-prometheus` is already running, reuse it; do not start a second instance or restart it during another team's experiment. After authorization, an operator must back up and inspect the live `placement/placement-prometheus-config` ConfigMap, merge only the `ue-telemetry` job from `collector/prometheus-scrape.yaml` into its existing `scrape_configs`, validate the complete configuration, and use the owner's approved reload procedure. Do not replace other jobs or recording rules. The copied Prometheus manifest enables `--web.enable-lifecycle`, but verify the live Deployment before using `POST /-/reload` and wait for the updated ConfigMap to reach the pod. Reloading is a shared operational change.
+Both machines need the same updated project revision. On core and the UE host, update the checkout with:
 
-The copied Grafana manifest provisions the existing placement dashboard and exposes NodePort 30031; it is optional for the collector and controller. It enables **anonymous Admin access and disables the login form**. Treat it as unsafe on untrusted networks: an authorized operator must review authentication and network restrictions before using it. Reuse the existing shared Grafana instead of replacing it during another team's experiments.
-
-For a new, isolated installation only, review the copied namespace and monitoring manifests, reconcile their existing jobs, rules, RBAC and NodePorts with that environment, and create the required resources in namespace-first order. Merge the collector scrape job before starting Prometheus. Do not use this procedure to replace the shared instance at `10.34.211.140:30990`.
-
-For example, after creating and validating a reviewed copy of `telemetry/03-prometheus.yaml` at `PROMETHEUS_MANIFEST` with the collector job merged, and confirming none of its resources exist:
-
-```sh
-kubectl create -f telemetry/00-namespace.yaml
-kubectl create -f telemetry/01-node-exporter.yaml
-# Only if this environment uses NVIDIA DCGM monitoring:
-kubectl create -f telemetry/02-dcgm-exporter.yaml
-kubectl create -f "$PROMETHEUS_MANIFEST"
-kubectl -n placement rollout status deployment/placement-prometheus
-kubectl -n placement get service placement-prometheus
-```
-
-The copied Prometheus manifest uses NodePort 30990; resolve any port collision in the reviewed copy before creation. These commands create shared cluster resources and must not be run during another team's experiment without authorization.
-
-Supply both `--telemetry-url http://NODE_IP:COLLECTOR_NODEPORT/observations` and `--telemetry-token-file PATH` to the UE runner. Without both options, telemetry is disabled. Delivery and drop totals appear on stderr; compare them with JSONL attempts.
-
-The rolling window uses collector arrival time, not request start time. Delivery loss, queue overflow, and collector restart skew coverage; counts are partial while `ue_request_window_complete` is zero, and both p90 gauges are omitted until the window is complete. `ue_request_attempt_duration_p90_seconds` is nearest-rank over all attempts, using their actual duration without penalties; `ue_request_duration_p90_seconds` remains successful-only. Failures are attempts minus successes. One replica is essential: per-replica p90 values cannot be aggregated into a global p90.
-
-Each UE observation contains `ue_ip`, full-response `duration_ms`, `http_status` (null if no response status was received), and `success`. Success remains separate because reading a response can fail after a 2xx status. The collector converts milliseconds to seconds for its Prometheus p90 and SLO metrics. Update collector and UE code together.
-
-Protect the collector network and token: payload IPs are client asserted and do not authenticate UEs or prove attachment. Before any live mutation, reverify NodePort reachability and telemetry source/payload at all three gNBs, the SMF-IP-to-AMF-gNB join, scrape health, delivery loss, and p90 against raw JSONL. Unknown or stale mappings contribute only to global metrics. Keep mutation disabled if any check fails.
-
-
-## 2. UE host setup — first installation or change
-
-**On the UE host** (`member@10.34.211.6`), log in separately. The former `10.34.7.38` host is retired. If the checkout does not exist, create its parent and clone it; `git clone` refuses an existing destination:
-
-```sh
-mkdir -p ~/skripsi_yoga
-git clone https://github.com/yogarn/5g-mec-controller.git ~/skripsi_yoga/5g-mec-controller
-cd ~/skripsi_yoga/5g-mec-controller
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-If the checkout is a Git clone, inspect and preserve local changes before `git pull --ff-only`; a transferred copy without `.git` must be synchronized deliberately instead. Use the same revision on both hosts. Inspect private assets and the campaign inventory before starting:
-
-```sh
-ls -l ~/.config/5g-mec/ue-inventory.yaml
-ls -l ~/.config/5g-mec/smoke.png
-ls -l ~/5g-ai-edge/ueransim/build/nr-ue
-```
-
-On the current UE host, pass `/home/member/5g-ai-edge/ueransim/build/nr-ue` with `--nr-ue` and `~/.config/5g-mec/smoke.png` with `--image` for connectivity checks. The 64×64 synthetic image is not representative performance data. Protect the private inventory and expand it only using verified reservations; the campaign below requires 24 subscribers with all three site configurations.
-
-For a representative workload, pass `--image /path/to/image-directory`. Supported image filenames are sorted and assigned by subscriber index modulo the image count, so images are reused when UEs outnumber them and a subscriber retains its image across phases. `run.json` records names, hashes and assignments; each request record identifies its image. Use the same directory and assignments in matched runs.
-
-The eight selected images in `apps/face-detection/images` are from [Syn-Vis-v0](https://huggingface.co/datasets/retowyss/Syn-Vis-v0), Reto Wyss (2025), revision `100262732989e77f38cd831d70a376a93735006a`. Its dataset card dedicates individual images to CC0 and licenses the dataset compilation/documentation under CC-BY-SA 4.0; retain provenance and check the source terms. These 1024×1024 headshots are synthetic, female-presenting CGI portraits and are not representative of all real-world faces. The images are unchanged from the source; record their hashes and keep the image set fixed across compared runs.
-
-If any path differs, set the corresponding `--ue-config`, `--image` or `--nr-ue` option. For first-time provisioning, use the detailed inventory schema and instructions in `README.md`:
-
-1. Ensure Open5GS, three registered gNBs, UERANSIM, and three IPv4 DNNs with nonoverlapping pools are configured. Provisioning does not configure network infrastructure.
-2. For each subscriber, create three private UE YAMLs with the same unique SUPI and authentication values, and site-specific gNB search list and DNN. Create an inventory with `gnb1`, `gnb2`, and `gnb3` config paths and unique reserved static IPs outside dynamic allocation; protect these files.
-3. On a trusted host with MongoDB access, install requirements and set `OPEN5GS_MONGO_URI` securely if needed. Stop other provisioning writers. Check the plan, then explicitly insert only after review:
-
-   ```sh
-   python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --verbose
-   python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --apply
-   ```
-
-The insert-only tool refuses existing IMSIs/IPs; **do not re-provision an existing pool**. Writes are not transactional: if insertion fails, inspect MongoDB and resolve partial inserts before retrying. Verify registration, assigned IP, routing and connectivity separately. Confirm no unrelated `nr-ue` processes are running and chosen subscribers are free.
-
-## 3. Three-gNB campaign: tmux walkthrough
-
-This is a **new** run, not a continuation of `gnb3-hotspot-20261114T0500Z`. The proposed condition calculates a replica target from all-attempt p90 / 0.5 s, then plans each extra replica in sequence against projected node allocations. The controller applies the resulting per-node counts as a batch; the cooldown is between decisions, not between pods. Migration remains surge-first and one replica at a time. Both methods have a maximum of 100 desired replicas; a migration can temporarily use one more. A cap is not a capacity guarantee: check CPU, memory, pod slots, node saturation and other workloads before starting and monitor them during the trial.
-
-The same 24 reserved subscribers, routes, image set, node eligibility, 180-second phases, and starting replica count must be used for both methods. The runner stops and reattaches UEs between phases; this is not a handover experiment. Do not restart shared gNBs, UPFs, Prometheus or other teams' services without their approval. Check that the 24 reserved UEs have their static IP and DNN/UPF anchor for each of gNB1, gNB-2 and gNB-3 and are not in use; do not reprovision existing subscribers. Verify all three paths and telemetry association during an active smoke test before starting. If a check fails, stop; do not assume an idle or incomplete telemetry window is valid.
-
-### 3.1 Prepare both machines — before each matched campaign
-
-On **both core and the UE host**, make sure this updated checkout is present. The core and UE host may have uncommitted local changes: do not blindly overwrite them or use `git pull` until you have checked and preserved them. Verify the controller has batch-scale-up support and `config.yaml` and `experiments/hpa-baseline.yaml` both specify 100. The UE host needs the experiment runner and private inventory; core needs the controller, sampler, Kubernetes access and Prometheus. Install the existing project requirements on each host. For plots, install `matplotlib` in the core virtual environment if not already installed.
-
-Open two persistent sessions on **core** and one on **UE host**:
-
-```sh
-# On core, in two terminals:
-tmux new -s mec-control
-tmux new -s mec-metrics
-# On UE host:
-tmux new -s mec-ue
-```
-
-Detach with `Ctrl-b d`; reattach with `tmux attach -t mec-control` (or the other session name). Commands below are entered in the named session, not inside another running command. Use the same new campaign name on both hosts:
-
-```sh
+```bash
 cd /home/member/skripsi_yoga/5g-mec-controller
-export CAMPAIGN=gnb3-100-01
+git pull --ff-only
 ```
 
-Choose a unique name; result directories must not already exist. In **core `mec-control`**, save state and inspect it:
+If Git reports local changes, preserve them before updating; do not force-reset the checkout. Review `experiments/campaign.yaml` once. It contains the UE host/address and paths, the reserved inventory path, collector URL, schedule and phase duration. It contains **no authentication secrets**. The defaults are for:
 
-```sh
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-mkdir -p results
-mkdir "results/$CAMPAIGN"
-kubectl -n services get deployment mec-placement-face-detection -o yaml > "results/$CAMPAIGN/deployment-before.yaml"
-kubectl -n services get hpa -o yaml > "results/$CAMPAIGN/hpas-before.yaml"
-kubectl -n services get pods -l app=mec-placement-face-detection -o wide > "results/$CAMPAIGN/pods-before.txt"
-kubectl -n services get svc,deploy mec-placement-face-detection
-kubectl -n placement get svc,deploy ue-telemetry
-kubectl get nodes
-kubectl top nodes
-kubectl describe nodes gnb1 gnb-2 gnb-3
+- Core Kubernetes host: `10.34.211.140`.
+- UE host: `member@10.34.211.6`, project `/home/member/skripsi_yoga/5g-mec-controller`.
+- Reserved pool: `.private/ue-paper-24/inventory.yaml` on the UE host.
+- UERANSIM: `/home/member/5g-ai-edge/ueransim/build/nr-ue`.
+- Token: `/home/member/.config/5g-mec/ue-telemetry-token` on the UE host.
+
+From core, set up dependencies on both machines once:
+
+```bash
+bash experiments/run.sh setup
 ```
 
-Confirm the collector is ready and no workload HPA, controller or other replica writer is active. Identify any controller-owned groups and migration annotation; if present, stop and follow ownership-aware recovery below before proceeding. Inspect the saved Deployment's original affinity; the following temporary constraint is appropriate **only if it has no existing affinity**. Otherwise stop and design an equivalent constraint with the owner; do not overwrite existing affinity.
+This installs project requirements and Matplotlib on core, project requirements on the UE host, and checks noninteractive SSH/sudo access. It does **not** deploy or restart shared infrastructure. Core must be able to SSH to the configured UE host without a password, and that account must be authorized to use `sudo -n` for the UE runner. Configure that access before running setup; the script does not change sudoers or copy credentials.
 
-Clear only this experiment's application pods by scaling its Deployment to zero. This temporarily makes the application unavailable. Do **not** delete the collector, gNB, UPF, core or other teams' pods. If the HPA or another writer is active, stop here until its owner stops it; otherwise it can recreate pods during cleanup.
+You can check readiness at any time **without starting a campaign or modifying Kubernetes resources**:
 
-```sh
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=0
-kubectl -n services wait --for=delete pod -l app=mec-placement-face-detection --timeout=180s
-kubectl -n services get pods -l app=mec-placement-face-detection -o wide
+```bash
+bash experiments/run.sh check
 ```
 
-Confirm that no experiment application pods remain. Apply the common node constraint while the application is stopped, then start exactly one fresh application pod:
+## Infrastructure that must already exist
 
-```sh
-kubectl -n services patch deployment mec-placement-face-detection --type=merge -p \
-  '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["gnb1","gnb-2","gnb-3"]}]}]}}}}}}}'
+These are installation/provisioning tasks, **not per-run commands**:
+
+- A working Open5GS core, three registered gNBs, routes and three IPv4 DNNs with correct UPF anchors.
+- The 24 reserved subscribers, with static IPs and private UE configurations for all three sites. No other UE workload may use these reservations during a campaign.
+- One ready collector in `placement/ue-telemetry`, NodePort **31669**, using the same token as the UE host.
+- Prometheus in `placement`, reachable at `http://10.34.211.140:30990`, scraping `ue-telemetry.placement.svc.cluster.local:8080/metrics` and the configured node/GPU metrics.
+- Metrics Server, the face-detection image registry and all three eligible Kubernetes nodes.
+
+Reuse this infrastructure. Do not restart or reapply the shared monitoring or 5G manifests for every experiment. If the collector must be installed, review `collector/manifest.yaml`, create its token Secret in **placement**, and merge only `collector/prometheus-scrape.yaml` into the existing Prometheus configuration. The collector image is digest-pinned; a build alone does not update its running image. Never replace other Prometheus jobs.
+
+For **first-time subscriber provisioning only**, create the private inventory using the schema in [README.md](README.md#provisioning-ue-subscribers). Each subscriber needs three configurations sharing the same SUPI/authentication values, with site-specific DNN, gNB address and static IP. On a trusted host with MongoDB access:
+
+```bash
+python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --verbose
+python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --apply
 ```
 
-**Stop if the patch reports an error.** Confirm the required hostname affinity is present before starting the pod; otherwise the baseline and proposed node eligibility will differ.
+The tool inserts only new subscribers; do not reprovision the existing pool. Writes are not transactional: inspect partial inserts before retrying. Subscriber secrets and telemetry tokens stay outside Git. Provisioning does not configure DNNs, UPFs or gNBs; independently verify registration, assigned static IPs and anchors when provisioning or changing the network.
 
-```sh
-kubectl -n services get deployment mec-placement-face-detection -o jsonpath='{.spec.template.spec.affinity}{"\n"}'
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
-kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
-kubectl -n services get deployment mec-placement-face-detection -o yaml > "results/$CAMPAIGN/deployment-matched.yaml"
+## Fixed experiment conditions
+
+The application now runs in dedicated namespace **mec-experiment**. The runner resets its Deployments, Services and HPAs before each method and after completion. Do not put unrelated resources in that namespace. For migration from the previous layout, it also removes the old named `services/mec-placement-face-detection` Deployment/Service and its baseline HPA; Kubernetes removes that Deployment's dependent managed groups. It leaves all other resources in `services` alone. Existing historical data is never deleted.
+
+The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`) as proposed. Both methods use the same digest-pinned app image, photo set, resources, 100-replica ceiling and starting replica count of one. A temporary migration replacement can exceed the desired ceiling by one. The application NodePort is discovered automatically; the UE command receives the actual allocated port.
+
+The controller computes `ceil(current replicas × all-attempt p90 / 0.5 seconds)`, within its configured bounds. It plans added replicas individually against projected capacity and applies the resulting per-node counts without a per-step cooldown. Migration is one replacement at a time. Missing required metrics make reconciliation fail closed.
+
+Each phase generates traffic for **180 seconds**. The schedule is `total:gnb1:gnb2:gnb3`:
+
+```text
+3:1:1:1
+9:3:3:3
+9:1:2:6
+9:1:1:7
+15:5:5:5
+15:1:4:10
+15:1:1:13
+24:8:8:8
+24:1:7:16
+24:1:1:22
 ```
 
-Wait until exactly one new application pod is running and ready. The Deployment creates the pod; the HPA introduced next changes its desired replica count but does not create the Deployment. Keep this same constraint for both conditions. Verify live Services still use app NodePort 30998 and collector NodePort 31669; substitute verified addresses if they changed. Verify the collector token file on the UE host and do not print its contents.
-
-
-### 3.2 Baseline HPA — each baseline run
-
-In **core `mec-control`**, after confirming no other writer:
-
-```sh
-kubectl create -f experiments/hpa-baseline.yaml
-kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-created.yaml"
-mkdir "results/$CAMPAIGN/baseline"
-```
-With the new application pod ready, the HPA active, and the collector available, run the read-only preflight on **core**:
-
-```sh
-.venv/bin/python -m experiments.preflight
-```
-
-With no UE traffic, an idle collector is reported as **unverified**, not as validated latency. The next smoke test starts temporary UEs; run preflight again while its traffic is active. It is not the measured experiment.
-
-For a three-site connectivity smoke test, run this on the **UE host** after confirming the reserved subscriber is free and the paths, token and ports are correct:
-
-```sh
-cd /home/member/skripsi_yoga/5g-mec-controller
-sudo .venv/bin/python -u -m experiments.experiment --armed \
-  --url http://10.34.211.140:30998/detect \
-  --image /home/member/.config/5g-mec/smoke.png \
-  --ue-config .private/ue-paper-24/inventory.yaml \
-  --nr-ue /home/member/5g-ai-edge/ueransim/build/nr-ue \
-  --phase-schedule '1:1:0:0,1:0:1:0,1:0:0:1' --phase-duration 30 \
-  --telemetry-url http://10.34.211.140:31669/observations \
-  --telemetry-token-file /home/member/.config/5g-mec/ue-telemetry-token \
-  --output-dir "results/$CAMPAIGN/smoke"
-```
-
-While the smoke test is sending traffic, run this on **core `mec-control`**:
-
-```sh
-.venv/bin/python -m experiments.preflight
-```
-
-Separately verify each site's UE IP, session, DNN, UPF anchor, route and telemetry association. The smoke reuses one subscriber at each site in turn; it does not validate every reserved subscriber or all three sites simultaneously. Verify the full pool independently. Wait for cleanup before starting the campaign.
-
-The smoke test can cause the HPA to scale, so reset its state and start the **measured baseline** from one fresh pod. On **core**, after smoke cleanup and after confirming this is the campaign-owned HPA:
-
-```sh
-kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-smoke-after.yaml"
-kubectl -n services delete hpa mec-placement-face-detection-baseline
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=0
-kubectl -n services wait --for=delete pod -l app=mec-placement-face-detection --timeout=180s
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
-kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
-kubectl -n services get pods -l app=mec-placement-face-detection -o wide
-kubectl create -f experiments/hpa-baseline.yaml
-kubectl -n services get hpa mec-placement-face-detection-baseline
-```
-
-Confirm exactly one fresh pod is ready before starting the measured UE workload. If the HPA has already scaled above one, stop and reset again; never scale while another replica writer is active.
-
-
-The baseline targets 80% of CPU request, with 1–100 replicas and a 180-second scale-down window. For a 200m request, the target is 160m per pod, not 80% of the CPU limit. Confirm Metrics Server reports valid data and all pods have CPU requests; the threshold is not a calibrated latency SLO.
-
-In **core `mec-metrics`**, set the same campaign name and start the sampler. Leave it running until the UE command has finished, then stop it with `Ctrl-C`:
-
-```sh
-cd /home/member/skripsi_yoga/5g-mec-controller
-export CAMPAIGN=gnb3-100-01
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-.venv/bin/python -u -m experiments.monitor_resources sample "results/$CAMPAIGN/baseline/metrics.jsonl"
-```
-
-In **UE `mec-ue`** run the approved schedule. `--armed` starts it without an interactive confirmation. The command creates the output directory and cleans up its own UE processes on completion; do not reuse a result directory.
-
-```sh
-cd /home/member/skripsi_yoga/5g-mec-controller
-export CAMPAIGN=gnb3-100-01
-set -o pipefail
-export SCHEDULE='3:1:1:1,9:3:3:3,9:1:2:6,9:1:1:7,15:5:5:5,15:1:4:10,15:1:1:13,24:8:8:8,24:1:7:16,24:1:1:22'
-sudo .venv/bin/python -u -m experiments.experiment --armed \
-  --url http://10.34.211.140:30998/detect \
-  --image apps/face-detection/images \
-  --ue-config .private/ue-paper-24/inventory.yaml \
-  --nr-ue /home/member/5g-ai-edge/ueransim/build/nr-ue \
-  --phase-schedule "$SCHEDULE" --phase-duration 180 \
-  --telemetry-url http://10.34.211.140:31669/observations \
-  --telemetry-token-file /home/member/.config/5g-mec/ue-telemetry-token \
-  --output-dir "results/$CAMPAIGN/baseline" 2>&1 | tee "baseline-$CAMPAIGN.log"
-```
-
-After all ten phases finish and UE cleanup completes, stop the **baseline sampler** in **core `mec-metrics`** by pressing `Ctrl-C`. Wait until the shell prompt returns; do not leave the baseline sampler running into the proposed run. Verify no experiment-owned `nr-ue` processes remain. Preserve the raw JSONL, run metadata, UE lifecycle journal, telemetry delivery/drop counts, sampler and console log.
-
-### 3.3 Reset and proposed condition — before and after each proposed run
-
-In **core `mec-control`**:
-
-Before deleting the HPA, confirm it is still the experiment-owned instance and has not been replaced or taken over. Stop if ownership is unclear. Before scaling, stop all writers and confirm there are no controller-owned placement groups or migration annotation; if present, follow the ownership-aware recovery below instead.
-
-```sh
-kubectl -n services get hpa mec-placement-face-detection-baseline -o yaml > "results/$CAMPAIGN/hpa-after.yaml"
-kubectl -n services delete hpa mec-placement-face-detection-baseline
-kubectl -n services get hpa
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=0
-kubectl -n services wait --for=delete pod -l app=mec-placement-face-detection --timeout=180s
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
-kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
-kubectl -n services get pods -l app=mec-placement-face-detection -o wide
-```
-
-Confirm the old application pods have terminated and the single newly created pod is ready. The temporary matched node constraint must still be present; there must be no HPA, other replica writer, controller-owned group or migration annotation.
-
-Create a campaign-specific controller config from the validated `config.yaml`; retain `max_replicas: 100`, `interval_seconds: 10`, `mode: mobility-aware`, and the verified metrics and eligible nodes. Set an absolute path to `apps/face-detection/manifest.yaml`, because relative paths are resolved relative to the config file. First use `mutate: false` and run `--once` while the three-site smoke workload is active; an idle telemetry window cannot validate p90. Check the target, per-node metrics and logs. Only after checks pass and the trial is authorized, set `mutate: true` in this campaign copy; keep the checked-in default `config.yaml` non-mutating.
-
-```sh
-.venv/bin/python - <<'PY'
-import os
-from pathlib import Path
-import yaml
-root = Path.cwd()
-path = root / "results" / os.environ["CAMPAIGN"] / "controller.yaml"
-data = yaml.safe_load((root / "config.yaml").read_text())
-data["manifest"] = str(root / "apps/face-detection/manifest.yaml")
-data["mutate"] = False
-with path.open("x") as stream:
-    yaml.safe_dump(data, stream, sort_keys=False)
-PY
-```
-
-On **UE `mec-ue`**, start a fresh proposed-condition smoke test:
-
-```sh
-cd /home/member/skripsi_yoga/5g-mec-controller
-export CAMPAIGN=gnb3-100-01
-sudo .venv/bin/python -u -m experiments.experiment --armed \
-  --url http://10.34.211.140:30998/detect \
-  --image /home/member/.config/5g-mec/smoke.png \
-  --ue-config .private/ue-paper-24/inventory.yaml \
-  --nr-ue /home/member/5g-ai-edge/ueransim/build/nr-ue \
-  --phase-schedule '1:1:0:0,1:0:1:0,1:0:0:1' --phase-duration 30 \
-  --telemetry-url http://10.34.211.140:31669/observations \
-  --telemetry-token-file /home/member/.config/5g-mec/ue-telemetry-token \
-  --output-dir "results/$CAMPAIGN/smoke-proposed"
-```
-
-While that smoke test is **actively sending traffic**, run the non-mutating controller observation on **core `mec-control`**:
-
-```sh
-.venv/bin/python -m controller --config "results/$CAMPAIGN/controller.yaml" --once
-```
-
-Check its output and wait for the smoke test and UE cleanup to finish. Only after validation and authorization, change `mutate` to `true` in the campaign copy:
-
-```sh
-nano "results/$CAMPAIGN/controller.yaml"
-```
-
-In **core `mec-control`**, create the output directory and run the controller in the foreground, retaining its log:
-
-```sh
-mkdir "results/$CAMPAIGN/proposed"
-set -o pipefail
-.venv/bin/python -u -m controller --config "results/$CAMPAIGN/controller.yaml" 2>&1 | tee "results/$CAMPAIGN/proposed/controller.log"
-```
-
-In **core `mec-metrics`**, confirm the baseline sampler has been stopped and the shell prompt is available. Start a **separate** sampler for the proposed run:
-
-```sh
-cd /home/member/skripsi_yoga/5g-mec-controller
-export CAMPAIGN=gnb3-100-01
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-.venv/bin/python -u -m experiments.monitor_resources sample "results/$CAMPAIGN/proposed/metrics.jsonl"
-```
-
-In **UE `mec-ue`**, start the measured proposed run:
-
-```sh
-cd /home/member/skripsi_yoga/5g-mec-controller
-export CAMPAIGN=gnb3-100-01
-set -o pipefail
-export SCHEDULE='3:1:1:1,9:3:3:3,9:1:2:6,9:1:1:7,15:5:5:5,15:1:4:10,15:1:1:13,24:8:8:8,24:1:7:16,24:1:1:22'
-sudo .venv/bin/python -u -m experiments.experiment --armed \
-  --url http://10.34.211.140:30998/detect \
-  --image apps/face-detection/images \
-  --ue-config .private/ue-paper-24/inventory.yaml \
-  --nr-ue /home/member/5g-ai-edge/ueransim/build/nr-ue \
-  --phase-schedule "$SCHEDULE" --phase-duration 180 \
-  --telemetry-url http://10.34.211.140:31669/observations \
-  --telemetry-token-file /home/member/.config/5g-mec/ue-telemetry-token \
-  --output-dir "results/$CAMPAIGN/proposed" 2>&1 | tee "proposed-$CAMPAIGN.log"
-```
-
-Monitor controller errors, pending pods, node eligibility, resource pressure and telemetry while the run proceeds. A temporarily missing metric can make the controller fail closed; record it, do not silently replace data.
-
-After all phases and UE cleanup finish, stop the controller and sampler with `Ctrl-C` in their respective tmux sessions; wait for both shell prompts. The controller's node-pinned child Deployments **do not disappear when the controller stops**. Recover the app below before touching affinity. A successful rollout of the original Deployment at zero replicas does **not** mean the app has been restored.
-
-### Restore the original application and remove managed groups
-
-These commands operate only on this experiment's application, not the collector or other workloads. On **core `mec-control`**, check that no controller or HPA is still writing replicas, and capture the state before recovery:
-
-```sh
-pgrep -af '[p]ython.*-m controller|[m]onitor_resources sample' || true
-kubectl -n services get hpa
-kubectl -n services get deployment mec-placement-face-detection -o yaml > "results/$CAMPAIGN/deployment-before-recovery.yaml"
-UID_ORIGINAL=$(kubectl -n services get deployment mec-placement-face-detection -o jsonpath='{.metadata.uid}')
-export UID_ORIGINAL
-kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o yaml > "results/$CAMPAIGN/managed-before-recovery.yaml"
-kubectl -n services get pods -l app=mec-placement-face-detection -o wide > "results/$CAMPAIGN/pods-before-recovery.txt"
-kubectl -n services get endpointslices -l kubernetes.io/service-name=mec-placement-face-detection -o yaml > "results/$CAMPAIGN/endpoints-before-recovery.yaml"
-kubectl -n services get events --sort-by=.lastTimestamp > "results/$CAMPAIGN/events-before-recovery.txt"
-kubectl -n services get deployment mec-placement-face-detection -o jsonpath='original desired={.spec.replicas} ready={.status.readyReplicas} migration={.metadata.annotations.mec-placement-controller\.io/migration}{"\n"}'
-kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" \
-  -o custom-columns=NAME:.metadata.name,DESIRED:.spec.replicas,READY:.status.readyReplicas,OWNER:.metadata.ownerReferences[0].uid
-```
-
-**Stop here** if the controller or another writer is running, if any HPA targets the original or managed Deployments, if the migration annotation is nonempty, or if an owner UID does not match `$UID_ORIGINAL`. A pending migration or batch action must be inspected and resolved before manual recovery; do not blindly clear the annotation. The following commands are for a completed run with no pending action.
-
-If the original's desired replica count shown above is greater than one, stop and resolve that state first. Otherwise start one replica of the **original** Deployment and wait until it is ready. This creates a replacement before retiring managed pods; do not proceed if it fails. The combined desired count must not exceed the configured maximum plus one replacement.
-
-```sh
-kubectl -n services scale deployment/mec-placement-face-detection --replicas=1
-kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
-kubectl -n services get deployment mec-placement-face-detection -o jsonpath='desired={.spec.replicas} ready={.status.readyReplicas}{"\n"}'
-kubectl -n services get endpointslices -l kubernetes.io/service-name=mec-placement-face-detection
-```
-
-Confirm the original reports `desired=1 ready=1` and the Service has a healthy endpoint before continuing. If the original was already at one, it remains at one.
-
-List the managed Deployment names after verifying the owner UID above. Set `MANAGED_DEPLOYMENTS` only from those verified names; the command refuses unexpected owner references:
-
-```sh
-set -o pipefail
-MANAGED_DEPLOYMENTS=$(kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o json |
-  python3 -c 'import json,os,sys
-d=json.load(sys.stdin)
-uid=os.environ["UID_ORIGINAL"]
-for item in d["items"]:
-    if not any(r.get("uid")==uid and r.get("kind")=="Deployment" and r.get("name")=="mec-placement-face-detection" for r in item["metadata"].get("ownerReferences",[])):
-        sys.exit("Refusing deployment with unexpected owner")
-print(" ".join(item["metadata"]["name"] for item in d["items"]))')
-```
-
-If it reports an error, stop. Otherwise print and inspect the names; an empty list means there are no managed groups to remove:
-
-```sh
-printf 'Verified managed deployments: %s\n' "$MANAGED_DEPLOYMENTS"
-```
-
-With the original pod ready and no writer running, scale **only those verified groups** to zero:
-
-```sh
-for group in $MANAGED_DEPLOYMENTS; do
-  kubectl -n services scale "deployment/$group" --replicas=0 || break
-done
-kubectl -n services get pods -l "mec-placement-controller.io/owner=$UID_ORIGINAL" -o wide
-```
-
-Wait for every listed managed pod, including terminating pods, to disappear. Check again with the final `kubectl get pods` command above. **Do not delete the groups while any of their pods remain or if a scale command failed.** Then delete only the verified zero-replica groups:
-
-```sh
-for group in $MANAGED_DEPLOYMENTS; do
-  kubectl -n services delete "deployment/$group" || break
-done
-```
-
-First inspect the saved original affinity and current affinity:
-
-```sh
-kubectl -n services get deployment mec-placement-face-detection -o jsonpath='{.spec.template.spec.affinity}{"\n"}'
-```
-
-Only if this campaign added an affinity, the saved original had none, and the current affinity **still exists**, run the following patch. If it is already absent, **skip this block**. If the saved original had affinity, restore that exact approved state instead.
-
-```sh
-kubectl -n services patch deployment mec-placement-face-detection --type=json \
-  -p='[{"op":"remove","path":"/spec/template/spec/affinity"}]'
-```
-
-Whether the patch was needed or not, finish with:
-
-```sh
-kubectl -n services rollout status deployment/mec-placement-face-detection --timeout=180s
-kubectl -n services get hpa
-kubectl -n services get deployments -l "mec-placement-controller.io/owner=$UID_ORIGINAL"
-kubectl -n services get pods -l app=mec-placement-face-detection -o wide
-```
-
-Confirm the original is `1/1`, exactly one application pod is running, no managed groups or migration annotation remain, and the original affinity is restored. Never delete unrelated resources or globally kill UE processes.
-
-If interrupted UE cleanup did not finish, preserve the run directory and inspect its journal. After confirming ownership, recover only that run on the UE host:
-
-```sh
-sudo .venv/bin/python -m experiments.ue_lifecycle --recover "results/$CAMPAIGN/baseline/owned_ues"
-```
-
-Use the actual affected method's journal. Recovery fails closed on ambiguous ownership; never globally kill `nr-ue` processes or delete interfaces as a substitute.
-
-### 3.4 Summarize, transfer and plot — after each matched pair
-
-On the **UE host**, summarize each completed run once:
-
-```sh
-for method in baseline proposed; do
-  sudo .venv/bin/python -m experiments.summarize "results/$CAMPAIGN/$method/requests.jsonl" --slo-ms 500
-  sudo sha256sum "results/$CAMPAIGN/$method/requests.jsonl"
-done
-```
-
-Transfer each run's `requests.jsonl`, summaries, `run.json`, lifecycle journal and console log to the corresponding core campaign directory without overwriting sampler files. The UE host does **not** necessarily have an SSH alias named `core`; on this testbed use `member@10.34.211.140`. Check connectivity and the campaign name on **UE `mec-ue`**:
-
-```sh
-echo "CAMPAIGN=$CAMPAIGN"
-ssh member@10.34.211.140 'hostname'
-```
-
-Confirm the hostname is `core-5g`, `CAMPAIGN` matches the run you just completed, and the destination `baseline` and `proposed` directories already exist. The following transfer refuses to overwrite an existing `requests.jsonl` or `runner.log`; tar also refuses to replace any other existing file. If interrupted, inspect the destination before retrying; do not delete or overwrite existing results without checking them.
-
-```sh
-set -o pipefail
-for method in baseline proposed; do
-  DEST="/home/member/skripsi_yoga/5g-mec-controller/results/$CAMPAIGN/$method"
-  ssh member@10.34.211.140 "test -d '$DEST' && test ! -e '$DEST/requests.jsonl' && test ! -e '$DEST/runner.log'" || break
-  sudo tar -C "results/$CAMPAIGN/$method" -czf - \
-    requests.jsonl summary.csv summary.json summary-ues.csv summary-ues.json run.json owned_ues |
-    ssh member@10.34.211.140 "tar -xkzf - -C '$DEST'" || break
-  scp "$method-$CAMPAIGN.log" "member@10.34.211.140:$DEST/runner.log" || break
-done
-```
-
-Transfer over a trusted channel because the lifecycle journal contains private subscriber information. On **core**, compare the hashes against the UE output. The summarizers exclusively create files and must be run **once per method**; they refuse to overwrite existing files. If a command was already run, inspect its existing outputs rather than rerunning it or deleting them. An interrupted command may leave partial files: preserve them and use a fresh output directory if regeneration is required.
-
-```sh
-for method in baseline proposed; do
-  D="results/$CAMPAIGN/$method"
-  sha256sum "$D/requests.jsonl"
-  .venv/bin/python -m experiments.monitor_resources summarize "$D/metrics.jsonl" "$D/requests.jsonl" "$D/summary.csv" "$D" || break
-  .venv/bin/python -m experiments.telemetry_history "$D/requests.jsonl" "$D" || break
-done
-```
-
-Plotting requires Matplotlib in the core virtual environment; it is not included in `requirements.txt`. Install it once if it is missing:
-
-```sh
-.venv/bin/python -m pip install matplotlib
-```
-
-Then, after checking that both methods have complete `ramp-summary.csv`, `pods-by-ramp.csv`, and `resource-by-ramp.csv` files, generate the plots. Choose a **new** output directory; the plotter can overwrite existing plots.
-
-```sh
-.venv/bin/python -m experiments.plot_autoscaler "results/$CAMPAIGN" "results/$CAMPAIGN/plots"
-```
-
-Retain both methods' raw files, configuration, snapshots, controller/HPA logs, phase coverage and generated PNG/PDF plots. Resource CPU windows can overlap phases. Successful-request p90 is not the same as the controller's all-attempt p90 or the share of all attempts meeting the 500 ms SLO. Report failures and telemetry drops separately, and do not treat one sequential pair as a causal or repeatability claim.
+UE switching is stop-and-reattach, **not handover**. This is closed-loop traffic, not a fixed offered request rate. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, telemetry drops and mapping coverage; a fast failure can lower all-attempt p90. The response-time plots use **successful requests only**; SLO attainment uses all attempts. Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.

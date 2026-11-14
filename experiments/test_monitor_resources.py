@@ -2,6 +2,10 @@ import csv
 import json
 from datetime import datetime, timezone
 
+import pytest
+
+from experiments import monitor_resources
+
 from experiments.monitor_resources import summarize
 
 
@@ -41,3 +45,42 @@ def test_delayed_metric_uses_historical_pods_and_missing_is_not_zero(tmp_path):
     assert values[0]['complete_samples'] == '1'
     assert values[1]['complete_samples'] == '0'
     assert values[1]['cpu_millicores'] == values[1]['memory_mib'] == ''
+
+
+@pytest.mark.parametrize('namespace', [None, 'custom-workload'])
+def test_sample_cli_collects_pods_and_metrics_from_selected_namespace(tmp_path, monkeypatch, namespace):
+    output = tmp_path / 'metrics.jsonl'
+    selected = namespace or 'mec-experiment'
+    argv = ['monitor_resources.py', 'sample', str(output)]
+    if namespace is not None:
+        argv.extend(['--namespace', namespace])
+    monkeypatch.setattr('sys.argv', argv)
+    handlers = {}
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(monitor_resources.time, 'sleep',
+                        lambda seconds: handlers[monitor_resources.signal.SIGTERM](None, None))
+    pod_name = monitor_resources.PREFIX + 'abc'
+    metric = {'metadata': {'name': pod_name}, 'containers': [
+        {'name': 'app', 'usage': {'cpu': '125m', 'memory': '32Mi'}}]}
+    calls = []
+
+    def check_output(command, *, text, timeout):
+        calls.append(command)
+        assert command[:3] == ['kubectl', '-n', selected]
+        if '--raw' in command:
+            assert command[3:] == [
+                'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{selected}/pods']
+            return json.dumps({'items': [metric]})
+        assert command[3:] == ['get', 'pods', '-l', monitor_resources.LABEL, '-o', 'json']
+        return json.dumps({'items': [{
+            'metadata': {'name': pod_name}, 'spec': {'nodeName': 'gnb1'},
+            'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]},
+        }]})
+
+    monkeypatch.setattr(monitor_resources.subprocess, 'check_output', check_output)
+    monitor_resources.main()
+
+    assert len(calls) == 2
+    observation, = [json.loads(line) for line in output.read_text().splitlines()]
+    assert observation['pods'] == [{'name': pod_name, 'node': 'gnb1', 'phase': 'Running', 'ready': True}]
+    assert observation['metrics'] == {pod_name: metric}

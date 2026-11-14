@@ -97,10 +97,11 @@ def run(args):
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}
                           for group, ues in site_groups for ue in ues]})
 
+                cancelled = threading.Event()
                 def worker(group, source, ue_index):
                     image = images[assignments[ue_index]]
                     count = successes = 0
-                    while time.monotonic() < deadline:
+                    while not cancelled.is_set() and time.monotonic() < deadline:
                         record = request_with_telemetry(attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout)
                         count += 1
                         successes += record['success']
@@ -114,8 +115,12 @@ def run(args):
 
                 try:
                     with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-                        futures = [executor.submit(worker, group, source, index) for group, source, index in selected]
-                        per_ue = [future.result() for future in futures]
+                        try:
+                            futures = [executor.submit(worker, group, source, index) for group, source, index in selected]
+                            per_ue = [future.result() for future in futures]
+                        except BaseException:
+                            cancelled.set()
+                            raise
                 finally:
                     if publisher:
                         publisher.close()

@@ -1,9 +1,11 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.server
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,6 +75,67 @@ def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys):
     assert all(b'fixture-image' in body and b'name="image"' in body for _, body in bodies)
     with pytest.raises(FileExistsError):
         experiment.run(args)
+
+
+@pytest.mark.parametrize('error_type', [KeyboardInterrupt, RuntimeError])
+def test_interrupted_wait_stops_workers_and_closes_ues(tmp_path, monkeypatch, error_type):
+    request_started = threading.Event()
+    release_request = threading.Event()
+    calls = []
+    workers = []
+    failure = error_type('interrupted result wait')
+
+    def fake_attempt(url, method, body, headers, source, timeout):
+        calls.append(source)
+        # Fail promptly instead of looping forever if cancellation regresses.
+        assert len(calls) == 1, 'worker sent traffic after cancellation'
+        request_started.set()
+        assert release_request.wait(timeout=5), 'executor did not release the in-flight request'
+        return {'success': True}
+
+    class InterruptedFuture:
+        def result(self):
+            assert request_started.wait(timeout=5), 'worker did not start its request'
+            raise failure
+
+    class InterruptedExecutor(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            workers.append(super().submit(*args, **kwargs))
+            return InterruptedFuture()
+
+        def __exit__(self, *args):
+            # The request completes only after the result wait has failed and
+            # run() has had its chance to cancel, before executor shutdown joins.
+            release_request.set()
+            return super().__exit__(*args)
+
+    image = tmp_path / 'input.jpg'
+    image.write_bytes(b'fixture-image')
+    args = argparse.Namespace(url='http://127.0.0.1/detect', image=str(image),
+                              ue_config='ue.yaml', nr_ue='/bin/nr-ue',
+                              phase_schedule='1:1:0:0,1:0:1:0',
+                              phase_duration=180, timeout=1, output_dir=str(tmp_path / 'run'), armed=True)
+    monkeypatch.setattr(experiment, 'OwnedUELifecycle', FakeUEs)
+    monkeypatch.setattr(experiment, 'attempt', fake_attempt)
+    monkeypatch.setattr(experiment, 'ThreadPoolExecutor', InterruptedExecutor)
+    # The phase deadline can never expire: only cancellation can stop traffic.
+    monkeypatch.setattr(experiment, 'time',
+                        SimpleNamespace(time=lambda: 1000, monotonic=lambda: 0))
+
+    with pytest.raises(error_type, match='interrupted result wait') as caught:
+        experiment.run(args)
+
+    assert caught.value is failure
+    assert calls == ['127.0.0.3']
+    assert len(workers) == 1
+    assert workers[0].done()
+    assert workers[0].result() == {
+        'group': 'gnb-1', 'source_address': '127.0.0.3', 'attempts': 1, 'successes': 1}
+    lifecycle = FakeUEs.instances[-1]
+    assert lifecycle.closed
+    assert lifecycle.calls == [(1, 1, 0, 0)]
+    records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]
+    assert [record['event'] for record in records] == ['phase_start', 'request']
 
 
 def test_unarmed_never_creates_results(tmp_path):

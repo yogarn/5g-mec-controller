@@ -20,8 +20,8 @@ PREFIX = 'mec-placement-face-detection-'
 NODES = ('core-5g', 'gnb1', 'gnb-2', 'gnb-3', '<pending>')
 
 
-def kubectl(*args):
-    return json.loads(subprocess.check_output(['kubectl', '-n', 'services', *args], text=True, timeout=10))
+def kubectl(namespace, *args):
+    return json.loads(subprocess.check_output(['kubectl', '-n', namespace, *args], text=True, timeout=10))
 
 
 def timestamp(value):
@@ -37,7 +37,7 @@ def quantity(value, kind):
     raise ValueError(f'unsupported {kind} quantity: {value}')
 
 
-def sample(output):
+def sample(output, namespace='mec-experiment'):
     stop = False
     def request_stop(signum, frame):
         nonlocal stop
@@ -47,8 +47,8 @@ def sample(output):
     with Path(output).open('x', encoding='utf-8') as stream:
         while not stop:
             try:
-                pods = kubectl('get', 'pods', '-l', LABEL, '-o', 'json')['items']
-                measurements = kubectl('get', '--raw', '/apis/metrics.k8s.io/v1beta1/namespaces/services/pods')['items']
+                pods = kubectl(namespace, 'get', 'pods', '-l', LABEL, '-o', 'json')['items']
+                measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
                 metrics = {m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(PREFIX)}
                 rows = []
                 for pod in pods:
@@ -151,10 +151,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('sample'); p.add_argument('output')
+    p.add_argument('--namespace', default='mec-experiment', help='workload namespace (default: mec-experiment)')
     p = sub.add_parser('summarize'); p.add_argument('samples'); p.add_argument('requests'); p.add_argument('summary'); p.add_argument('output')
     args = parser.parse_args()
     if args.action == 'sample':
-        sample(args.output)
+        sample(args.output, args.namespace)
     else:
         summarize(args.samples, args.requests, args.summary, args.output)
 
