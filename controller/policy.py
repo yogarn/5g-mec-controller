@@ -47,7 +47,7 @@ class LatencyRatioPolicy:
         self.down_since = None
 
 
-DEFAULT_RESOURCE_WEIGHTS = {'cpu': .4, 'memory': .4, 'gpu': .1, 'vram': .1}
+DEFAULT_RESOURCE_WEIGHTS = {'cpu': .5, 'memory': .5, 'gpu': 0., 'vram': 0.}
 
 
 def validate_resource_weights(weights):
@@ -95,10 +95,10 @@ def rank_nodes(nodes: list[Node], requests: dict[str, float], saturation: float,
 
 def plan_placement(nodes, requests, counts, desired, saturation, locality_weight,
                    resource_weights):
-    """Plan replica counts or one surge-first migration without mutating inputs.
+    """Plan replica counts or the highest-positive-delta descheduling candidate.
 
     Allocated resources include the existing workload. A new pod must fit before
-    any old pod is removed; migration targets remain unchanged until it is ready.
+    any old pod is removed. Replicas on one node have equal scores.
     Raises ValueError when inputs are inconsistent or a scale-up cannot fit.
     """
     nodes = list(nodes)
@@ -159,12 +159,18 @@ def plan_placement(nodes, requests, counts, desired, saturation, locality_weight
         targets[name] -= 1
         current -= 1
 
-    migration = None
+    deschedule = None
     if desired == sum(counts.values()) and desired:
         ranked = scores()
         occupied = [name for name, count in targets.items() if count]
-        source = min(occupied, key=lambda name: (ranked.get(name, -math.inf), name))
-        dest, candidates = destination(source)
-        if dest is not None and (source not in ranked or candidates[dest] > ranked[source]):
-            migration = (source, dest)
-    return {'targets': targets, 'migration': migration}
+        improvements = []
+        for source in occupied:
+            dest, candidates = destination(source)
+            if dest is not None:
+                delta = candidates[dest] - ranked.get(source, -math.inf)
+                if delta > 0:
+                    improvements.append((delta, source, dest))
+        if improvements:
+            _, source, dest = min(improvements, key=lambda item: (-item[0], item[1], item[2]))
+            deschedule = (source, dest)
+    return {'targets': targets, 'deschedule': deschedule}

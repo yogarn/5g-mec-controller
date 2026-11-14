@@ -6,7 +6,7 @@ Evaluate placement and scaling of a containerized service in a 5G MEC testbed as
 
 ## Comparisons
 
-Use the same service, requests, routes, replica bounds, eligible nodes and measurement windows for each matched comparison. Choose the latency SLO separately and freeze it before evaluation.
+Use the same service, requests, routes, replica bounds, eligible nodes and measurement windows for each matched comparison. The latency objective is all-attempt p90 at or below the configured threshold (currently 500 ms); freeze it before evaluation. p95 and successful-within-threshold attainment are diagnostic metrics, not a separate 95% objective.
 
 1. Compare a conventional Kubernetes autoscaler with the proposed scaling policy using the same scheduler and placement constraints.
 2. Compare the proposed scaler with and without mobility-aware placement to isolate the placement contribution.
@@ -16,7 +16,7 @@ Specify the autoscaler metric and configuration explicitly. The placement contro
 
 ## Workloads and measurements
 
-Run clients on the NUC through UERANSIM UEs. Use ordered load ramps and changing UE distribution across cells; retain repeated tiers as distinct phases. Record actual UE attachment, routing, node placement, replica readiness, policy actions and phase boundaries. Measure end-to-end request latency, all-attempt SLO attainment, throughput, failures, and allocated replica-seconds; record CPU, memory, network and other resources when available. A closed-loop UE schedule is not an equal offered request-rate trace.
+Run clients on the NUC through UERANSIM UEs. Use ascending and descending load ramps and changing UE distribution across cells; retain repeated tiers as distinct phases. Record actual UE attachment, routing, node placement, replica readiness, policy actions and phase boundaries. Measure end-to-end request latency, all-attempt SLO attainment, throughput, failures, and allocated replica-seconds; record CPU, memory, network and other resources when available. A closed-loop UE schedule is not an equal offered request-rate trace.
 
 Repeat independent matched runs, counterbalance policy order, retain failed attempts and predeclare exclusion rules. Requests from one run are not independent experimental repetitions. Report placement and scaling separately; changes to routing or multiple policies in the same comparison confound attribution.
 

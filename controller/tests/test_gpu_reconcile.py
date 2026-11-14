@@ -53,7 +53,7 @@ class GPUReconciliationTests(unittest.TestCase):
 
     def test_free_fractions_and_weights_reach_ranking_in_dry_run(self):
         with patch.object(self.prom, 'per_node', wraps=self.prom.per_node) as per_node:
-            with patch('controller.reconcile.plan_placement', return_value={'targets': {}, 'migration': None}) as plan:
+            with patch('controller.reconcile.plan_placement', return_value={'targets': {}, 'deschedule': None}) as plan:
                 self.controller.run_once()
         nodes, request, counts, desired, saturation, locality, weights = plan.call_args.args
         self.assertEqual((counts, desired), ({}, 0))
@@ -73,6 +73,14 @@ class GPUReconciliationTests(unittest.TestCase):
 
     def test_gpu_less_nodes_need_no_exporter(self):
         self.settings.gpu_nodes = ()
+        nodes = self.controller._nodes({'cpu': 1, 'memory': 1})
+        self.assertTrue(all(n.gpu_free == n.vram_free == 0 for n in nodes))
+        self.assertEqual(self.prom.vector.call_args_list, [call('cpu'), call('traffic')])
+
+    def test_zero_gpu_weights_do_not_query_gpu_exporters(self):
+        self.settings.resource_weights = {'cpu': .5, 'memory': .5, 'gpu': 0., 'vram': 0.}
+        self.series.pop('gpu')
+        self.series.pop('vram')
         nodes = self.controller._nodes({'cpu': 1, 'memory': 1})
         self.assertTrue(all(n.gpu_free == n.vram_free == 0 for n in nodes))
         self.assertEqual(self.prom.vector.call_args_list, [call('cpu'), call('traffic')])

@@ -8,15 +8,17 @@ On core, after one-time setup:
 bash experiments/run.sh run_2
 ```
 
+Set a shared baseline/proposed replica ceiling with `bash experiments/run.sh cap_3 --max-replicas 3`. The default comes from `config.yaml` (currently 100). The campaign saves the effective cap and the exact HPA manifest used for baseline.
+
 That single command resets the experiment app, runs baseline, resets again, runs proposed, stops its processes, transfers and checksums UE results, summarizes and plots. Each campaign requires a new name. Application resources remain in **services**; the shared collector and Prometheus remain in **placement**. Cleanup is limited to the named experiment app, its dependent groups and its baseline HPA. No manual HPA, sampler, UE, transfer or recovery sequence is required for a normal run.
 
 ## Controller
 
 `config.yaml` selects the workload manifest, Prometheus queries, SLO, eligible nodes, bounds and policy. The default is non-mutating. `python -m controller --config PATH --once` observes once. Continuous mutating operation requires `mutate: true`; `--deploy` additionally creates missing Deployment/Service resources from the manifest. The namespace must already exist; the campaign runner creates it. Existing resources are not overwritten by controller bootstrap.
 
-Scaling targets `ceil(replicas × all-attempt p90 / SLO)`, within the configured 1–100 bounds. New decisions wait for ready replicas and respect cooldown; sustained scale-down uses a stabilization window. Mobility-aware scale-up plans each added replica against projected capacity and applies the per-node counts as a batch without cooldown between internal steps. Node-pinned managed Deployments share the original Service. Rescheduling is one surge-first replacement at a time, with at most one temporary replica above the desired maximum.
+Scaling targets `ceil(replicas × all-attempt p90 / SLO)`, within the configured 1–100 bounds. New decisions wait for ready replicas and respect cooldown; sustained scale-down uses a stabilization window. Mobility-aware scale-up plans each added replica against projected capacity and applies the per-node counts as a batch without cooldown between internal steps. Node-pinned managed Deployments share the original Service. The periodic descheduler chooses the largest positive target-minus-current score improvement and relocates one replica at a time, removing the source before creating the replacement. It never uses surge capacity; availability can temporarily fall by one replica.
 
-The default score combines 60% resource headroom and 40% traffic share. The resource component weights CPU/RAM at 40% each and GPU/VRAM at 10% each. Nodes without GPUs contribute zero GPU/VRAM headroom; missing required telemetry fails closed. CPU/RAM headroom uses allocatable capacity minus requested resources across all workloads. All three gNB nodes and core are scored normally; core has zero site traffic because the UE collector reports gNB sites. Traffic share is a request-attempt proxy, not observed mobility. The campaign sends each UE group to its gNB's NodePort; the Service prefers same-node endpoints and falls back if none are ready. This is not load-based spillover or a guarantee of actual UE locality. The cap is not a performance guarantee.
+The default score combines 60% resource headroom and 40% traffic share. The resource component weights CPU/RAM at 50% each and GPU/VRAM at zero for this CPU application. GPU telemetry is not required when both GPU weights are zero. Nodes without GPUs contribute zero GPU/VRAM headroom; missing required telemetry fails closed. CPU/RAM headroom uses allocatable capacity minus requested resources across all workloads. All three gNB nodes and core are scored normally; core has zero site traffic because the UE collector reports gNB sites. Traffic share is a request-attempt proxy, not observed mobility. The campaign sends each UE group to its gNB's NodePort; the Service prefers same-node endpoints and falls back if none are ready. This is not load-based spillover or a guarantee of actual UE locality. The cap is not a performance guarantee.
 
 ## Telemetry
 
@@ -52,7 +54,7 @@ The tool inserts only new subscribers and rejects existing IMSIs/IPs; it never u
 
 ## Data and measurement
 
-Campaign settings are in `experiments/campaign.yaml`; controller settings in `config.yaml`. The runner uses the same digest-pinned app, eight sorted image inputs, resources, node eligibility and 180-second phase schedule for both methods. UE switching stops and reattaches sessions; it is **not handover**. UE count is closed-loop concurrency, not a fixed offered request rate.
+Campaign settings are in `experiments/campaign.yaml`; controller settings in `config.yaml`. The runner uses the same digest-pinned app, eight sorted image inputs, resources, node eligibility and 300-second phase schedule for both methods. UE switching stops and reattaches sessions; it is **not handover**. UE count is closed-loop concurrency, not a fixed offered request rate.
 
 The selected synthetic images under `apps/face-detection/images` come from [Syn-Vis-v0](https://huggingface.co/datasets/retowyss/Syn-Vis-v0), Reto Wyss (2025), revision `100262732989e77f38cd831d70a376a93735006a`. The dataset card dedicates individual images to CC0 and licenses the compilation/documentation under CC-BY-SA 4.0. These CGI portraits are not representative of all real-world faces. Preserve image hashes and assignments recorded in `run.json`.
 

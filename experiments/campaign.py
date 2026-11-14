@@ -25,6 +25,36 @@ ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 
+
+class RunnerProgress:
+    """Relay complete remote log lines while retaining the current phase."""
+
+    def __init__(self, path, method):
+        self.path, self.method = path, method
+        self.offset = 0
+        self.phase = 'starting UE runner'
+        self.last_status = None
+
+    def poll(self, final=False):
+        with self.path.open() as stream:
+            stream.seek(self.offset)
+            while True:
+                before = stream.tell()
+                line = stream.readline()
+                if not line or (not final and not line.endswith('\n')):
+                    self.offset = before
+                    break
+                self.offset = stream.tell()
+                text = line.rstrip()
+                if text.startswith(('[..]', '[RUN]', '[--]')):
+                    self.phase = text
+                print(f'{self.method}: {text}', flush=True)
+        now = time.monotonic()
+        if not final and (self.last_status is None or now - self.last_status >= 30):
+            print(f'{self.method}: current progress: {self.phase}', flush=True)
+            self.last_status = now
+
+
 def command(args, **kwargs):
     print('+', shlex.join(map(str, args)), flush=True)
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
@@ -189,14 +219,30 @@ def _campaign_manifest(root, use_tc):
 
 
 
-def run_method(settings, campaign, root, method, delay, slo_ms):
-    output = root / method
-    output.mkdir()
+def _method_configs(root, method, slo_ms, max_replicas):
+    """Persist the exact matched replica budget and manifests used by a method."""
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
-    config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed', slo_seconds=slo_ms / 1000)
+    if type(max_replicas) is not int or max_replicas < config['min_replicas']:
+        raise ValueError('max replicas must be an integer at least min_replicas')
+    config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed',
+                  slo_seconds=slo_ms / 1000, max_replicas=max_replicas)
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
+    hpa_path = None
+    if method == 'baseline':
+        hpa = yaml.safe_load((ROOT / 'experiments/hpa-baseline.yaml').read_text())
+        hpa['spec'].update(minReplicas=config['min_replicas'], maxReplicas=max_replicas)
+        hpa_path = root / 'baseline-hpa.yaml'
+        with hpa_path.open('x') as stream:
+            yaml.safe_dump(hpa, stream, sort_keys=False)
+    return config, config_path, hpa_path
+
+
+def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas):
+    output = root / method
+    output.mkdir()
+    config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas)
     processes = []
     remote_started = False
     completed = False
@@ -204,7 +250,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms):
         try:
             if method == 'baseline':
                 kube('apply', '-f', root / 'workload.yaml')
-                kube('apply', '-f', ROOT / 'experiments/hpa-baseline.yaml')
+                kube('apply', '-f', hpa_path)
             else:
                 processes.append(subprocess.Popen([sys.executable, '-u', '-m', 'controller', '--config', str(config_path), '--deploy'], stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
                 deadline = time.monotonic() + 30
@@ -234,9 +280,11 @@ def run_method(settings, campaign, root, method, delay, slo_ms):
             ue = subprocess.Popen(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'run']), stdin=subprocess.PIPE, stdout=runner_log, stderr=subprocess.STDOUT, text=True, start_new_session=True)
             remote_started = True
             ue.stdin.write(json.dumps(payload)); ue.stdin.close()
+            progress = RunnerProgress(output / 'runner-ssh.log', method)
             verified = False
             deadline = time.monotonic() + 90
             while ue.poll() is None:
+                progress.poll()
                 if delay is not None:
                     delay.check()
                 if any(p.poll() is not None for p in processes):
@@ -247,8 +295,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms):
                         print(f'{method}: active UE latency telemetry verified', flush=True)
                     elif time.monotonic() > deadline:
                         raise RuntimeError('no valid active telemetry within 90 seconds')
-                print(f'{method}: UE workload running; log: {output / "runner-ssh.log"}', flush=True)
                 time.sleep(10)
+            progress.poll(final=True)
             if ue.returncode != 0:
                 raise RuntimeError(f'UE workload failed ({ue.returncode}); see runner-ssh.log')
             if not verified:
@@ -283,15 +331,23 @@ def main(argv=None):
     parser.add_argument('--check', action='store_true', help='read-only dependency and connectivity checks')
     parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
     parser.add_argument('--slo-ms', type=float, help='controller p90 target and reporting threshold in milliseconds (default: config.yaml)')
+    parser.add_argument('--max-replicas', type=int,
+                        help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
     args = parser.parse_args(argv)
     if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
         parser.error('--tc-ms must be finite and at least 0.001 ms')
     if args.slo_ms is not None and (not math.isfinite(args.slo_ms) or args.slo_ms <= 0):
         parser.error('--slo-ms must be finite and positive')
+    if args.max_replicas is not None and args.max_replicas < 1:
+        parser.error('--max-replicas must be a positive integer')
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
-    slo_ms = args.slo_ms if args.slo_ms is not None else yaml.safe_load((ROOT / 'config.yaml').read_text())['slo_seconds'] * 1000
+    controller_config = yaml.safe_load((ROOT / 'config.yaml').read_text())
+    slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
+    max_replicas = args.max_replicas if args.max_replicas is not None else controller_config['max_replicas']
+    if max_replicas < controller_config['min_replicas']:
+        parser.error('--max-replicas must be at least min_replicas from config.yaml')
     if not args.check and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
     with open('/tmp/mec-experiment-campaign.lock', 'w') as lock:
@@ -303,7 +359,14 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         command(remote(settings, ['test', '!', '-e', f'results/{args.campaign}']))
         with (root / 'campaign.yaml').open('x') as stream:
-            yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms}, stream)
+            yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
+                                       'max_replicas': max_replicas}, stream)
+        phases = parse_schedule(settings['schedule'])
+        minutes = len(phases) * settings['phase_duration'] / 60
+        print(f'Campaign: {len(phases)} phases per method, {settings["phase_duration"]:g}s each; '
+              f'{minutes:g} minutes traffic per method ({2 * minutes:g} minutes total), '
+              'plus UE switching, setup and transfer. Objective: all-attempt p90 '
+              f'<= {slo_ms:g} ms. Shared replica ceiling: {max_replicas}.', flush=True)
         ns = kube('get', 'namespace', NAMESPACE, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
         if not ns.stdout.strip():
             kube('create', 'namespace', NAMESPACE)
@@ -318,7 +381,7 @@ def main(argv=None):
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset()
-                run_method(settings, args.campaign, root, method, delay, slo_ms)
+                run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas)
             command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:

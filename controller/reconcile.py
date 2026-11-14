@@ -65,6 +65,7 @@ class Reconciler:
         self.api_client, self.prometheus = api_client, prometheus
         self.namespace, self.name = namespace, name
         self.last_action = None
+        self.last_deschedule_check = None
         self.policy = LatencyRatioPolicy(settings.scale_down_seconds)
 
     def _dict(self, obj):
@@ -84,7 +85,7 @@ class Reconciler:
         mobility = self.prometheus.per_node(s.mobility_query, locality_nodes)
         mobility.update({name: 0.0 for name in zero_locality_nodes})
         gpu, vram = {}, {}
-        if s.gpu_nodes:
+        if s.gpu_nodes and any(s.resource_weights[k] > 0 for k in ('gpu', 'vram')):
             for query, values in ((s.gpu_utilization_query, gpu),
                                   (s.vram_utilization_query, vram)):
                 if not isinstance(query, str) or not query.strip():
@@ -170,7 +171,7 @@ class Reconciler:
             {'metadata': {'resourceVersion': deployment['metadata']['resourceVersion']},
              'spec': {'replicas': count}})
 
-    def _migration(self, original, state):
+    def _action_state(self, original, state):
         self.apps.patch_namespaced_deployment(
             self.name, self.namespace,
             {'metadata': {'resourceVersion': original['metadata']['resourceVersion'],
@@ -250,6 +251,7 @@ class Reconciler:
                 if owner.get('controller') and owner.get('uid') in deployment_uids:
                     rs_owners[rs['metadata']['uid']] = deployment_uids[owner['uid']]
         pod_counts = {name: 0 for name in managed}
+        original_nodes = {}
         all_ready = True
         tokens = {body['metadata']['labels'][GROUP_LABEL] for body in expected.values()}
         group_tokens = {d['metadata']['name']: d['metadata']['labels'][GROUP_LABEL]
@@ -272,6 +274,10 @@ class Reconciler:
             for owner in pod['metadata'].get('ownerReferences', []):
                 if owner.get('controller') and owner.get('uid') in rs_owners:
                     pod_counts[rs_owners[owner['uid']]] += 1
+                    if rs_owners[owner['uid']] == self.name:
+                        original_node = pod.get('spec', {}).get('nodeName')
+                        if original_node in s.eligible_nodes:
+                            original_nodes[original_node] = original_nodes.get(original_node, 0) + 1
                     if (pod['metadata'].get('deletionTimestamp') or
                             not any(c.get('type') == 'Ready' and c.get('status') == 'True'
                                     for c in pod.get('status', {}).get('conditions', []))):
@@ -283,6 +289,13 @@ class Reconciler:
         counts = {node: d['spec'].get('replicas', 1) for node, d in groups.items()}
         original_count = spec.get('replicas', 1)
         replicas = original_count + sum(counts.values())
+        # Original replicas may stay where the default scheduler placed them.
+        # Only consider them for a score-improving removal when all are on one
+        # node: Deployment scale-down cannot choose among Pods on mixed nodes.
+        candidate_counts = dict(counts)
+        original_source = next(iter(original_nodes)) if len(original_nodes) == 1 and sum(original_nodes.values()) == original_count else None
+        if original_source is not None:
+            candidate_counts[original_source] = candidate_counts.get(original_source, 0) + original_count
         state_text = (meta.get('annotations') or {}).get(MIGRATION_ANNOTATION)
         try:
             state = json.loads(state_text) if state_text else None
@@ -290,6 +303,7 @@ class Reconciler:
             raise ValueError('invalid durable migration state') from None
         batch_state = isinstance(state, dict) and state.get('kind') == 'batch-scale-up'
         scaling_state = isinstance(state, dict) and state.get('kind') == 'scale'
+        deschedule_state = isinstance(state, dict) and state.get('kind') == 'deschedule'
         if batch_state:
             if (set(state) != {'kind', 'original', 'before', 'targets'} or
                     type(state['original']) is not int or state['original'] != original_count or
@@ -318,20 +332,48 @@ class Reconciler:
             if dst_count not in (state['before'], state['after']):
                 raise ValueError('scaling replica count changed externally')
         elif state is not None:
-            if (not isinstance(state, dict) or set(state) != {'source', 'destination', 'source_before', 'destination_before'} or
+            if (not deschedule_state or set(state) != {'kind', 'source', 'destination', 'source_before', 'destination_before'} or
                     state['source'] not in managed or state['destination'] not in managed or
                     state['source'] == state['destination'] or state['destination'] == self.name or
                     type(state['source_before']) is not int or state['source_before'] < 1 or
                     type(state['destination_before']) is not int or state['destination_before'] < 0):
-                raise ValueError('invalid durable migration state')
+                raise ValueError('invalid durable descheduling state; finish old migrations before upgrading')
             source, dest = managed[state['source']], managed[state['destination']]
             src_count, dst_count = source['spec'].get('replicas', 1), dest['spec'].get('replicas', 1)
             if (src_count, dst_count) not in ((state['source_before'], state['destination_before']),
-                                              (state['source_before'], state['destination_before'] + 1),
+                                              (state['source_before'] - 1, state['destination_before']),
                                               (state['source_before'] - 1, state['destination_before'] + 1)):
-                raise ValueError('migration replica counts changed externally')
-        if replicas < 1 or replicas > maximum + (1 if state and not scaling_state and not batch_state else 0):
+                raise ValueError('descheduling replica counts changed externally')
+        if replicas < (0 if deschedule_state else 1) or replicas > maximum:
             raise ValueError('managed replicas outside permitted bounds')
+        if deschedule_state:
+            # Complete this removal/replacement before making another decision.
+            if not all_ready or any(not self._settled(d) or pod_counts[name] != d['spec'].get('replicas', 1)
+                                    for name, d in managed.items()):
+                return
+            if not s.mutate:
+                LOG.info('deschedule dry run state=%s', state)
+                return
+            if dst_count == state['destination_before']:
+                destination_node = next(n for n, d in groups.items() if d is dest)
+                node = next(n for n in nodes if n.name == destination_node)
+                fits = (node.ready and node.cpu_utilization < s.cpu_saturation and
+                        all(node.capacity.get(k, 0) - node.allocated.get(k, 0) >= v for k, v in request.items()))
+                if not fits:
+                    if src_count == state['source_before']:
+                        self._action_state(original, None)
+                        return
+                    raise ValueError('descheduling replacement destination is temporarily unavailable')
+            if src_count == state['source_before']:
+                LOG.info('deschedule remove source=%s destination=%s', state['source'], state['destination'])
+                self._replicas(source, src_count - 1)
+            elif dst_count == state['destination_before']:
+                LOG.info('deschedule replace destination=%s', state['destination'])
+                self._replicas(dest, dst_count + 1)
+            else:
+                self._action_state(original, None)
+                self.last_deschedule_check = time.monotonic()
+            return
         if batch_state and s.mutate:
             for node in s.eligible_nodes:
                 target = state['targets'][node]
@@ -342,7 +384,7 @@ class Reconciler:
                 else:
                     self._replicas(groups[node], target)
                 return
-            self._migration(original, None)
+            self._action_state(original, None)
             self.policy.action_applied(time.monotonic())
             self.last_action = time.monotonic()
             return
@@ -351,7 +393,7 @@ class Reconciler:
             ready = sum(d.get('status', {}).get('readyReplicas', 0) for d in managed.values())
             desired = self.policy.target(replicas, min(ready, replicas), latency, s.slo_seconds,
                                          s.min_replicas, maximum, time.monotonic())
-            placement = plan_placement(nodes, request, counts, sum(counts.values()),
+            placement = plan_placement(nodes, request, candidate_counts, sum(candidate_counts.values()),
                                        s.cpu_saturation, s.locality_weight, s.resource_weights)
         except Exception:
             self.policy.down_since = None
@@ -372,7 +414,7 @@ class Reconciler:
                     raise ValueError('pending scaling action exceeds replica bounds')
                 if ((state['after'] > state['before'] and desired <= replicas) or
                         (state['after'] < state['before'] and desired >= replicas)):
-                    self._migration(original, None)
+                    self._action_state(original, None)
                     self.last_action = now
                     return
                 if state['after'] > state['before']:
@@ -380,7 +422,7 @@ class Reconciler:
                                           s.cpu_saturation, s.locality_weight, s.resource_weights)
                     destination_node = next(n for n, d in groups.items() if d is dest)
                     if plan['targets'].get(destination_node, 0) <= counts[destination_node]:
-                        self._migration(original, None)
+                        self._action_state(original, None)
                     else:
                         self._replicas(dest, state['after'])
                         self.policy.action_applied(now)
@@ -388,35 +430,11 @@ class Reconciler:
                     self._replicas(dest, state['after'])
                     self.policy.action_applied(now)
             else:
-                self._migration(original, None)
-        elif state:
-            if (src_count, dst_count) == (state['source_before'], state['destination_before']):
-                if sum(pod_counts.values()) >= maximum + 1:
-                    raise ValueError('migration surge limit exceeded')
-                if state['source'] == self.name:
-                    plan = plan_placement(nodes, request, counts, sum(counts.values()) + 1,
-                                          s.cpu_saturation, s.locality_weight, s.resource_weights)
-                    destination_node = next(n for n, d in groups.items() if d is dest)
-                    if plan['targets'].get(destination_node, 0) <= counts[destination_node]:
-                        self._migration(original, None)
-                        self.last_action = now
-                        return
-                else:
-                    source_node = next(n for n, d in groups.items() if d is source)
-                    destination_node = next(n for n, d in groups.items() if d is dest)
-                    if placement['migration'] != (source_node, destination_node):
-                        self._migration(original, None)
-                        self.last_action = now
-                        return
-                self._replicas(dest, dst_count + 1)
-            elif src_count == state['source_before']:
-                self._replicas(source, src_count - 1)
-            else:
-                self._migration(original, None)
+                self._action_state(original, None)
         elif desired > replicas:
             plan = plan_placement(nodes, request, counts, desired - original_count,
                                   s.cpu_saturation, s.locality_weight, s.resource_weights)
-            self._migration(original, {
+            self._action_state(original, {
                 'kind': 'batch-scale-up',
                 'original': original_count,
                 'before': {node: counts.get(node, 0) for node in s.eligible_nodes},
@@ -430,19 +448,8 @@ class Reconciler:
                 target_group, before = groups[node], counts[node]
             else:
                 target_group, before = original, original_count
-            self._migration(original, {'kind': 'scale', 'destination': target_group['metadata']['name'],
+            self._action_state(original, {'kind': 'scale', 'destination': target_group['metadata']['name'],
                                        'before': before, 'after': before - 1})
-        elif original_count:
-            plan = plan_placement(nodes, request, counts, sum(counts.values()) + 1,
-                                  s.cpu_saturation, s.locality_weight, s.resource_weights)
-            node = next((n for n, value in plan['targets'].items() if value > counts.get(n, 0)), None)
-            if node is None:
-                raise ValueError('no feasible destination for original workload')
-            if node not in groups:
-                self.apps.create_namespaced_deployment(self.namespace, expected[node])
-            else:
-                self._migration(original, {'source': self.name, 'destination': groups[node]['metadata']['name'],
-                                           'source_before': original_count, 'destination_before': counts[node]})
         elif desired != replicas:
             plan = plan_placement(nodes, request, counts, desired, s.cpu_saturation,
                                   s.locality_weight, s.resource_weights)
@@ -454,16 +461,22 @@ class Reconciler:
             if node not in groups:
                 self.apps.create_namespaced_deployment(self.namespace, expected[node])
             else:
-                self._migration(original, {'kind': 'scale', 'destination': groups[node]['metadata']['name'],
+                self._action_state(original, {'kind': 'scale', 'destination': groups[node]['metadata']['name'],
                                            'before': counts[node], 'after': counts[node] + direction})
-        elif placement['migration']:
-            src, dst = placement['migration']
+        elif (self.last_deschedule_check is None or
+              now - self.last_deschedule_check >= getattr(s, 'deschedule_interval_seconds', 120)):
+            self.last_deschedule_check = now
+            if not placement['deschedule']:
+                return
+            src, dst = placement['deschedule']
+            LOG.info('deschedule candidate source=%s destination=%s', src, dst)
             if dst not in groups:
                 self.apps.create_namespaced_deployment(self.namespace, expected[dst])
             else:
-                self._migration(original, {'source': groups[src]['metadata']['name'],
+                source = original if src == original_source else groups[src]
+                self._action_state(original, {'kind': 'deschedule', 'source': source['metadata']['name'],
                     'destination': groups[dst]['metadata']['name'],
-                    'source_before': counts[src], 'destination_before': counts[dst]})
+                    'source_before': source['spec'].get('replicas', 1), 'destination_before': counts[dst]})
         else:
             return
         self.last_action = now
