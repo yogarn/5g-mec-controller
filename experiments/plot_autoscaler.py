@@ -3,9 +3,10 @@
 
 Usage: python -m experiments.plot_autoscaler RESULTS_DIR OUTPUT_DIR
 
-RESULTS_DIR/{baseline,proposed} must each contain ramp-summary.csv,
+RESULTS_DIR/{baseline,proposed} must each contain summary.csv, ramp-summary.csv,
 pods-by-ramp.csv, and resource-by-ramp.csv. Placement files must explicitly
-record every phase/node pair, including measured zero counts.
+record every phase/node pair, including measured zero counts. SLO violations
+are the fraction of all attempts that failed or exceeded the threshold.
 """
 import argparse
 import csv
@@ -110,13 +111,41 @@ def load(root):
     return summaries, placements, resources, site_keys, phases, nodes
 
 
+def load_slo(root, phases, slo_ms):
+    """Return all-attempt violation percentages; missing attempts stay missing."""
+    if not math.isfinite(slo_ms) or slo_ms <= 0:
+        raise ValueError('SLO target must be a positive finite number')
+    violations = {}
+    for method in METHODS:
+        path = root / method / 'summary.csv'
+        rows, _ = read_rows(path, ('phase', 'attempts', 'slo_ms', 'slo_met_attempts'))
+        summaries = phase_rows(rows, path)
+        if set(summaries) != set(phases):
+            raise ValueError(f'{path}: phases must match ramp-summary.csv')
+        violations[method] = []
+        for phase in phases:
+            row = summaries[phase]
+            attempts = number(row['attempts'], f'{path}: {phase} attempts', integer=True)
+            met = number(row['slo_met_attempts'], f'{path}: {phase} slo_met_attempts', integer=True)
+            threshold = number(row['slo_ms'], f'{path}: {phase} slo_ms')
+            if not math.isclose(threshold, slo_ms, rel_tol=0, abs_tol=1e-9):
+                raise ValueError(f'{path}: {phase} SLO threshold does not match --slo-ms')
+            if met > attempts:
+                raise ValueError(f'{path}: {phase} SLO-met count exceeds attempts')
+            violations[method].append(100 * (attempts - met) / attempts if attempts else math.nan)
+    return violations
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_dir", type=Path, help="directory containing baseline/ and proposed/ CSV inputs")
-    parser.add_argument("output_dir", type=Path, help="directory for the three PNG/PDF figure pairs")
+    parser.add_argument("output_dir", type=Path, help="directory for PNG/PDF figure pairs")
+    parser.add_argument("--slo-ms", type=float, default=500,
+                        help="controller p90 target and recorded request SLO in milliseconds (default: 500)")
     args = parser.parse_args()
     try:
         summaries, placements, resources, site_keys, phases, nodes = load(args.results_dir)
+        violations = load_slo(args.results_dir, phases, args.slo_ms)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -141,11 +170,30 @@ def main():
                 ax.plot(x, [optional_number(summaries[method][phase][key], key) for phase in phases],
                         linestyle=STYLES[method], color=color, marker="o",
                         label=METHOD_LABELS[method])
+            if key == "p90_ms":
+                ax.axhline(args.slo_ms, color="#d62728", linestyle="--", linewidth=1.5,
+                           label=f"Controller p90 target ({args.slo_ms:g} ms)")
             ax.set(ylabel="Response time (ms)", title=title, ylim=(0, None))
             ax.grid(axis="y", linestyle=":")
             ax.legend(frameon=False, ncols=2)
         axes[-1].set(xticks=x, xticklabels=labels, xlabel=xlabel)
         export(fig, "response-time")
+
+        fig, ax = plt.subplots(figsize=(width, 4.5), layout="constrained")
+        for method, offset, color in (("baseline", -0.2, "#0072B2"), ("proposed", 0.2, "#D55E00")):
+            values = violations[method]
+            ax.bar([v + offset for v in x], values, width=0.4, color=color,
+                   edgecolor="black", linewidth=0.5,
+                   hatch="xx" if method == "baseline" else None, label=METHOD_LABELS[method])
+            for pos, value in zip(x, values):
+                if math.isnan(value):
+                    ax.annotate("N/A", (pos + offset, 0), ha="center", va="bottom", fontsize=8)
+        ax.set(xticks=x, xticklabels=labels, xlabel=xlabel, ylim=(0, 100),
+               ylabel="Attempts violating SLO (%)",
+               title=f"Failed or slower than {args.slo_ms:g} ms; denominator: all attempts")
+        ax.grid(axis="y", linestyle=":")
+        ax.legend(frameon=False, ncols=2)
+        export(fig, "slo-violations")
 
         fig, ax = plt.subplots(figsize=(width, 4.5), layout="constrained")
         palette = plt.get_cmap("tab20").colors
