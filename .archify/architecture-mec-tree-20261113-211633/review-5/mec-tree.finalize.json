@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-11-13T14:45:28.831Z",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+    "sha256": "0d821ecbdb5e71abba9d0bf26d3bca3fa37a11420106cd8771b3a5782ea77850",
+    "bytes": 5837
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+    "sha256": "ed55b651a6f83d8e00cf975f1bfcb5e79cc540093efe346d1efe98465430f9dd",
+    "bytes": 873897
+  },
+  "stages": {
+    "validate": {
+      "status": "fail",
+      "exitCode": 1,
+      "durationMs": null,
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--quality",
+        "showcase",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "deliver",
+        "receiptId": "c0e0f8e8-abfc-4602-81c0-11180cfd63e5",
+        "stage": "render",
+        "type": "architecture",
+        "input": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "output": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "error": "Architecture layout validation failed:\n- [composition/proper-crossing] showcase architecture connections[9] \"gnb2\" -> \"upf2\" crosses connections[18] \"upf3\" -> \"smf\" at [590, 737] (segments 0 and 1) — if the authored route are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+        "diagnostics": [
+          {
+            "code": "composition/proper-crossing",
+            "severity": "error",
+            "message": "[composition/proper-crossing] showcase architecture connections[9] \"gnb2\" -> \"upf2\" crosses connections[18] \"upf3\" -> \"smf\" at [590, 737] (segments 0 and 1) — if the authored route are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 9,
+              "from": "gnb2",
+              "to": "upf2"
+            },
+            "evidence": {
+              "otherRelationship": {
+                "diagramType": "architecture",
+                "collection": "connections",
+                "index": 18,
+                "from": "upf3",
+                "to": "smf"
+              },
+              "point": [
+                590.0000000000001,
+                737
+              ],
+              "segmentIndex": 0,
+              "otherSegmentIndex": 1
+            },
+            "supportedFixes": [
+              "if the authored route are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors"
+            ]
+          }
+        ],
+        "provenance": "failed",
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      },
+      "execution": "embedded-in-deliver"
+    },
+    "deliver": {
+      "status": "not-run",
+      "execution": "blocked-by-validate"
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "diagnostics": [
+    {
+      "code": "composition/proper-crossing",
+      "severity": "error",
+      "message": "[composition/proper-crossing] showcase architecture connections[9] \"gnb2\" -> \"upf2\" crosses connections[18] \"upf3\" -> \"smf\" at [590, 737] (segments 0 and 1) — if the authored route are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 9,
+        "from": "gnb2",
+        "to": "upf2"
+      },
+      "evidence": {
+        "otherRelationship": {
+          "diagramType": "architecture",
+          "collection": "connections",
+          "index": 18,
+          "from": "upf3",
+          "to": "smf"
+        },
+        "point": [
+          590.0000000000001,
+          737
+        ],
+        "segmentIndex": 0,
+        "otherSegmentIndex": 1
+      },
+      "supportedFixes": [
+        "if the authored route are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-5/mec-tree.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-5/mec-tree.finalize-summary.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "validate",
+  "finishedAt": "2026-11-13T14:45:29.315Z",
+  "durationMs": 484,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-13T14:17:09.926Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

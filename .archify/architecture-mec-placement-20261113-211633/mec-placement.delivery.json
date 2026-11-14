@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "a133f601-1a35-49c4-ae13-cc29f8e09511",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-placement-20261113-211633/candidate.json",
+  "output": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-placement-20261113-211633/mec-placement.html",
+  "specification": {
+    "sha256": "787702ab6e3e0991c6e21f4aa3b201468ddd665ef20609f5abbe9fcbc683f24c",
+    "bytes": 3891
+  },
+  "artifact": {
+    "sha256": "11ac98738044b5dd81b2663ad5437abce129373ad82c64d925886f4b5aaaa798",
+    "bytes": 847550
+  }
+}

@@ -1,0 +1,2459 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "standard",
+  "startedAt": "2026-11-13T14:51:31.504Z",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+    "sha256": "ba7a1360f128971d189ad24903024df1f7681ff44140e9d5009f54ab62866fa3",
+    "bytes": 6213
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+    "sha256": "a583ca47690c082565048fdcc2691da2a3a3caa8072d94e43e31d876d2b51e05",
+    "bytes": 868143
+  },
+  "stages": {
+    "validate": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": null,
+      "execution": "embedded-in-deliver",
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--quality",
+        "standard",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "validate",
+        "specification": {
+          "sha256": "ba7a1360f128971d189ad24903024df1f7681ff44140e9d5009f54ab62866fa3",
+          "bytes": 6213
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "standard",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 18,
+          "compositionIssues": [
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "otherRelationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 449.4,
+                "y": 302,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                710,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 449.4,
+                "y": 302,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                1100,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 790.4,
+                "y": 298.5,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                1100,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf1",
+                "to": "smf",
+                "label": "core network",
+                "collectionIndex": 16,
+                "artifactIndex": 17
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "point": [
+                710,
+                330
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "upf2",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 20,
+                "artifactIndex": 21
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "point": [
+                817,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                96,
+                330.2
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 20,
+                "artifactIndex": 21
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                400,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                400,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                330
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "point": [
+                840,
+                400
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "deliver": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 389,
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--quality",
+        "standard",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "receiptId": "8e43211b-3e86-4557-956b-78d3b5053ab5",
+        "ok": true,
+        "command": "deliver",
+        "type": "architecture",
+        "input": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "output": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "specification": {
+          "sha256": "ba7a1360f128971d189ad24903024df1f7681ff44140e9d5009f54ab62866fa3",
+          "bytes": 6213
+        },
+        "artifact": {
+          "sha256": "a583ca47690c082565048fdcc2691da2a3a3caa8072d94e43e31d876d2b51e05",
+          "bytes": 868143
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "standard",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 18,
+          "compositionIssues": [
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "otherRelationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 449.4,
+                "y": 302,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                710,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 449.4,
+                "y": 302,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                1100,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 790.4,
+                "y": 298.5,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                1100,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf1",
+                "to": "smf",
+                "label": "core network",
+                "collectionIndex": 16,
+                "artifactIndex": 17
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "point": [
+                710,
+                330
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "upf2",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 20,
+                "artifactIndex": 21
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "point": [
+                817,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                96,
+                330.2
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 20,
+                "artifactIndex": 21
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                400,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                400,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                330
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "point": [
+                840,
+                400
+              ]
+            }
+          ]
+        },
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      }
+    },
+    "check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 173,
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "check",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--require-provenance"
+      ],
+      "receipt": {
+        "ok": true,
+        "file": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "artifact": {
+          "sha256": "a583ca47690c082565048fdcc2691da2a3a3caa8072d94e43e31d876d2b51e05",
+          "bytes": 868143
+        },
+        "checks": [
+          {
+            "name": "single_svg",
+            "ok": true,
+            "details": [
+              "found 1 <svg> block(s)"
+            ]
+          },
+          {
+            "name": "finite_svg",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "orthogonal_arrows",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "label_route_clearance",
+            "ok": true,
+            "details": [
+              "[composition/label-route-clearance] standard label \"reconcile\" on relationship \"api\" -> \"pod2\" is 0px from relationship \"upf2\" -> \"smf\" segment 2 [710, 310] -> [270, 310] with 53.2px hidden by the mask (minimum 2px) — use renderer-supported label controls (message y for sequence; otherwise labelAt, labelDx, labelDy, or labelSegment), or adjust the other relationship route/via/channel.",
+              "[composition/label-route-clearance] standard label \"reconcile\" on relationship \"api\" -> \"pod2\" is 0px from relationship \"upf3\" -> \"smf\" segment 2 [1100, 310] -> [270, 310] with 53.2px hidden by the mask (minimum 2px) — use renderer-supported label controls (message y for sequence; otherwise labelAt, labelDx, labelDy, or labelSegment), or adjust the other relationship route/via/channel.",
+              "[composition/label-route-clearance] standard label \"reconcile\" on relationship \"api\" -> \"pod3\" is 0px from relationship \"upf3\" -> \"smf\" segment 2 [1100, 310] -> [270, 310] with 53.2px hidden by the mask (minimum 2px) — use renderer-supported label controls (message y for sequence; otherwise labelAt, labelDx, labelDy, or labelSegment), or adjust the other relationship route/via/channel."
+            ]
+          },
+          {
+            "name": "relationship_crossings",
+            "ok": true,
+            "details": [
+              "[composition/proper-crossing] standard relationship \"upf1\" -> \"smf\" crosses relationship \"api\" -> \"pod1\" at [270, 230]",
+              "[composition/proper-crossing] standard relationship \"upf2\" -> \"smf\" crosses relationship \"upf1\" -> \"collector\" at [400, 310]",
+              "[composition/proper-crossing] standard relationship \"upf2\" -> \"smf\" crosses relationship \"upf3\" -> \"collector\" at [710, 330]",
+              "[composition/proper-crossing] standard relationship \"upf2\" -> \"smf\" crosses relationship \"api\" -> \"pod1\" at [270, 230]",
+              "[composition/proper-crossing] standard relationship \"upf2\" -> \"smf\" crosses relationship \"api\" -> \"pod2\" at [476, 310]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"smf\" crosses relationship \"upf1\" -> \"collector\" at [400, 310]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"smf\" crosses relationship \"upf2\" -> \"collector\" at [400, 310]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"smf\" crosses relationship \"api\" -> \"pod1\" at [270, 230]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"smf\" crosses relationship \"api\" -> \"pod2\" at [476, 310]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"smf\" crosses relationship \"api\" -> \"pod3\" at [817, 310]",
+              "[composition/proper-crossing] standard relationship \"upf1\" -> \"collector\" crosses relationship \"api\" -> \"pod1\" at [96, 330.2]",
+              "[composition/proper-crossing] standard relationship \"upf2\" -> \"collector\" crosses relationship \"api\" -> \"pod1\" at [400, 230]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"collector\" crosses relationship \"api\" -> \"pod1\" at [400, 230]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"collector\" crosses relationship \"api\" -> \"pod2\" at [476, 330]",
+              "[composition/proper-crossing] standard relationship \"upf3\" -> \"collector\" crosses relationship \"api\" -> \"pod3\" at [840, 400]"
+            ]
+          },
+          {
+            "name": "relationship_corridors",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "container_border_runs",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "route_rhythm",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "legend_clearance",
+            "ok": true,
+            "details": []
+          }
+        ],
+        "composition": {
+          "schemaVersion": 1,
+          "profile": "standard",
+          "status": "pass",
+          "summary": {
+            "errors": 0,
+            "warnings": 18
+          },
+          "metrics": {
+            "properCrossings": 15,
+            "resolvedCrossovers": 0,
+            "ambiguousCorridors": 0,
+            "arrowheadCollisions": 0,
+            "containerBorderRuns": 0,
+            "labelRouteClearanceIssues": 3,
+            "labelCanvasOverflowIssues": 0,
+            "minLabelRouteClearance": 0,
+            "desktopReadabilityIssues": 0,
+            "viewportHeightIssues": 0,
+            "minProjectedNodeTextPx": 6.526315789473684,
+            "maxBends": 4,
+            "routesOverSuggestedBends": 6,
+            "maxStretch": 1.345,
+            "routesOverSuggestedStretch": 0,
+            "minSegmentPx": 24,
+            "minInteriorSegmentPx": 50,
+            "shortSegmentCount": 0,
+            "shortEndpointSegmentCount": 0,
+            "shortInteriorSegmentCount": 0,
+            "microSegmentCount": 0
+          },
+          "suggestedLimits": {
+            "bendsPerRelationship": 2,
+            "stretch": 1.35,
+            "segmentPx": 16,
+            "microSegmentPx": 8
+          },
+          "routeReview": {
+            "crossings": [],
+            "detours": [
+              {
+                "relationship": {
+                  "from": "upf1",
+                  "to": "smf",
+                  "label": "core network",
+                  "collectionIndex": 16,
+                  "artifactIndex": 17
+                },
+                "bends": 3,
+                "stretch": 1.145
+              },
+              {
+                "relationship": {
+                  "from": "upf2",
+                  "to": "smf",
+                  "label": "",
+                  "collectionIndex": 17,
+                  "artifactIndex": 18
+                },
+                "bends": 3,
+                "stretch": 1.085
+              },
+              {
+                "relationship": {
+                  "from": "upf3",
+                  "to": "smf",
+                  "label": "",
+                  "collectionIndex": 18,
+                  "artifactIndex": 19
+                },
+                "bends": 3,
+                "stretch": 1.06
+              },
+              {
+                "relationship": {
+                  "from": "upf1",
+                  "to": "collector",
+                  "label": "UE telemetry",
+                  "collectionIndex": 19,
+                  "artifactIndex": 20
+                },
+                "bends": 4,
+                "stretch": 1.063
+              },
+              {
+                "relationship": {
+                  "from": "upf2",
+                  "to": "collector",
+                  "label": "",
+                  "collectionIndex": 20,
+                  "artifactIndex": 21
+                },
+                "bends": 4,
+                "stretch": 1.345,
+                "directCorridorBlockers": [
+                  {
+                    "id": "api",
+                    "label": "Kubernetes API",
+                    "box": [
+                      500,
+                      200,
+                      180,
+                      60
+                    ]
+                  },
+                  {
+                    "id": "pod2",
+                    "label": "Service pods",
+                    "box": [
+                      510,
+                      370,
+                      160,
+                      60
+                    ]
+                  },
+                  {
+                    "id": "port2",
+                    "label": "NodePort / kube-proxy",
+                    "box": [
+                      510,
+                      500,
+                      160,
+                      60
+                    ]
+                  }
+                ]
+              },
+              {
+                "relationship": {
+                  "from": "upf3",
+                  "to": "collector",
+                  "label": "",
+                  "collectionIndex": 21,
+                  "artifactIndex": 22
+                },
+                "bends": 4,
+                "stretch": 1.206
+              }
+            ]
+          },
+          "leadingSpace": {
+            "measured": true,
+            "emptyTopPx": 32,
+            "emptyTopRatio": 0.029,
+            "occupiedTop": 32,
+            "viewBoxTop": 0,
+            "canvasHeight": 1098,
+            "typicalNodeHeight": 60,
+            "reviewSuggested": false
+          },
+          "desktopReadability": {
+            "budgetBasis": "legacy-930",
+            "readerContract": "declared-wide-v1",
+            "availableDiagramWidth": 930,
+            "actualBudgetPx": 930,
+            "limit": "legacy",
+            "requestedTargetPx": 7.5,
+            "requestedTargetMet": false,
+            "hardFloorPx": 6,
+            "hardFloorMet": true,
+            "minimumOwner": {
+              "kind": "edge",
+              "id": null,
+              "from": "collector",
+              "to": "smf"
+            },
+            "minimumSourceTextPx": 8,
+            "minimumProjectedTextPx": 6.526315789473684,
+            "semanticTextCount": 65
+          },
+          "issues": [
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "otherRelationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 449.4,
+                "y": 302,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                710,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 449.4,
+                "y": 302,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                1100,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/label-route-clearance",
+              "label": "reconcile",
+              "labelRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "segmentIndex": 2,
+              "labelRect": {
+                "x": 790.4,
+                "y": 298.5,
+                "width": 53.2,
+                "height": 14
+              },
+              "clearance": 0,
+              "intersectionLength": 53.2,
+              "threshold": 2,
+              "from": [
+                1100,
+                310
+              ],
+              "to": [
+                270,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf1",
+                "to": "smf",
+                "label": "core network",
+                "collectionIndex": 16,
+                "artifactIndex": 17
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "point": [
+                710,
+                330
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 17,
+                "artifactIndex": 18
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "upf2",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 20,
+                "artifactIndex": 21
+              },
+              "point": [
+                400,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                270,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "smf",
+                "label": "",
+                "collectionIndex": 18,
+                "artifactIndex": 19
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "point": [
+                817,
+                310
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf1",
+                "to": "collector",
+                "label": "UE telemetry",
+                "collectionIndex": 19,
+                "artifactIndex": 20
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                96,
+                330.2
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf2",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 20,
+                "artifactIndex": 21
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                400,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod1",
+                "label": "reconcile",
+                "collectionIndex": 22,
+                "artifactIndex": 23
+              },
+              "point": [
+                400,
+                230
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod2",
+                "label": "reconcile",
+                "collectionIndex": 23,
+                "artifactIndex": 24
+              },
+              "point": [
+                476,
+                330
+              ]
+            },
+            {
+              "severity": "warning",
+              "code": "composition/proper-crossing",
+              "relationship": {
+                "from": "upf3",
+                "to": "collector",
+                "label": "",
+                "collectionIndex": 21,
+                "artifactIndex": 22
+              },
+              "otherRelationship": {
+                "from": "api",
+                "to": "pod3",
+                "label": "reconcile",
+                "collectionIndex": 24,
+                "artifactIndex": 25
+              },
+              "point": [
+                840,
+                400
+              ]
+            }
+          ]
+        },
+        "provenance": "current",
+        "deliveryReceiptId": "8e43211b-3e86-4557-956b-78d3b5053ab5"
+      }
+    },
+    "browser-check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 2492,
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "browser-check",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--json",
+        "--require-provenance",
+        "--out-dir",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8"
+      ],
+      "execution": "in-process",
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "browser-check",
+        "evidenceKind": "automated-browser",
+        "status": "pass",
+        "visualReview": "not-requested",
+        "provenance": "current",
+        "deliveryReceiptId": "8e43211b-3e86-4557-956b-78d3b5053ab5",
+        "artifact": {
+          "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+          "sha256": "a583ca47690c082565048fdcc2691da2a3a3caa8072d94e43e31d876d2b51e05",
+          "bytes": 868143
+        },
+        "state": {
+          "detail": "read",
+          "motion": "still"
+        },
+        "chrome": {
+          "status": "available",
+          "executable": "/home/yogarn/.omp/puppeteer/chrome/linux-150.0.7871.24/chrome-linux64/chrome"
+        },
+        "diagnostics": [],
+        "containment": {
+          "status": "pass",
+          "policy": "fit-or-reader-declared-readable-vertical-scroll",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 1057,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 52,
+                "diagramChromePx": 78,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1123,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1123,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1173,
+              "diagramWidth": 1123,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 7.8807017543859645,
+              "minimumProjectedNonEdgeTextPx": 8.86578947368421,
+              "minimumProjectedEdgeTextPx": 7.8807017543859645,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "themeStates": {
+          "status": "pass",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1440,
+              "height": 900,
+              "requestedTheme": "dark",
+              "resolvedTheme": "dark",
+              "ok": true
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "requestedTheme": "dark",
+              "resolvedTheme": "dark",
+              "ok": true
+            }
+          ]
+        },
+        "readability": {
+          "status": "pass",
+          "minimumProjectedNodeTextPx": 6,
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 1057,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 52,
+                "diagramChromePx": 78,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1123,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1123,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1173,
+              "diagramWidth": 1123,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 7.8807017543859645,
+              "minimumProjectedNonEdgeTextPx": 8.86578947368421,
+              "minimumProjectedEdgeTextPx": 7.8807017543859645,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "viewerChrome": {
+          "status": "pass",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 1057,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 52,
+                "diagramChromePx": 78,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1123,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1123,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 980,
+              "diagramWidth": 950,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 60,
+                "diagramChromePx": 84,
+                "svgPx": 915,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 6.666666666666667,
+              "minimumProjectedNonEdgeTextPx": 7.5,
+              "minimumProjectedEdgeTextPx": 6.666666666666667,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1173,
+              "diagramWidth": 1123,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 1098
+              },
+              "viewBoxWidth": 1140,
+              "minimumProjectedNodeTextPx": 7.8807017543859645,
+              "minimumProjectedNonEdgeTextPx": 8.86578947368421,
+              "minimumProjectedEdgeTextPx": 7.8807017543859645,
+              "minimumProjectedNodeText": "fetch mappings",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "collector",
+                "to": "smf"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "captures": {
+          "status": "not-requested",
+          "screenshots": [],
+          "contactSheet": null
+        },
+        "sidecars": {
+          "directory": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8",
+          "receipt": "mec-tree.browser-check.json",
+          "files": []
+        }
+      }
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "diagnostics": [],
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8/mec-tree.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8/mec-tree.finalize-summary.json",
+    "browserCheckReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8/mec-tree.browser-check.json"
+  },
+  "visualReview": "not-requested",
+  "finishedAt": "2026-11-13T14:51:34.669Z",
+  "durationMs": 3165,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-13T14:17:09.926Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

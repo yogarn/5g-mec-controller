@@ -80,20 +80,22 @@ def run(args):
         lifecycle = OwnedUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
         try:
             for phase in phases:
-                print(f"[..] {phase['phase']}: switching to {phase['gnb2_ues']} gNB-2, {phase['gnb3_ues']} gNB-3", flush=True)
-                g2, g3 = lifecycle.switch_counts(phase['workload_ue'], phase['gnb2_ues'], phase['gnb3_ues'])
-                if len(g2) != phase['gnb2_ues'] or len(g3) != phase['gnb3_ues']:
+                counts = tuple(phase[f'gnb{site}_ues'] for site in (1, 2, 3))
+                print(f"[..] {phase['phase']}: switching to {counts[0]} gNB-1, {counts[1]} gNB-2, {counts[2]} gNB-3", flush=True)
+                sites = lifecycle.switch_counts(phase['workload_ue'], *counts)
+                if len(sites) != 3 or tuple(map(len, sites)) != counts:
                     raise RuntimeError('registered UE count differs from requested split')
+                site_groups = tuple((f'gnb-{site}', ues) for site, ues in enumerate(sites, 1))
                 selected = [(group, ue['ip'], index)
                             for index, (group, ue) in enumerate(
-                                (group, ue) for group, ues in (('gnb-2', g2), ('gnb-3', g3)) for ue in ues)]
+                                (group, ue) for group, ues in site_groups for ue in ues)]
                 publisher = TelemetryPublisher(telemetry, [source for _, source, _ in selected]) if telemetry else None
                 start = time.time()
                 deadline = time.monotonic() + args.phase_duration
                 emit({'event': 'phase_start', **phase, 'start_time': start,
                       'duration_s': args.phase_duration, 'ues': [
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}
-                          for group, ues in (('gnb-2', g2), ('gnb-3', g3)) for ue in ues]})
+                          for group, ues in site_groups for ue in ues]})
 
                 def worker(group, source, ue_index):
                     image = images[assignments[ue_index]]
@@ -135,7 +137,7 @@ def main(argv=None):
     parser.add_argument('--image', default=str(defaults.IMAGE), help='Image file or directory of JPG, PNG, BMP, WebP, GIF or TIFF files; assigned in sorted order')
     parser.add_argument('--ue-config', default=str(defaults.INVENTORY), help='Private UE inventory YAML')
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
-    parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb2:gnb3 counts, comma separated')
+    parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb1:gnb2:gnb3 counts, comma separated')
     parser.add_argument('--phase-duration', type=float, default=defaults.PHASE_DURATION, help='Request-generation seconds per phase')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
     parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')

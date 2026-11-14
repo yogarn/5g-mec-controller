@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "aa2d56b8-1954-44b7-9833-ac9d35df0d40",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+  "output": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+  "specification": {
+    "sha256": "6f60148765c341ca125736714a8d7e04fb2648238bc1f1967f48b807af5a32b9",
+    "bytes": 5977
+  },
+  "artifact": {
+    "sha256": "5b0a4686b68fc11893104b471717d72c82d2d0b7e74cb1855529cb39d9aa9ecc",
+    "bytes": 866755
+  }
+}

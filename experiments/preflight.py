@@ -48,14 +48,27 @@ def get(kind, name, namespace):
     return json.loads(kubectl('-n', namespace, 'get', kind, name, '-o', 'json'))
 
 
-def check_deployment(deployment):
+def check_deployment(deployment, children=()):
     spec = deployment.get('spec', {})
     desired = spec.get('replicas', 1)
     template = spec.get('template', {})
-    if (not isinstance(desired, int) or isinstance(desired, bool) or desired < 1
+    if (not isinstance(desired, int) or isinstance(desired, bool) or desired < 0
             or not template.get('metadata', {}).get('labels')
             or not template.get('spec', {}).get('containers')):
-        raise PreflightError('Deployment must have at least one desired replica and a labeled pod template with containers')
+        raise PreflightError('Deployment must have nonnegative replicas and a labeled pod template with containers')
+    if desired == 0:
+        uid = deployment.get('metadata', {}).get('uid')
+        if not uid:
+            raise PreflightError('zero-replica template has no UID for managed placement verification')
+        managed = [child for child in children
+                   if (child.get('metadata', {}).get('labels') or {}).get(
+                       'mec-placement-controller.io/owner') == uid]
+        counts = [child.get('spec', {}).get('replicas', 1) for child in managed]
+        if (not counts or any(not isinstance(n, int) or isinstance(n, bool) or n < 0
+                              for n in counts) or sum(counts) == 0):
+            raise PreflightError('zero-replica template has no active managed placement deployments')
+        return {'desired': sum(counts), 'template_replicas': 0,
+                'readiness': 'not checked (cold start permitted)'}
     return {'desired': desired, 'readiness': 'not checked (cold start permitted)'}
 
 
@@ -118,6 +131,8 @@ def render_report(report):
         if name == 'prometheus_query' and result.get('unverified'):
             lines.append('  Telemetry is not established; verify it before running the controller. '
                          'The controller fails closed without valid latency.')
+    for limitation in report['limitations']:
+        lines.append(f'[NOT CHECKED] {limitation}')
     status = ('OK (unverified telemetry warning)' if report['ok'] and
               any(item.get('unverified') for item in report['checks'].values()) else
               'OK' if report['ok'] else 'FAIL')
@@ -127,7 +142,8 @@ def render_report(report):
 
 def main(argv=None):
     args = parse_args(argv)
-    report = {'ok': True, 'checks': {}, 'actions': [], 'warnings': []}
+    report = {'ok': True, 'checks': {}, 'actions': [], 'warnings': [],
+              'limitations': ['UE-to-NodePort paths from gNB1, gNB2 and gNB3 are not verified']}
 
     def check(name, function):
         try:
@@ -149,7 +165,14 @@ def main(argv=None):
         def inspect_deployment():
             nonlocal resource
             resource = get('deployment', deployment, namespace)
-            return check_deployment(resource)
+            children = ()
+            if resource.get('spec', {}).get('replicas', 1) == 0:
+                uid = resource.get('metadata', {}).get('uid')
+                if uid:
+                    result = kubectl('-n', namespace, 'get', 'deployments',
+                                     '-l', f'mec-placement-controller.io/owner={uid}', '-o', 'json')
+                    children = json.loads(result)['items']
+            return check_deployment(resource, children)
 
         check('deployment', inspect_deployment)
         service_name = args.service or deployment

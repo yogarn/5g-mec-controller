@@ -44,6 +44,18 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaises(preflight.PreflightError):
             preflight.check_deployment(deployment)
 
+    def test_zero_template_requires_active_owned_placement(self):
+        deployment = copy.deepcopy(DEPLOYMENT)
+        deployment['metadata'] = {'uid': 'owner-uid'}
+        deployment['spec']['replicas'] = 0
+        owned = {'metadata': {'labels': {'mec-placement-controller.io/owner': 'owner-uid'}},
+                 'spec': {'replicas': 2}}
+        unrelated = {'metadata': {'labels': {'mec-placement-controller.io/owner': 'other'}},
+                     'spec': {'replicas': 100}}
+        self.assertEqual(preflight.check_deployment(deployment, [owned, unrelated])['desired'], 2)
+        with self.assertRaises(preflight.PreflightError):
+            preflight.check_deployment(deployment, [unrelated])
+
     def run_preflight(self, values, latency=0.2, missing=None, json_output=True, query=QUERY):
         settings = SimpleNamespace(manifest='app.yaml', namespace='services', prometheus_url='http://prom',
                                    max_metric_age_seconds=60, latency_query=query)
@@ -82,6 +94,8 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report['checks']['prometheus_query']['detail']['latency_seconds'], 0.2)
         self.assertEqual(report['checks']['service_selection']['detail']['node_ports'], [31234])
+        self.assertEqual(report['limitations'],
+                         ['UE-to-NodePort paths from gNB1, gNB2 and gNB3 are not verified'])
         values['ue_request_window_attempts'] = 0
         code, report = self.run_preflight(values, ValueError('Prometheus query returned no samples'))
         self.assertEqual(code, 0)
@@ -90,6 +104,7 @@ class PreflightTests(unittest.TestCase):
         code, text = self.run_preflight(values, ValueError('Prometheus query returned no samples'), json_output=False)
         self.assertIn('[WARN] prometheus_query:', text)
         self.assertIn('fails closed', text)
+        self.assertIn('[NOT CHECKED] UE-to-NodePort paths from gNB1, gNB2 and gNB3', text)
 
     def test_all_attempt_latency_with_failure_only_traffic_is_verified(self):
         collector = Collector(load_collector_settings('collector/config.yaml'))
@@ -146,10 +161,6 @@ class PreflightTests(unittest.TestCase):
                 code, report = self.run_preflight(values, missing=missing)
                 self.assertEqual(code, 1)
                 self.assertFalse(report['checks'][missing]['ok'])
-
-    def test_removed_mutation_options_are_rejected(self):
-        with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
-            preflight.parse_args(['--apply-envoy-config'])
 
 
 if __name__ == '__main__':

@@ -1,0 +1,42 @@
+{
+ "schema_version":1,"diagram_type":"architecture",
+ "meta":{"title":"5G MEC deployment: nodes, control and telemetry","locale":"en","quality_profile":"showcase","output":".archify/architecture-mec-nodes-20261113-211633/mec-nodes.html","repository":{"url":"https://github.com/yogarn/5g-mec-controller.git","revision":"21a786f9a591e65d91701a7db98fe7164b92880e"}},
+ "components":[
+  {"id":"ue","type":"external","label":"UERANSIM / UE runner","sublabel":"client requests + observations","pos":[40,480],"size":[180,64],"sources":[{"path":"README.md","line":64,"end_line":66},{"path":"README.md","line":110,"end_line":112}]},
+  {"id":"port2","type":"cloud","label":"NodePort entry","sublabel":"kube-proxy","pos":[350,60],"size":[155,60],"sources":[{"path":"README.md","line":11,"end_line":13}]},
+  {"id":"pod2","type":"backend","label":"Workload pod","sublabel":"if scheduled here","pos":[350,200],"size":[155,60],"sources":[{"path":"apps/face-detection/manifest.yaml","line":1,"end_line":29},{"path":"README.md","line":31,"end_line":33}]},
+  {"id":"exp2","type":"backend","label":"Node exporter","sublabel":"node metrics","pos":[350,340],"size":[155,60],"sources":[{"path":"telemetry/01-node-exporter.yaml","line":7,"end_line":31}]},
+  {"id":"port3","type":"cloud","label":"NodePort entry","sublabel":"kube-proxy","pos":[650,60],"size":[155,60],"sources":[{"path":"README.md","line":11,"end_line":13}]},
+  {"id":"pod3","type":"backend","label":"Workload pod","sublabel":"if scheduled here","pos":[650,200],"size":[155,60],"sources":[{"path":"apps/face-detection/manifest.yaml","line":1,"end_line":29},{"path":"README.md","line":31,"end_line":33}]},
+  {"id":"exp3","type":"backend","label":"Node exporter","sublabel":"node metrics","pos":[650,340],"size":[155,60],"sources":[{"path":"telemetry/01-node-exporter.yaml","line":7,"end_line":31}]},
+  {"id":"portcore","type":"cloud","label":"NodePort entry","sublabel":"kube-proxy","pos":[950,60],"size":[155,60],"sources":[{"path":"README.md","line":11,"end_line":13}]},
+  {"id":"podcore","type":"backend","label":"Workload pod","sublabel":"if scheduled here","pos":[950,200],"size":[155,60],"sources":[{"path":"apps/face-detection/manifest.yaml","line":1,"end_line":29},{"path":"README.md","line":31,"end_line":33}]},
+  {"id":"expcore","type":"backend","label":"Node exporter","sublabel":"node metrics","pos":[950,340],"size":[155,60],"sources":[{"path":"telemetry/01-node-exporter.yaml","line":7,"end_line":31}]},
+  {"id":"collector","type":"backend","label":"UE collector","sublabel":"single replica","pos":[950,480],"size":[155,60],"sources":[{"path":"collector/manifest.yaml","line":17,"end_line":40},{"path":"README.md","line":17,"end_line":23}]},
+  {"id":"prom","type":"cloud","label":"Prometheus","sublabel":"p90 + node metrics","pos":[950,620],"size":[155,60],"sources":[{"path":"telemetry/03-prometheus.yaml","line":529,"end_line":534},{"path":"collector/prometheus-scrape.yaml","line":1,"end_line":6}]},
+  {"id":"controller","type":"backend","label":"Placement controller","sublabel":"optional mutation","pos":[650,760],"size":[175,60],"sources":[{"path":"README.md","line":25,"end_line":33}]},
+  {"id":"api","type":"cloud","label":"Kubernetes API","sublabel":"existing Deployment","pos":[350,760],"size":[155,60],"sources":[{"path":"README.md","line":27,"end_line":33}]}
+ ],
+ "boundaries":[
+  {"kind":"region","label":"K3s cluster","wraps":["port2","pod2","exp2","port3","pod3","exp3","portcore","podcore","expcore","collector","prom"],"pad":50},
+  {"kind":"region","label":"RAN-MEC node 2 / gnb-2","wraps":["port2","pod2","exp2"],"pad":25},
+  {"kind":"region","label":"RAN-MEC node 3 / gnb-3","wraps":["port3","pod3","exp3"],"pad":25},
+  {"kind":"region","label":"CN-MEC / core node","wraps":["portcore","podcore","expcore","collector","prom"],"pad":25}
+ ],
+ "connections":[
+  {"from":"ue","to":"port2","label":"HTTP requests","variant":"emphasis"},
+  {"from":"port2","to":"pod2","label":"Service routing"},
+  {"from":"port3","to":"pod3","label":"Service routing"},
+  {"from":"portcore","to":"podcore","label":"Service routing"},
+  {"from":"ue","to":"collector","label":"observations"},
+  {"from":"prom","to":"collector","label":"scrape p90"},
+  {"from":"prom","to":"expcore","label":"scrape"},
+  {"from":"controller","to":"prom","label":"query metrics"},
+  {"from":"controller","to":"api","label":"optional patch"}
+ ],
+ "cards":[
+  {"dot":"emerald","title":"Kubernetes Service routing","items":["NodePort is available on cluster nodes; requests can be forwarded to a ready pod on another node. Local arrows are illustrative, not a locality guarantee.","Workload pods are conditional placements, not three guaranteed replicas."]},
+  {"dot":"amber","title":"Observability","items":["The collector receives UE observations, fetches SMF/AMF mappings, and exposes rolling metrics to Prometheus.","Prometheus can scrape node exporters across the cluster; only the core scrape is drawn for clarity."]},
+  {"dot":"violet","title":"Control and deployment assumptions","items":["Collector and Prometheus select site=core; this frame assumes one core node. Controller execution host and Kubernetes API host are not specified by the repository.","Mobility-aware placement is a soft preference. Mutation is disabled by default."]}
+ ]
+}

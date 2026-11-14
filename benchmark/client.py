@@ -29,13 +29,13 @@ def parse_schedule(value):
     phases = []
     for index, entry in enumerate(value.split(','), 1):
         fields = entry.split(':')
-        if len(fields) != 3 or any(not f.strip().isdecimal() for f in fields):
-            raise ValueError('phase schedule entries must be total:gnb2:gnb3')
-        total, gnb2, gnb3 = map(int, fields)
-        if total < 1 or gnb2 + gnb3 != total:
+        if len(fields) != 4 or any(not f.strip().isdecimal() for f in fields):
+            raise ValueError('phase schedule entries must be total:gnb1:gnb2:gnb3')
+        total, gnb1, gnb2, gnb3 = map(int, fields)
+        if total < 1 or gnb1 + gnb2 + gnb3 != total:
             raise ValueError('phase counts must be nonnegative and sum to a positive total')
         phases.append({'phase': f'phase_{index:02d}', 'workload_ue': total,
-                       'gnb2_ues': gnb2, 'gnb3_ues': gnb3})
+                       'gnb1_ues': gnb1, 'gnb2_ues': gnb2, 'gnb3_ues': gnb3})
     return phases
 
 
@@ -66,13 +66,13 @@ def parse_headers(values):
 
 def validate(args):
     phases = parse_schedule(args.phase_schedule)
-    groups = {'gnb-2': parse_addresses(args.gnb2_addresses),
-              'gnb-3': parse_addresses(args.gnb3_addresses)}
-    all_addresses = groups['gnb-2'] + groups['gnb-3']
+    groups = {f'gnb-{site}': parse_addresses(getattr(args, f'gnb{site}_addresses'))
+              for site in (1, 2, 3)}
+    all_addresses = [address for addresses in groups.values() for address in addresses]
     if len(set(all_addresses)) != len(all_addresses):
         raise ValueError('each UE must have a unique source address')
     for phase in phases:
-        for group, key in (('gnb-2', 'gnb2_ues'), ('gnb-3', 'gnb3_ues')):
+        for group, key in ((f'gnb-{site}', f'gnb{site}_ues') for site in (1, 2, 3)):
             if phase[key] > len(groups[group]):
                 raise ValueError(f"{phase['phase']} requires {phase[key]} {group} addresses, got {len(groups[group])}")
     if not math.isfinite(args.phase_duration) or args.phase_duration <= 0:
@@ -136,7 +136,7 @@ def run(args):
 
         for phase in phases:
             selected = [(group, address) for group, key in
-                        (('gnb-2', 'gnb2_ues'), ('gnb-3', 'gnb3_ues'))
+                        ((f'gnb-{site}', f'gnb{site}_ues') for site in (1, 2, 3))
                         for address in groups[group][:phase[key]]]
             publisher = TelemetryPublisher(telemetry, [source for _, source in selected]) if telemetry else None
             start = time.time()
@@ -176,7 +176,8 @@ def main(argv=None):
     parser.add_argument('--method', default='GET', help='HTTP method (default GET)')
     parser.add_argument('--body', help='UTF-8 request body')
     parser.add_argument('--header', action='append', default=[], help='HTTP header NAME: VALUE; repeatable')
-    parser.add_argument('--phase-schedule', required=True, help='Ordered total:gnb2:gnb3 counts, comma separated')
+    parser.add_argument('--phase-schedule', required=True, help='Ordered total:gnb1:gnb2:gnb3 counts, comma separated')
+    parser.add_argument('--gnb1-addresses', default='', help='Comma-separated existing gNB-1 UE source IPs')
     parser.add_argument('--gnb2-addresses', default='', help='Comma-separated existing gNB-2 UE source IPs')
     parser.add_argument('--gnb3-addresses', default='', help='Comma-separated existing gNB-3 UE source IPs')
     parser.add_argument('--phase-duration', type=float, required=True, help='Request generation seconds per phase; in-flight attempts drain')

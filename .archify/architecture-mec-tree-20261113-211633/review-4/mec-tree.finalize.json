@@ -1,0 +1,395 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-11-13T14:45:06.764Z",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+    "sha256": "56f329b199ba02e237f89c4a9ae22a45cb972765c7f2db905bdba8a620663b2f",
+    "bytes": 5948
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+    "sha256": "ed55b651a6f83d8e00cf975f1bfcb5e79cc540093efe346d1efe98465430f9dd",
+    "bytes": 873897
+  },
+  "stages": {
+    "validate": {
+      "status": "fail",
+      "exitCode": 1,
+      "durationMs": null,
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--quality",
+        "showcase",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "deliver",
+        "receiptId": "b0d48bbe-6d63-4df4-a26c-ca530b229e53",
+        "stage": "render",
+        "type": "architecture",
+        "input": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "output": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "error": "Architecture layout validation failed:\n- [clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"api\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.\n- [clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"pod2\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.\n- [clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"port2\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.\n- [clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"upf2\" (unrelated to this relationship) on segment 0 [280, 660] -> [576, 660] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.\n- [composition/ambiguous-corridor] showcase architecture connections[16] \"upf1\" -> \"smf\" shares a 170px corridor with connections[22] \"api\" -> \"pod1\" at [96, 230] -> [96, 400] (segments 1 and 1; minimum 8px) — if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so distinct connections do not visually merge.",
+        "diagnostics": [
+          {
+            "code": "clean-flow/edge-through-node",
+            "severity": "error",
+            "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"api\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 19,
+              "from": "upf1",
+              "to": "collector"
+            },
+            "evidence": {
+              "obstacleKind": "component",
+              "obstacleId": "api",
+              "segmentIndex": 1,
+              "from": [
+                576,
+                660
+              ],
+              "to": [
+                576,
+                120
+              ],
+              "clearancePx": 2
+            },
+            "supportedFixes": [
+              "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+            ]
+          },
+          {
+            "code": "clean-flow/edge-through-node",
+            "severity": "error",
+            "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"pod2\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 19,
+              "from": "upf1",
+              "to": "collector"
+            },
+            "evidence": {
+              "obstacleKind": "component",
+              "obstacleId": "pod2",
+              "segmentIndex": 1,
+              "from": [
+                576,
+                660
+              ],
+              "to": [
+                576,
+                120
+              ],
+              "clearancePx": 2
+            },
+            "supportedFixes": [
+              "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+            ]
+          },
+          {
+            "code": "clean-flow/edge-through-node",
+            "severity": "error",
+            "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"port2\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 19,
+              "from": "upf1",
+              "to": "collector"
+            },
+            "evidence": {
+              "obstacleKind": "component",
+              "obstacleId": "port2",
+              "segmentIndex": 1,
+              "from": [
+                576,
+                660
+              ],
+              "to": [
+                576,
+                120
+              ],
+              "clearancePx": 2
+            },
+            "supportedFixes": [
+              "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+            ]
+          },
+          {
+            "code": "clean-flow/edge-through-node",
+            "severity": "error",
+            "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"upf2\" (unrelated to this relationship) on segment 0 [280, 660] -> [576, 660] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 19,
+              "from": "upf1",
+              "to": "collector"
+            },
+            "evidence": {
+              "obstacleKind": "component",
+              "obstacleId": "upf2",
+              "segmentIndex": 0,
+              "from": [
+                280,
+                660
+              ],
+              "to": [
+                576,
+                660
+              ],
+              "clearancePx": 2
+            },
+            "supportedFixes": [
+              "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+            ]
+          },
+          {
+            "code": "composition/ambiguous-corridor",
+            "severity": "error",
+            "message": "[composition/ambiguous-corridor] showcase architecture connections[16] \"upf1\" -> \"smf\" shares a 170px corridor with connections[22] \"api\" -> \"pod1\" at [96, 230] -> [96, 400] (segments 1 and 1; minimum 8px) — if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so distinct connections do not visually merge.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 16,
+              "from": "upf1",
+              "to": "smf"
+            },
+            "evidence": {
+              "otherRelationship": {
+                "diagramType": "architecture",
+                "collection": "connections",
+                "index": 22,
+                "from": "api",
+                "to": "pod1"
+              },
+              "overlapLengthPx": 170,
+              "minimumPx": 8,
+              "from": [
+                96,
+                230
+              ],
+              "to": [
+                96,
+                400
+              ],
+              "segmentIndex": 1,
+              "otherSegmentIndex": 1
+            },
+            "supportedFixes": [
+              "if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so distinct connections do not visually merge"
+            ]
+          }
+        ],
+        "provenance": "failed",
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      },
+      "execution": "embedded-in-deliver"
+    },
+    "deliver": {
+      "status": "not-run",
+      "execution": "blocked-by-validate"
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "diagnostics": [
+    {
+      "code": "clean-flow/edge-through-node",
+      "severity": "error",
+      "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"api\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 19,
+        "from": "upf1",
+        "to": "collector"
+      },
+      "evidence": {
+        "obstacleKind": "component",
+        "obstacleId": "api",
+        "segmentIndex": 1,
+        "from": [
+          576,
+          660
+        ],
+        "to": [
+          576,
+          120
+        ],
+        "clearancePx": 2
+      },
+      "supportedFixes": [
+        "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+      ]
+    },
+    {
+      "code": "clean-flow/edge-through-node",
+      "severity": "error",
+      "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"pod2\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 19,
+        "from": "upf1",
+        "to": "collector"
+      },
+      "evidence": {
+        "obstacleKind": "component",
+        "obstacleId": "pod2",
+        "segmentIndex": 1,
+        "from": [
+          576,
+          660
+        ],
+        "to": [
+          576,
+          120
+        ],
+        "clearancePx": 2
+      },
+      "supportedFixes": [
+        "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+      ]
+    },
+    {
+      "code": "clean-flow/edge-through-node",
+      "severity": "error",
+      "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"port2\" (unrelated to this relationship) on segment 1 [576, 660] -> [576, 120] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 19,
+        "from": "upf1",
+        "to": "collector"
+      },
+      "evidence": {
+        "obstacleKind": "component",
+        "obstacleId": "port2",
+        "segmentIndex": 1,
+        "from": [
+          576,
+          660
+        ],
+        "to": [
+          576,
+          120
+        ],
+        "clearancePx": 2
+      },
+      "supportedFixes": [
+        "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+      ]
+    },
+    {
+      "code": "clean-flow/edge-through-node",
+      "severity": "error",
+      "message": "[clean-flow/edge-through-node] architecture connections[19] \"upf1\" -> \"collector\" crosses component \"upf2\" (unrelated to this relationship) on segment 0 [280, 660] -> [576, 660] (2px clearance) — if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 19,
+        "from": "upf1",
+        "to": "collector"
+      },
+      "evidence": {
+        "obstacleKind": "component",
+        "obstacleId": "upf2",
+        "segmentIndex": 0,
+        "from": [
+          280,
+          660
+        ],
+        "to": [
+          576,
+          660
+        ],
+        "clearancePx": 2
+      },
+      "supportedFixes": [
+        "if the authored fromSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust fromSide/toSide, set route/via, or move the component"
+      ]
+    },
+    {
+      "code": "composition/ambiguous-corridor",
+      "severity": "error",
+      "message": "[composition/ambiguous-corridor] showcase architecture connections[16] \"upf1\" -> \"smf\" shares a 170px corridor with connections[22] \"api\" -> \"pod1\" at [96, 230] -> [96, 400] (segments 1 and 1; minimum 8px) — if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so distinct connections do not visually merge.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 16,
+        "from": "upf1",
+        "to": "smf"
+      },
+      "evidence": {
+        "otherRelationship": {
+          "diagramType": "architecture",
+          "collection": "connections",
+          "index": 22,
+          "from": "api",
+          "to": "pod1"
+        },
+        "overlapLengthPx": 170,
+        "minimumPx": 8,
+        "from": [
+          96,
+          230
+        ],
+        "to": [
+          96,
+          400
+        ],
+        "segmentIndex": 1,
+        "otherSegmentIndex": 1
+      },
+      "supportedFixes": [
+        "if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so distinct connections do not visually merge"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-4/mec-tree.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-4/mec-tree.finalize-summary.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "validate",
+  "finishedAt": "2026-11-13T14:45:07.152Z",
+  "durationMs": 387,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-13T14:17:09.926Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

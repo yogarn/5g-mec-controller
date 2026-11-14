@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ue-telemetry-config
-  namespace: services
+  namespace: placement
 data:
   config.yaml: |
     window_seconds: 15
@@ -12,13 +12,13 @@ data:
     slo_seconds: 0.5
     smf_url: http://10.34.211.140:9090/pdu-info
     amf_url: http://10.34.211.140:9005/ue-info
-    gnb_nodes: {2: gnb-2, 3: gnb-3}
+    gnb_nodes: {0: gnb1, 2: gnb-2, 3: gnb-3}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ue-telemetry
-  namespace: services
+  namespace: placement
 spec:
   replicas: 1
   strategy:
@@ -33,7 +33,7 @@ spec:
         site: core
       containers:
         - name: collector
-          image: 10.34.211.140:30500/ue-telemetry-collector:latest
+          image: 10.34.211.140:30500/ue-telemetry-collector@sha256:c830ba8f921aca4cd4165577d5f1c29d168ead6e754cd906aa375d31643de099
           imagePullPolicy: Always
           ports:
             - name: http
@@ -68,13 +68,14 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ue-telemetry
-  namespace: services
+  namespace: placement
 spec:
-  # Kubernetes allocates nodePort; inspect the Service after creation.
+  # Keep the testbed's existing UE telemetry endpoint.
   type: NodePort
   selector: {app: ue-telemetry}
   ports:
     - name: http
       port: 8080
+      nodePort: 31669
       targetPort: http
       protocol: TCP

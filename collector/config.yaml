@@ -6,5 +6,6 @@ slo_seconds: 0.5
 smf_url: http://10.34.211.140:9090/pdu-info
 amf_url: http://10.34.211.140:9005/ue-info
 gnb_nodes:
+  0: gnb1
   2: gnb-2
   3: gnb-3

@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "standard",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+    "sha256": "ba7a1360f128971d189ad24903024df1f7681ff44140e9d5009f54ab62866fa3",
+    "bytes": 6213
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+    "sha256": "a583ca47690c082565048fdcc2691da2a3a3caa8072d94e43e31d876d2b51e05",
+    "bytes": 868143
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8/mec-tree.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8/mec-tree.finalize-summary.json",
+    "browserCheckReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-8/mec-tree.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-13T14:17:09.926Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 3165,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 6
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "from": "upf1",
+            "to": "smf",
+            "label": "core network",
+            "collectionIndex": 16,
+            "artifactIndex": 17
+          },
+          "bends": 3,
+          "stretch": 1.145
+        },
+        {
+          "relationship": {
+            "from": "upf2",
+            "to": "smf",
+            "label": "",
+            "collectionIndex": 17,
+            "artifactIndex": 18
+          },
+          "bends": 3,
+          "stretch": 1.085
+        },
+        {
+          "relationship": {
+            "from": "upf3",
+            "to": "smf",
+            "label": "",
+            "collectionIndex": 18,
+            "artifactIndex": 19
+          },
+          "bends": 3,
+          "stretch": 1.06
+        },
+        {
+          "relationship": {
+            "from": "upf1",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "bends": 4,
+          "stretch": 1.063
+        },
+        {
+          "relationship": {
+            "from": "upf2",
+            "to": "collector",
+            "label": "",
+            "collectionIndex": 20,
+            "artifactIndex": 21
+          },
+          "bends": 4,
+          "stretch": 1.345,
+          "directCorridorBlockers": [
+            {
+              "id": "api",
+              "label": "Kubernetes API",
+              "box": [
+                500,
+                200,
+                180,
+                60
+              ]
+            },
+            {
+              "id": "pod2",
+              "label": "Service pods",
+              "box": [
+                510,
+                370,
+                160,
+                60
+              ]
+            },
+            {
+              "id": "port2",
+              "label": "NodePort / kube-proxy",
+              "box": [
+                510,
+                500,
+                160,
+                60
+              ]
+            }
+          ]
+        },
+        {
+          "relationship": {
+            "from": "upf3",
+            "to": "collector",
+            "label": "",
+            "collectionIndex": 21,
+            "artifactIndex": 22
+          },
+          "bends": 4,
+          "stretch": 1.206
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "upf1 → smf needs 3 bends: move node upf1 or smf so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "upf2 → smf needs 3 bends: move node upf2 or smf so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "upf3 → smf needs 3 bends: move node upf3 or smf so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "upf1 → collector needs 4 bends: move node upf1 or collector so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "upf3 → collector needs 4 bends: move node upf3 or collector so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

@@ -1,0 +1,283 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+    "sha256": "1a765b5cf2389d86c5da3a5222e363eeac715261f4c38f365344bb482a77fd41",
+    "bytes": 5856
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+    "sha256": "a6377c1e750b9f2224ae8a80b40ec32106c7a92fa7ab743857ac9272440ffdb7",
+    "bytes": 872384
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-6/mec-tree.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-6/mec-tree.finalize-summary.json",
+    "browserCheckReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-6/mec-tree.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-13T14:17:09.926Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2966,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "resolvedCrossovers": 8,
+      "routesOverSuggestedBends": 4
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [
+        {
+          "left": {
+            "from": "controller",
+            "to": "prom",
+            "label": "query metrics",
+            "collectionIndex": 2,
+            "artifactIndex": 3
+          },
+          "right": {
+            "from": "upf3",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 21,
+            "artifactIndex": 22
+          },
+          "point": [
+            910,
+            144
+          ]
+        },
+        {
+          "left": {
+            "from": "upf1",
+            "to": "smf",
+            "label": "core network",
+            "collectionIndex": 16,
+            "artifactIndex": 17
+          },
+          "right": {
+            "from": "upf1",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "point": [
+            343.99999999999994,
+            605.9999999999998
+          ],
+          "sharedNode": "upf1"
+        },
+        {
+          "left": {
+            "from": "upf1",
+            "to": "smf",
+            "label": "core network",
+            "collectionIndex": 16,
+            "artifactIndex": 17
+          },
+          "right": {
+            "from": "api",
+            "to": "pod1",
+            "label": "reconcile",
+            "collectionIndex": 22,
+            "artifactIndex": 23
+          },
+          "point": [
+            344,
+            230
+          ]
+        },
+        {
+          "left": {
+            "from": "upf2",
+            "to": "smf",
+            "label": "core network",
+            "collectionIndex": 17,
+            "artifactIndex": 18
+          },
+          "right": {
+            "from": "upf1",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "point": [
+            435,
+            605.9999999999999
+          ]
+        },
+        {
+          "left": {
+            "from": "upf2",
+            "to": "smf",
+            "label": "core network",
+            "collectionIndex": 17,
+            "artifactIndex": 18
+          },
+          "right": {
+            "from": "api",
+            "to": "pod1",
+            "label": "reconcile",
+            "collectionIndex": 22,
+            "artifactIndex": 23
+          },
+          "point": [
+            435,
+            230
+          ]
+        },
+        {
+          "left": {
+            "from": "upf1",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "right": {
+            "from": "upf2",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 20,
+            "artifactIndex": 21
+          },
+          "point": [
+            476.00000000000006,
+            172.00000000000006
+          ],
+          "sharedNode": "collector"
+        },
+        {
+          "left": {
+            "from": "upf1",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "right": {
+            "from": "api",
+            "to": "pod1",
+            "label": "reconcile",
+            "collectionIndex": 22,
+            "artifactIndex": 23
+          },
+          "point": [
+            458.5999999999998,
+            230
+          ]
+        },
+        {
+          "left": {
+            "from": "upf2",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 20,
+            "artifactIndex": 21
+          },
+          "right": {
+            "from": "api",
+            "to": "pod1",
+            "label": "reconcile",
+            "collectionIndex": 22,
+            "artifactIndex": 23
+          },
+          "point": [
+            476,
+            230
+          ]
+        }
+      ],
+      "detours": [
+        {
+          "relationship": {
+            "from": "upf3",
+            "to": "smf",
+            "label": "core network",
+            "collectionIndex": 18,
+            "artifactIndex": 19
+          },
+          "bends": 3,
+          "stretch": 1.069
+        },
+        {
+          "relationship": {
+            "from": "upf1",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "bends": 4,
+          "stretch": 1
+        },
+        {
+          "relationship": {
+            "from": "upf3",
+            "to": "collector",
+            "label": "UE telemetry",
+            "collectionIndex": 21,
+            "artifactIndex": 22
+          },
+          "bends": 4,
+          "stretch": 1.187
+        },
+        {
+          "relationship": {
+            "from": "api",
+            "to": "pod2",
+            "label": "reconcile",
+            "collectionIndex": 23,
+            "artifactIndex": 24
+          },
+          "bends": 3,
+          "stretch": 1.218
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "controller → prom crosses upf3 → collector: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "upf1 → smf and upf1 → collector cross next to upf1: move node smf or collector so the two reach upf1 from different sides (for example one level with it, one directly above or below it).",
+      "upf1 → smf crosses api → pod1: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "upf2 → smf crosses upf1 → collector: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "upf2 → smf crosses api → pod1: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "upf1 → collector and upf2 → collector cross next to collector: move node upf1 or upf2 so the two reach collector from different sides (for example one level with it, one directly above or below it).",
+      "upf1 → collector crosses api → pod1: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "upf2 → collector crosses api → pod1: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

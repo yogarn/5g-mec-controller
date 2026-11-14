@@ -1,0 +1,60 @@
+{
+ "schema_version":1,"diagram_type":"architecture",
+ "meta":{"title":"5G MEC deployment topology","locale":"en","quality_profile":"standard","output":".archify/architecture-mec-tree-20261113-211633/mec-tree.html","legend":{"entries":{"backend":{"label":"Contributions"},"frontend":{"label":"Open source"},"cloud":{"label":"Existing"}}}},
+ "components":[
+  {"id":"smf","type":"cloud","label":"5G core network","sublabel":"SMF / AMF","pos":[180,60],"size":[180,60]},
+  {"id":"collector","type":"backend","label":"UE telemetry collector","sublabel":"single replica","pos":[500,60],"size":[180,60]},
+  {"id":"prom","type":"frontend","label":"Prometheus","sublabel":"telemetry metrics","pos":[820,60],"size":[180,60]},
+  {"id":"controller","type":"backend","label":"Placement controller","sublabel":"scale / soft preference","pos":[820,200],"size":[180,60]},
+  {"id":"api","type":"frontend","label":"Kubernetes API","sublabel":"existing Deployment","pos":[500,200],"size":[180,60]},
+  {"id":"pod1","type":"backend","label":"Service pods","sublabel":"if scheduled here","pos":[120,370],"size":[160,60]},
+  {"id":"port1","type":"frontend","label":"NodePort / kube-proxy","sublabel":"service routing","pos":[120,500],"size":[160,60]},
+  {"id":"upf1","type":"cloud","label":"UPF","sublabel":"user-plane path","pos":[120,630],"size":[160,60]},
+  {"id":"gnb1","type":"cloud","label":"gNB","sublabel":"access network","pos":[120,760],"size":[160,60]},
+  {"id":"pod2","type":"backend","label":"Service pods","sublabel":"if scheduled here","pos":[510,370],"size":[160,60]},
+  {"id":"port2","type":"frontend","label":"NodePort / kube-proxy","sublabel":"service routing","pos":[510,500],"size":[160,60]},
+  {"id":"upf2","type":"cloud","label":"UPF","sublabel":"user-plane path","pos":[510,630],"size":[160,60]},
+  {"id":"gnb2","type":"cloud","label":"gNB","sublabel":"access network","pos":[510,760],"size":[160,60]},
+  {"id":"pod3","type":"backend","label":"Service pods","sublabel":"if scheduled here","pos":[900,370],"size":[160,60]},
+  {"id":"port3","type":"frontend","label":"NodePort / kube-proxy","sublabel":"service routing","pos":[900,500],"size":[160,60]},
+  {"id":"upf3","type":"cloud","label":"UPF","sublabel":"user-plane path","pos":[900,630],"size":[160,60]},
+  {"id":"gnb3","type":"cloud","label":"gNB","sublabel":"access network","pos":[900,760],"size":[160,60]},
+  {"id":"ue1","type":"cloud","label":"UE / UERANSIM","sublabel":"site 1 client","pos":[120,970],"size":[160,60]},
+  {"id":"ue2","type":"cloud","label":"UE / UERANSIM","sublabel":"site 2 client","pos":[510,970],"size":[160,60]},
+  {"id":"ue3","type":"cloud","label":"UE / UERANSIM","sublabel":"site 3 client","pos":[900,970],"size":[160,60]}
+ ],
+ "boundaries":[
+  {"kind":"region","label":"Core / control and observability","wraps":["smf","collector","prom","controller","api"],"pad":28},
+  {"kind":"region","label":"AN / MEC site 1","wraps":["pod1","port1","upf1","gnb1"],"pad":25},
+  {"kind":"region","label":"AN / MEC site 2","wraps":["pod2","port2","upf2","gnb2"],"pad":25},
+  {"kind":"region","label":"AN / MEC site 3","wraps":["pod3","port3","upf3","gnb3"],"pad":25}
+ ],
+ "connections":[
+  {"from":"collector","to":"smf","label":"HTTP: SMF / AMF info"},
+  {"from":"prom","to":"collector","label":"HTTP /metrics"},
+  {"from":"controller","to":"prom","label":"HTTP PromQL query"},
+  {"from":"controller","to":"api","label":"optional Deployment patch"},
+  {"from":"ue1","to":"gnb1","label":"Uu radio","variant":"dashed","route":"straight"},
+  {"from":"gnb1","to":"upf1","label":"N3 / GTP-U","variant":"emphasis","route":"straight"},
+  {"from":"upf1","to":"port1","label":"IP / HTTP","variant":"emphasis","route":"straight"},
+  {"from":"port1","to":"pod1","label":"Service routing","variant":"emphasis","route":"straight"},
+  {"from":"ue2","to":"gnb2","label":"Uu radio","variant":"dashed","route":"straight"},
+  {"from":"gnb2","to":"upf2","label":"N3 / GTP-U","variant":"emphasis","route":"straight"},
+  {"from":"upf2","to":"port2","label":"IP / HTTP","variant":"emphasis","route":"straight"},
+  {"from":"port2","to":"pod2","label":"Service routing","variant":"emphasis","route":"straight"},
+  {"from":"ue3","to":"gnb3","label":"Uu radio","variant":"dashed","route":"straight"},
+  {"from":"gnb3","to":"upf3","label":"N3 / GTP-U","variant":"emphasis","route":"straight"},
+  {"from":"upf3","to":"port3","label":"IP / HTTP","variant":"emphasis","route":"straight"},
+  {"from":"port3","to":"pod3","label":"Service routing","variant":"emphasis","route":"straight"},
+  {"from":"upf1","to":"smf","label":"core path","fromSide":"left","toSide":"bottom","via":[[70,660],[70,150],[270,150]],"labelAt":[230,140]},
+  {"from":"upf1","to":"collector","label":"UE observations / HTTP","fromSide":"left","toSide":"bottom","via":[[70,660],[70,150],[590,150]],"labelAt":[490,140]},
+  {"from":"api","to":"pod1","label":"desired state","fromSide":"bottom","toSide":"top"},
+  {"from":"api","to":"pod2","label":"desired state","fromSide":"bottom","toSide":"top","labelAt":[590,274]},
+  {"from":"api","to":"pod3","label":"desired state","fromSide":"bottom","toSide":"top"}
+ ],
+ "cards":[
+  {"dot":"amber","title":"Telemetry path","items":["The shared UPF route is representative of all three sites: UE observations reach the collector through the user plane; the collector queries SMF and AMF for mapping.","Prometheus scrapes the collector."]},
+  {"dot":"emerald","title":"Routing and placement","items":["NodePort may forward requests to a ready pod on another node; local arrows are illustrative. Workload pods are shown only as possible placements."]},
+  {"dot":"violet","title":"Topology assumptions","items":["Three AN sites and their local UPF-to-NodePort paths are illustrative: repository setup documents two gNBs, not three confirmed sites.","Site boxes group the requested logical path, not verified machine co-location. Core control components are grouped logically; controller and API hosts are not established."]}
+ ]
+}

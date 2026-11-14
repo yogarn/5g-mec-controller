@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "standard",
+  "startedAt": "2026-11-13T14:59:09.435Z",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+    "sha256": "1185eb3294cc3f7471318a1ff98b5fca70d933b6c06c7333698c2f534b7bd147",
+    "bytes": 6028
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+    "sha256": "155adbafd225ae6e23efa207be32c9d0c7ce90dd6420de8b80f2271a1b6a8a98",
+    "bytes": 866313
+  },
+  "stages": {
+    "validate": {
+      "status": "fail",
+      "exitCode": 1,
+      "durationMs": null,
+      "command": [
+        "/home/yogarn/.nvm/versions/node/v24.21.0/bin/node",
+        "/home/yogarn/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "--quality",
+        "standard",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "deliver",
+        "receiptId": "f53239e7-7f1f-4a65-a62d-f2106b88a918",
+        "stage": "render",
+        "type": "architecture",
+        "input": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/candidate.json",
+        "output": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/mec-tree.html",
+        "error": "Architecture layout validation failed:\n- Label \"representative core path\" overlaps component \"pod1\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [7, 385, 125, 14]\n  component \"pod1\" rect: [120, 370, 160, 60]\n  Suggested fix: set labelAt [70, 444] or set labelDy 49 (below); or set labelAt [70, 362] or set labelDy -33 (above)\n- Label \"UE observations / HTTP\" overlaps component \"pod1\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [12, 385, 116, 14]\n  component \"pod1\" rect: [120, 370, 160, 60]\n  Suggested fix: set labelAt [70, 444] or set labelDy 49 (below); or set labelAt [70, 362] or set labelDy -33 (above)",
+        "diagnostics": [
+          {
+            "code": "layout/constraint",
+            "severity": "error",
+            "message": "Label \"representative core path\" overlaps component \"pod1\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [7, 385, 125, 14]\n  component \"pod1\" rect: [120, 370, 160, 60]\n  Suggested fix: set labelAt [70, 444] or set labelDy 49 (below); or set labelAt [70, 362] or set labelDy -33 (above)",
+            "subject": {
+              "diagramType": "architecture"
+            },
+            "evidence": {},
+            "supportedFixes": []
+          },
+          {
+            "code": "layout/constraint",
+            "severity": "error",
+            "message": "Label \"UE observations / HTTP\" overlaps component \"pod1\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [12, 385, 116, 14]\n  component \"pod1\" rect: [120, 370, 160, 60]\n  Suggested fix: set labelAt [70, 444] or set labelDy 49 (below); or set labelAt [70, 362] or set labelDy -33 (above)",
+            "subject": {
+              "diagramType": "architecture"
+            },
+            "evidence": {},
+            "supportedFixes": []
+          }
+        ],
+        "provenance": "failed",
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      },
+      "execution": "embedded-in-deliver"
+    },
+    "deliver": {
+      "status": "not-run",
+      "execution": "blocked-by-validate"
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "diagnostics": [
+    {
+      "code": "layout/constraint",
+      "severity": "error",
+      "message": "Label \"representative core path\" overlaps component \"pod1\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [7, 385, 125, 14]\n  component \"pod1\" rect: [120, 370, 160, 60]\n  Suggested fix: set labelAt [70, 444] or set labelDy 49 (below); or set labelAt [70, 362] or set labelDy -33 (above)",
+      "subject": {
+        "diagramType": "architecture"
+      },
+      "evidence": {},
+      "supportedFixes": []
+    },
+    {
+      "code": "layout/constraint",
+      "severity": "error",
+      "message": "Label \"UE observations / HTTP\" overlaps component \"pod1\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [12, 385, 116, 14]\n  component \"pod1\" rect: [120, 370, 160, 60]\n  Suggested fix: set labelAt [70, 444] or set labelDy 49 (below); or set labelAt [70, 362] or set labelDy -33 (above)",
+      "subject": {
+        "diagramType": "architecture"
+      },
+      "evidence": {},
+      "supportedFixes": []
+    }
+  ],
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-11/mec-tree.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-tree-20261113-211633/review-11/mec-tree.finalize-summary.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "validate",
+  "finishedAt": "2026-11-13T14:59:09.702Z",
+  "durationMs": 267,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-13T14:17:09.926Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

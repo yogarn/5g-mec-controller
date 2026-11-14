@@ -29,6 +29,18 @@ latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 # Mutation is disabled until the SLO and metric coverage are validated.
 slo_seconds: 0.5
 min_replicas: 1
-max_replicas: 3
-mode: scaling-only
+max_replicas: 100
+interval_seconds: 10
+mode: mobility-aware
 mutate: false
+eligible_nodes: [gnb1, gnb-2, gnb-3]
+cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}[2m]))'
+# Request attempts are a traffic-share proxy, not observed UE mobility or handovers.
+mobility_query: 'ue_request_node_window_attempts{job="ue-telemetry",node=~"gnb1|gnb-2|gnb-3"} / 15'
+locality_weight: 0.4
+# Within the resource score; effective total weights are 24%, 24%, 6%, 6%.
+resource_weights: {cpu: 0.4, memory: 0.4, gpu: 0.1, vram: 0.1}
+# Only these nodes have NVIDIA GPUs; gnb1 is explicitly GPU-less.
+gpu_nodes: [gnb-2, gnb-3]
+gpu_utilization_query: 'avg by (node) (DCGM_FI_DEV_GPU_UTIL{node=~"gnb-2|gnb-3"} / 100)'
+vram_utilization_query: 'sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) / (sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) + sum by (node) (DCGM_FI_DEV_FB_FREE{node=~"gnb-2|gnb-3"}))'

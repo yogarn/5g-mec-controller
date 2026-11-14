@@ -39,11 +39,12 @@ def _auth_and_session(path):
 def build_documents(inventory):
     subscribers = _load_config(inventory)
     documents = []
-    for pair in subscribers:
-        a, b = (_auth_and_session(item['config']) for item in pair)
-        if a[:4] != b[:4] or a[5] != b[5] or a[4] == b[4]:
-            raise ValueError('paired UE configs must share IMSI, authentication and SST, with distinct DNNs')
-        imsi, key, opc, amf, _, sst = a
+    for sites in subscribers:
+        sessions = [_auth_and_session(item['config']) for item in sites]
+        if (any(item[:4] != sessions[0][:4] or item[5] != sessions[0][5] for item in sessions[1:])
+                or len({item[4] for item in sessions}) != len(sessions)):
+            raise ValueError('site UE configs must share IMSI, authentication and SST, with distinct DNNs')
+        imsi, key, opc, amf, _, sst = sessions[0]
         def session(dnn, ip):
             return {'name': dnn, 'type': 1,
                     'qos': {'index': 9, 'arp': {'priority_level': 8,
@@ -55,7 +56,7 @@ def build_documents(inventory):
                           'security': {'k': key, 'amf': amf, 'op': '', 'opc': opc, 'sqn': 0},
                           'ambr': {'downlink': {'value': 1, 'unit': 3}, 'uplink': {'value': 1, 'unit': 3}},
                           'slice': [{'sst': sst, 'default_indicator': True,
-                                     'session': [session(a[4], pair[0]['ip']), session(b[4], pair[1]['ip'])]}],
+                                     'session': [session(item[4], site['ip']) for item, site in zip(sessions, sites)]}],
                           '__v': 0})
     return documents
 

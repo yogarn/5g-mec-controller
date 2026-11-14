@@ -1,9 +1,9 @@
 """Exclusive, journalled UERANSIM lifecycle. Run as root on the UE host.
 
-The lifecycle YAML contains a ``subscribers`` list. Each entry has ``gnb2``
-and ``gnb3`` mappings, each with ``config`` (an existing UERANSIM YAML path,
-relative to the lifecycle YAML) and ``ip`` (the expected IPv4 address). The
-paired UERANSIM configs must have the same unique ``supi``. No credentials are
+The lifecycle YAML contains a ``subscribers`` list. Each entry has ``gnb1``,
+``gnb2`` and ``gnb3`` mappings, each with ``config`` (an existing UERANSIM YAML
+path, relative to the lifecycle YAML) and ``ip`` (the expected IPv4 address).
+The three UERANSIM configs must have the same unique ``supi``. No credentials are
 stored in this journal. Recover an interrupted run with ``--recover STATE_DIR``.
 """
 from __future__ import annotations
@@ -87,10 +87,10 @@ def _load_config(path):
         raise ValueError('configuration must contain a nonempty subscribers list')
     subscribers, identities, addresses = [], set(), set()
     for entry in data['subscribers']:
-        if not isinstance(entry, dict) or set(entry) != {'gnb2', 'gnb3'}:
-            raise ValueError('each subscriber requires gnb2 and gnb3')
+        if not isinstance(entry, dict) or set(entry) != {'gnb1', 'gnb2', 'gnb3'}:
+            raise ValueError('each subscriber requires gnb1, gnb2 and gnb3')
         pair, supis = [], []
-        for site in ('gnb2', 'gnb3'):
+        for site in ('gnb1', 'gnb2', 'gnb3'):
             item = entry[site]
             if not isinstance(item, dict) or set(item) != {'config', 'ip'} or not isinstance(item['config'], str) or not item['config'] or not isinstance(item['ip'], str):
                 raise ValueError('each site requires config and ip strings')
@@ -110,8 +110,8 @@ def _load_config(path):
             addresses.add(ip)
             supis.append(supi)
             pair.append({'config': str(config), 'ip': ip})
-        if supis[0] != supis[1] or supis[0] in identities:
-            raise ValueError('paired SUPIs must match and subscribers must be distinct')
+        if len(set(supis)) != 1 or supis[0] in identities:
+            raise ValueError('site SUPIs must match and subscribers must be distinct')
         identities.add(supis[0])
         subscribers.append(pair)
     return subscribers
@@ -294,10 +294,10 @@ class OwnedUELifecycle:
         self.closed = False
         self.processes = []
 
-    def switch_counts(self, total, n2, n3):
+    def switch_counts(self, total, n1, n2, n3):
         if self.closed:
             raise RuntimeError('lifecycle is closed')
-        if any(type(n) is not int for n in (total, n2, n3)) or total < 1 or n2 < 0 or n3 < 0 or n2 + n3 != total or total > len(self.subscribers):
+        if any(type(n) is not int or n < 0 for n in (n1, n2, n3)) or type(total) is not int or total < 1 or n1 + n2 + n3 != total or total > len(self.subscribers):
             raise ValueError('invalid UE counts or insufficient subscribers')
         _cleanup(self.journal)
         for process in self.processes:
@@ -305,7 +305,8 @@ class OwnedUELifecycle:
         self.processes.clear()
         if _other_ues():
             raise RuntimeError('existing nr-ue process prevents exclusive ownership')
-        chosen = [pair[0 if i < n2 else 1] for i, pair in enumerate(self.subscribers[:total])]
+        chosen = [sites[0 if i < n1 else 1 if i < n1 + n2 else 2]
+                  for i, sites in enumerate(self.subscribers[:total])]
         expected = {item['ip'] for item in chosen}
         links = _ip('addr', 'show')
         if expected & {a.get('local') for link in links for a in link.get('addr_info', [])}:
@@ -354,7 +355,7 @@ class OwnedUELifecycle:
             routes = _ip('route', 'show', 'table', 'all')
             used = {str(r.get('table')) for r in rules + routes}
             available = (n for n in range(20000, 60000) if str(n) not in used)
-            result = ([], [])
+            result = ([], [], [])
             for i, item in enumerate(chosen):
                 ip, iface = item['ip'], found[item['ip']]
                 table = next(available)
@@ -362,7 +363,7 @@ class OwnedUELifecycle:
                 _run('route', 'add', 'default', 'dev', iface, 'table', str(table))
                 _run('rule', 'add', 'from', ip + '/32', 'table', str(table), 'priority', '1000')
                 _record(self.journal, 'route_added', ip=ip, iface=iface, table=table)
-                result[0 if i < n2 else 1].append({'ip': ip, 'iface': iface})
+                result[0 if i < n1 else 1 if i < n1 + n2 else 2].append({'ip': ip, 'iface': iface})
             if any(p.poll() is not None for p in self.processes):
                 raise RuntimeError('owned nr-ue exited before ready')
             current = {
@@ -372,7 +373,7 @@ class OwnedUELifecycle:
             }
             if any((ip, iface) not in current for ip, iface in found.items()):
                 raise RuntimeError('owned UE address disappeared before ready')
-            _record(self.journal, 'ready', gnb2=result[0], gnb3=result[1])
+            _record(self.journal, 'ready', gnb1=result[0], gnb2=result[1], gnb3=result[2])
             return result
         except BaseException:
             for process in self.processes:

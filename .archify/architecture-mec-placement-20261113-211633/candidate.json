@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "5G MEC placement and telemetry architecture",
+    "locale": "en",
+    "output": ".archify/architecture-mec-placement-20261113-211633/mec-placement.html",
+    "quality_profile": "showcase",
+    "repository": {"url": "https://github.com/yogarn/5g-mec-controller.git", "revision": "21a786f9a591e65d91701a7db98fe7164b92880e"}
+  },
+  "components": [
+    {"id":"ue", "type":"external", "label":"UERANSIM / UE runner", "sublabel":"HTTP requests + observations", "pos":[40,240], "size":[180,64], "sources":[{"path":"README.md","line":64,"end_line":66},{"path":"README.md","line":110,"end_line":112}]},
+    {"id":"service", "type":"backend", "label":"Workload Service", "sublabel":"NodePort via kube-proxy", "pos":[350,100], "size":[180,64], "sources":[{"path":"README.md","line":7,"end_line":13},{"path":"apps/face-detection/manifest.yaml","line":42,"end_line":56}]},
+    {"id":"pods", "type":"backend", "label":"Service pods", "sublabel":"eligible MEC / core nodes", "pos":[700,100], "size":[185,64], "sources":[{"path":"apps/face-detection/manifest.yaml","line":1,"end_line":29},{"path":"README.md","line":31,"end_line":33}]},
+    {"id":"collector", "type":"backend", "label":"UE telemetry collector", "sublabel":"single replica on core", "pos":[350,380], "size":[180,64], "sources":[{"path":"collector/manifest.yaml","line":17,"end_line":40},{"path":"README.md","line":17,"end_line":23}]},
+    {"id":"core", "type":"external", "label":"Open5GS SMF + AMF", "sublabel":"session / gNB mapping", "pos":[40,500], "size":[180,64], "sources":[{"path":"collector/manifest.yaml","line":7,"end_line":15},{"path":"README.md","line":21,"end_line":23}]},
+    {"id":"prom", "type":"cloud", "label":"Prometheus", "sublabel":"collector + node metrics", "pos":[700,380], "size":[185,64], "sources":[{"path":"collector/prometheus-scrape.yaml","line":1,"end_line":6},{"path":"telemetry/01-node-exporter.yaml","line":1,"end_line":15}]},
+    {"id":"exporter", "type":"backend", "label":"Node exporter", "sublabel":"node resource metrics", "pos":[700,580], "size":[185,64], "sources":[{"path":"telemetry/01-node-exporter.yaml","line":1,"end_line":15}]},
+    {"id":"controller", "type":"backend", "label":"Placement controller", "sublabel":"scaling + optional preference", "pos":[1030,380], "size":[190,64], "sources":[{"path":"README.md","line":25,"end_line":33},{"path":"config.yaml","line":1,"end_line":5}]},
+    {"id":"api", "type":"cloud", "label":"Kubernetes API", "sublabel":"existing Deployment", "pos":[1030,100], "size":[190,64], "sources":[{"path":"README.md","line":27,"end_line":33},{"path":"controller/reconcile.py","line":40,"end_line":57}]}
+  ],
+  "connections": [
+    {"from":"ue","to":"service","label":"HTTP requests","variant":"emphasis"},
+    {"from":"service","to":"pods","label":"routes to ready pods","variant":"emphasis"},
+    {"from":"ue","to":"collector","label":"POST observations"},
+    {"from":"collector","to":"core","label":"fetch mappings"},
+    {"from":"prom","to":"collector","label":"scrape metrics"},
+    {"from":"prom","to":"exporter","label":"scrape"},
+    {"from":"controller","to":"prom","label":"query p90 + state"},
+    {"from":"controller","to":"api","label":"optional patch"},
+    {"from":"api","to":"pods","label":"reconcile / schedule"}
+  ],
+  "cards": [
+    {"dot":"emerald","title":"Data path","items":["UE requests reach the workload through NodePort; no Envoy proxy."]},
+    {"dot":"amber","title":"Telemetry","items":["UE-side observations feed a rolling p90; Prometheus scrapes the collector.","The collector uses SMF and AMF information for site mapping."]},
+    {"dot":"violet","title":"Control","items":["Mutation is disabled by default; mobility-aware mode sets a soft preference, not a fixed node.","The controller reads the workload manifest but does not deploy it."]}
+  ]
+}

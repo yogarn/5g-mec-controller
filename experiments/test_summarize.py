@@ -46,6 +46,8 @@ class SummaryTests(unittest.TestCase):
         phases = self.load(records())
         result = phases[0]
         self.assertEqual((result['workload_ue'], result['gnb2_ues'], result['gnb3_ues']), (2, 1, 1))
+        self.assertEqual(result['gnb1_ues'], 0)  # Historical two-site JSONL.
+        self.assertEqual(result['latency_p90_ms'], 19)
         self.assertEqual((result['attempts'], result['successes'], result['failures']), (4, 2, 2))
         self.assertEqual((result['start_time'], result['end_time'], result['generation_duration_s']), (100, 112, 10))
         self.assertEqual(result['throughput_denominator_s'], 12)
@@ -62,6 +64,25 @@ class SummaryTests(unittest.TestCase):
             rows = list(csv.DictReader(file))
         self.assertEqual(rows[0]['phase'], 'phase_01')
         self.assertEqual(float(rows[0]['slo_attainment_all_attempts']), .25)
+
+    def test_three_site_counts_and_percentiles(self):
+        events = records()
+        first = {'group': 'gnb-1', 'source_address': '10.0.0.3'}
+        events[0]['workload_ue'] = events[-1]['workload_ue'] = 3
+        events[0]['gnb1_ues'] = events[-1]['gnb1_ues'] = 1
+        events[0]['ues'].append(first)
+        events.insert(-1, dict(events[1], **first, duration_ms=30))
+        events[-1]['attempts'] = 5
+        events[-1]['successes'] = 3
+        events[-1]['per_ue'].append({**first, 'attempts': 1, 'successes': 1})
+        result = self.load(events)[0]
+        self.assertEqual((result['gnb1_ues'], result['gnb2_ues'], result['gnb3_ues']), (1, 1, 1))
+        self.assertEqual(result['latency_p50_ms'], 20)
+        self.assertEqual(result['latency_p90_ms'], 28)
+        ue_rows = []
+        summarize.summarize(self.source, 15, ue_rows)
+        site1 = next(row for row in ue_rows if row['group'] == 'gnb-1')
+        self.assertEqual((site1['attempts'], site1['latency_p90_ms']), (1, 30))
 
     def test_per_ue_outputs_and_collision(self):
         self.load(records())
