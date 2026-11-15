@@ -149,3 +149,19 @@ Refactored the controller and experiment harness to follow Kubernetes separation
    - `5` RPS/UE is an initial uncalibrated rate (`120` RPS at 24 UEs) and requires calibration on the live cluster before drawing capacity conclusions.
    - `benchmark/client.py` standalone CLI was left unchanged because all campaign and harness paths dispatch through `utils/experiment.py`.
    - Local `placement/internal/controller/controller.go` and `controller_test.go` have an earlier uncommitted descheduler-ticker jitter fix outside these commits; do not sync/deploy until audited.
+
+## 7. Scaler-Only Balanced Scenario (`--comparison scaling --scenario scaler-balanced`)
+
+1. **Changes:**
+   - **`experiments/campaign.py`, `experiments/run.sh`:** Added `--comparison scaling`, `--scenario scaler-balanced`, and `--final-hold`. Renders both `baseline` and `proposed` workloads with `default-scheduler`, `replicas: 1`, and required `nodeAffinity` restricted to `gnb-3` (`min=1`, default `max=24`, preserving `--max-replicas` and `--tc-ms`, rejecting `--fixed-replicas`, `--debug`, `--autoscaler controller`, `--placement-engine python`, `--deschedule-interval`, and custom scoring weights before cluster access).
+   - **No `placement-controller` interaction:** In `scaling` mode, `verify_incluster_components` still requires `placement/prometheus-adapter` (`v1beta1.external.metrics.k8s.io`) but skips `placement/placement-controller`, and `run_method` never mutates `placement-controller-config`, restarts `placement-controller`, or launches host `python -m controller`.
+   - **Pre-traffic capacity guard:** Added `check_node_capacity` to verify `gnb-3` allocatable CPU/memory minus non-terminated pods (excluding the reset workload) fits `max_replicas` before starting traffic.
+   - **Accurate optional 360s final hold (`utils/experiment.py`, `experiments/campaign_ue.py`, `utils/plot_autoscaler.py`):** Added `--phase-durations` so `--final-hold` extends the final `3:1:1:1` phase to `420s` continuously without extra stop-and-reattach phases; `run.json`, `phase_start`/`phase_end`, `summarize.py`, and `plot_autoscaler.py` reflect actual per-phase durations.
+   - **Metadata:** `plan.yaml` and `campaign.yaml` persist `schedule`, `phase_durations_s`, `final_hold_seconds`, `node_restriction`, `hpa_targets`, `replica_bounds`, `pacing`, and `tc_ms`.
+2. **Validation:**
+   - `utils/test_experiment.py` & `utils/test_summarize.py`: verified `--phase-durations` accuracy (`generation_duration_s`, `scheduled`, `actual_start_rate`) and early rejection of invalid durations.
+   - `experiments/test_campaign.py`: verified `--plan-only` manifests, HPAs, bounds, `--final-hold`, `gnb-3` capacity check pass/fail, skipping `placement-controller` preflight/mutations, and early rejection of incompatible flags before cluster access.
+   - `bash -n experiments/run.sh`, `py_compile` on `utils/plot_autoscaler.py` / `utils/test_plot_autoscaler.py`, and offline `--plan-only` smoke check passed.
+3. **Limitations:**
+   - Do not push, sync, or run cluster tests while experiments are running on `core`.
+   - `24` replicas at `500m` CPU / `256Mi` memory each requires `12000m` CPU and `6144Mi` memory free on `gnb-3`; `check_node_capacity` will fail before traffic if `gnb-3` has less available capacity unless `--max-replicas` is lowered.

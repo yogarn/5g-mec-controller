@@ -88,6 +88,10 @@ When running an evaluation campaign, **do not manually apply workloads or HPAs**
    # Placement-only comparison (both use latency HPA)
    bash experiments/run.sh run_2 --workload pedestrian-detection --comparison placement
 
+   # Scaler-only comparison on gnb-3 (preview offline, then run with optional 360s final hold)
+   bash experiments/run.sh --comparison scaling --scenario scaler-balanced --final-hold --plan-only /tmp/scaler-plan
+   bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced --final-hold
+
    # Quick 60s-phase debug run
    bash experiments/run.sh debug_1 --debug
    ```

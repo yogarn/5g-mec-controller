@@ -252,3 +252,15 @@ bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-re
 ### Short calibration command
 
 On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one balanced `9:3:3:3` phase per method with six replicas, 10 ms TC, 5 RPS/UE, and 60-second phases. This reuses campaign preflight, collection, and cleanup. Choose a fresh name on each run. Other campaign flags can override the defaults. Preview without traffic using `.venv/bin/python -m utils.calibrate_mobility --plan-only /tmp/calibration-plan`.
+
+## Scaler-only balanced scenario (`scaler-balanced`)
+
+Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`60%` target) against native latency HPA (`100` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `1..24` replica bounds (override with `--max-replicas`), 60-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
+
+```bash
+# Offline preview (no cluster or network access):
+bash experiments/run.sh --comparison scaling --scenario scaler-balanced --final-hold --plan-only /tmp/scaler-balanced-plan
+
+# Live run (60s phases; add --final-hold for a 420s final 3:1:1:1 phase to observe 300s HPA scale-down):
+bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced --final-hold
+```
