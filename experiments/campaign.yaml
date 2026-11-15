@@ -1,10 +1,11 @@
 # Run from core. These paths refer to the UE host, not the core host.
+workload: pedestrian-detection
 ue_host: member@10.34.211.6
 ue_project: /home/member/skripsi_yoga/5g-mec-controller
 inventory: /home/member/skripsi_yoga/5g-mec-controller/.private/ue-paper-24/inventory.yaml
 nr_ue: /home/member/5g-ai-edge/ueransim/build/nr-ue
 token: /home/member/.config/5g-mec/ue-telemetry-token
-image: /home/member/skripsi_yoga/5g-mec-controller/apps/face-detection/images
+image: /home/member/skripsi_yoga/5g-mec-controller/apps/pedestrian-detection/images
 site_node_ips:
   gnb-1: 10.34.211.157
   gnb-2: 10.34.211.196

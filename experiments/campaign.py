@@ -143,8 +143,12 @@ def load(path):
     data = yaml.safe_load(Path(path).read_text())
     expected = {'ue_host', 'ue_project', 'inventory', 'nr_ue', 'token', 'image', 'site_node_ips',
                 'telemetry_url', 'schedule', 'phase_duration'}
-    if not isinstance(data, dict) or set(data) != expected:
-        raise ValueError('campaign configuration keys must be: ' + ', '.join(sorted(expected)))
+    optional = {'workload'}
+    if not isinstance(data, dict) or not expected.issubset(data) or (set(data) - expected - optional):
+        raise ValueError('campaign configuration keys must be: ' + ', '.join(sorted(expected))
+                         + ' (optional: ' + ', '.join(sorted(optional)) + ')')
+    if 'workload' in data:
+        workload_identity(data['workload'])
     if not isinstance(data['phase_duration'], (int, float)) or data['phase_duration'] < 30:
         raise ValueError('phase_duration must be at least 30 seconds for telemetry checks')
     parse_schedule(data['schedule'])
@@ -443,7 +447,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
-    parser.add_argument('--workload', choices=WORKLOADS, default='face-detection')
+    parser.add_argument('--workload', choices=WORKLOADS, default=None,
+                        help='workload to deploy and monitor (default: campaign config or face-detection)')
     parser.add_argument('--plan-only', type=Path, metavar='DIRECTORY',
                         help='write workload/controller/HPA manifests locally without any probes or cluster access')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
@@ -473,8 +478,9 @@ def main(argv=None):
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
-    if args.workload != 'face-detection':
-        settings['workload'] = args.workload
+    workload = args.workload if args.workload is not None else selected_workload(settings)
+    settings['workload'] = workload
+    if args.workload is not None and args.workload != 'face-detection':
         # Separate config and an explicit SLO prevent accidental reuse of face calibration.
         if args.config == str(ROOT / 'experiments/campaign.yaml') or args.slo_ms is None:
             parser.error('pedestrian workload requires a separate --config and explicit --slo-ms after calibration')
@@ -504,12 +510,12 @@ def main(argv=None):
     if args.plan_only is not None:
         output = args.plan_only.resolve()
         output.mkdir(parents=True, exist_ok=False)
-        _campaign_manifest(output, args.tc_ms is not None, args.workload)
+        _campaign_manifest(output, args.tc_ms is not None, workload)
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
-                            resource_weights, locality_weight, args.workload)
+                            resource_weights, locality_weight, workload)
         (output / 'plan.yaml').write_text(yaml.safe_dump({
-            'workload': args.workload, 'slo_ms': slo_ms, 'calibrated': False,
+            'workload': workload, 'slo_ms': slo_ms, 'calibrated': False,
             'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
             'campaign_settings': settings}, sort_keys=False))
         print(f'Offline plan written: {output}; no cluster access or traffic started.')
@@ -530,7 +536,7 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
-                                       'max_replicas': max_replicas, 'debug': args.debug, 'workload': args.workload,
+                                       'max_replicas': max_replicas, 'debug': args.debug, 'workload': workload,
                                        'resource_weights': resource_weights,
                                        'locality_weight': locality_weight}, stream)
         phases = parse_schedule(settings['schedule'])
@@ -554,16 +560,16 @@ def main(argv=None):
         try:
             if delay is not None:
                 delay.start()
-            _campaign_manifest(root, delay is not None, args.workload)
+            _campaign_manifest(root, delay is not None, workload)
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
-                reset(args.workload)
+                reset(workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
                            resource_weights, locality_weight)
             command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:
-                reset(args.workload)
+                reset(workload)
             finally:
                 if delay is not None:
                     delay.close()

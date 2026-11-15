@@ -1,6 +1,6 @@
 # Calibration below is historical; validate the new workload and proxy paths.
 # The manifest must contain exactly one apps/v1 Deployment. It is read, not applied.
-manifest: apps/face-detection/manifest.yaml
+manifest: apps/pedestrian-detection/manifest.yaml
 prometheus_url: "http://10.34.211.140:30990"
 latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 # Collector p90 includes every measured attempt and requires a complete, nonempty window.
