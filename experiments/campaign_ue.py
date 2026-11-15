@@ -55,8 +55,11 @@ def check(settings):
     from benchmark.telemetry import telemetry_config
     telemetry_config(settings['telemetry_url'], settings['token'])
     images = Path(settings['image'])
-    if not images.is_dir() or not any(images.glob('*.png')):
-        raise ValueError('campaign image directory is missing PNG inputs')
+    if not images.is_dir() or not any(
+        p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif', '.tif', '.tiff'}
+        for p in images.iterdir()
+    ):
+        raise ValueError('campaign image directory is missing image inputs')
     for path in Path('/proc').glob('[0-9]*/cmdline'):
         try:
             argv = path.read_bytes().split(b'\0')
