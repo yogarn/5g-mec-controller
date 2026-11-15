@@ -65,6 +65,7 @@ def run_fixed_rate_phase(
     if wait_fn is None:
         wait_fn = cancelled.wait
     period = 1.0 / rps_per_ue
+    lateness_tolerance = 0.25 * period
     num_ues = len(selected)
     phase_start_mono = monotonic_fn()
     phase_end_mono = phase_start_mono + phase_duration
@@ -80,9 +81,17 @@ def run_fixed_rate_phase(
         scheduled = started = completed = successes = missed = 0
         futures = []
 
-        def run_one(slot_index, scheduled_mono, dispatch_mono):
-            nonlocal completed, successes, in_flight
+        def run_one(slot_index, scheduled_mono):
+            nonlocal started, completed, successes, missed, in_flight
             try:
+                actual_start = monotonic_fn()
+                if (cancelled.is_set() or actual_start >= phase_end_mono
+                        or actual_start > scheduled_mono + lateness_tolerance):
+                    with ue_lock:
+                        missed += 1
+                    return
+                with ue_lock:
+                    started += 1
                 record = dispatch_fn(group, source, ue_index, image)
                 with ue_lock:
                     completed += 1
@@ -99,7 +108,7 @@ def run_fixed_rate_phase(
                         'image_filename': image['filename'],
                         'slot': slot_index,
                         'scheduled_offset_s': scheduled_mono - phase_start_mono,
-                        'dispatch_offset_s': dispatch_mono - phase_start_mono,
+                        'dispatch_offset_s': actual_start - phase_start_mono,
                         'attempt': completed,
                         **record,
                     })
@@ -121,14 +130,16 @@ def run_fixed_rate_phase(
                 if now >= phase_end_mono:
                     while slot_time < phase_end_mono:
                         scheduled += 1
-                        missed += 1
+                        with ue_lock:
+                            missed += 1
                         slot_index += 1
                         slot_time = phase_start_mono + offset + slot_index * period
                     break
-                if now >= slot_time + period:
-                    while slot_time < phase_end_mono and now >= slot_time + period:
+                if now > slot_time + lateness_tolerance:
+                    while slot_time < phase_end_mono and now > slot_time + lateness_tolerance:
                         scheduled += 1
-                        missed += 1
+                        with ue_lock:
+                            missed += 1
                         slot_index += 1
                         slot_time = phase_start_mono + offset + slot_index * period
                     continue
@@ -138,10 +149,10 @@ def run_fixed_rate_phase(
                     if can_dispatch:
                         in_flight += 1
                 if not can_dispatch:
-                    missed += 1
+                    with ue_lock:
+                        missed += 1
                 else:
-                    started += 1
-                    futures.append(req_pool.submit(run_one, slot_index, slot_time, now))
+                    futures.append(req_pool.submit(run_one, slot_index, slot_time))
                 slot_index += 1
                 slot_time = phase_start_mono + offset + slot_index * period
 
