@@ -35,9 +35,18 @@ spec:
                     operator: In
                     values: [core-5g]
       containers:
-        - name: face-detection
-          image: 10.34.211.140:30500/face-detection@sha256:e40daf875da253d2ea354f05544d45db2ae216c33bbd0fe108dbff0261ddf8f9
+        - name: pedestrian-detection
+          image: 10.34.211.140:30500/pedestrian-detection@sha256:e7fbf9a1792fd20dc312c0a24dffc6d64c0b9b85fbaf6bb56c2e426ca4474970
           imagePullPolicy: IfNotPresent
+          env:
+            - name: ORT_THREADS
+              value: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            periodSeconds: 2
+            failureThreshold: 60
           ports:
             - name: http
               containerPort: 5000

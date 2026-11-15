@@ -5,3 +5,7 @@ __pycache__/
 results/
 .private/
 archives/
+
+# Generated pedestrian model binaries; reproduce with export_model.py.
+apps/pedestrian-detection/models/*.pt
+apps/pedestrian-detection/models/*.onnx

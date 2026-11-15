@@ -84,3 +84,36 @@ def test_sample_cli_collects_pods_and_metrics_from_selected_namespace(tmp_path, 
     observation, = [json.loads(line) for line in output.read_text().splitlines()]
     assert observation['pods'] == [{'name': pod_name, 'node': 'gnb1', 'phase': 'Running', 'ready': True}]
     assert observation['metrics'] == {pod_name: metric}
+
+
+def test_async_pod_metrics_across_observations_form_complete_sample(tmp_path):
+    start = 1700000000
+    events = [{'event': 'phase_start', 'phase': 'phase_01', 'start_time': start},
+              {'event': 'phase_end', 'phase': 'phase_01', 'end_time': start + 60}]
+    rows = [{'phase': 'phase_01', 'workload_ue': 2, 'gnb1_ues': 1, 'gnb2_ues': 1, 'gnb3_ues': 0,
+             'latency_p50_ms': 10, 'latency_p90_ms': 20, 'attempts': 2, 'successes': 2,
+             'failures': 0, 'start_time': start, 'end_time': start + 60}]
+    requests = tmp_path / 'requests.jsonl'
+    requests.write_text(''.join(json.dumps(e) + '\n' for e in events))
+    summary = tmp_path / 'summary.csv'
+    with summary.open('w', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0]); writer.writeheader(); writer.writerows(rows)
+
+    pod_a = {'name': 'app-a', 'node': 'gnb1', 'phase': 'Running', 'ready': True}
+    pod_b = {'name': 'app-b', 'node': 'gnb-2', 'phase': 'Running', 'ready': True}
+    pod_c = {'name': 'app-c', 'node': 'gnb-3', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    m = lambda offset, cpu: {'timestamp': ts(offset), 'window': '15s',
+                             'containers': [{'name': 'app', 'usage': {'cpu': cpu, 'memory': '1024Ki'}}]}
+    samples = [
+        {'sample_time': start + 35, 'pods': [pod_a, pod_b], 'metrics': {'app-a': m(38, '100m'), 'app-b': m(20, '100m')}},
+        {'sample_time': start + 50, 'pods': [pod_a, pod_b, pod_c], 'metrics': {'app-a': m(52, '300m'), 'app-b': m(42, '200m')}},
+    ]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        row, = list(csv.DictReader(stream))
+    assert row['complete_samples'] == '1'
+    assert float(row['cpu_millicores']) == 300.0
+    assert float(row['memory_mib']) == 2.0

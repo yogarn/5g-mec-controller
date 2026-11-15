@@ -1,0 +1,10 @@
+{
+  "experiments/campaign.py": {
+    "source_unchanged_since_snapshot": true,
+    "base_sha256": "fd2e710ab0b9e31b16cc007d22bdbb6cd6bded9c10b9d6ca3d60c818deb3d58a"
+  },
+  "experiments/monitor_resources.py": {
+    "source_unchanged_since_snapshot": true,
+    "base_sha256": "a182633ecf31536fb0b1e6a5ca526045a837d9d83a643412d919115e02156613"
+  }
+}

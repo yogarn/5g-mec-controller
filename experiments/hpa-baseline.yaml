@@ -19,5 +19,7 @@ spec:
           type: AverageValue
           averageValue: 1000m
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
     scaleDown:
-      stabilizationWindowSeconds: 180
+      stabilizationWindowSeconds: 300

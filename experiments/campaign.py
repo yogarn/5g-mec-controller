@@ -7,6 +7,7 @@ import math
 import json
 import os
 from pathlib import Path
+from dataclasses import replace
 import re
 import shlex
 import signal
@@ -26,6 +27,22 @@ from controller.policy import validate_resource_weights
 ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
+WORKLOADS = ('face-detection', 'pedestrian-detection')
+
+
+def workload_identity(workload='face-detection'):
+    if workload not in WORKLOADS:
+        raise ValueError('unknown workload')
+    return 'mec-placement-' + workload
+
+
+def workload_manifest(workload='face-detection'):
+    workload_identity(workload)
+    return ROOT / 'apps' / workload / 'manifest.yaml'
+
+
+def selected_workload(settings):
+    return settings.get('workload', 'face-detection')
 
 
 def check_service_routing(service):
@@ -39,7 +56,7 @@ def check_service_routing(service):
             any(annotations.get(key, 'Disabled').lower() not in ('disabled', '')
                 for key in ('service.kubernetes.io/topology-mode',
                             'service.kubernetes.io/topology-aware-hints'))):
-        raise RuntimeError('face-detection Service requires cluster-wide routing without locality preference or session affinity')
+        raise RuntimeError('Workload Service requires cluster-wide routing without locality preference or session affinity')
 
 
 class RunnerProgress:
@@ -150,6 +167,9 @@ def prerequisites(settings):
     import matplotlib
     from controller.config import load_settings
     config = load_settings(ROOT / 'config.yaml')
+    workload = selected_workload(settings)
+    if workload != 'face-detection':
+        config = replace(config, manifest=workload_manifest(workload))
     kube('get', '--raw=/readyz')
     nodes = json.loads(kube('get', 'nodes', '-o', 'json', capture_output=True, text=True).stdout)
     by_name = {node['metadata']['name']: node for node in nodes['items']}
@@ -172,8 +192,8 @@ def prerequisites(settings):
             input=json.dumps(remote_settings(settings)), text=True)
     from experiments.preflight import collector_status
     collector_status(config)
-    for manifest in ('apps/face-detection/manifest.yaml', 'experiments/hpa-baseline.yaml'):
-        docs = [d for d in yaml.safe_load_all((ROOT / manifest).read_text()) if d]
+    for manifest in (workload_manifest(workload), ROOT / 'experiments/hpa-baseline.yaml'):
+        docs = [d for d in yaml.safe_load_all(Path(manifest).read_text()) if d]
         if any(d['metadata'].get('namespace') != NAMESPACE for d in docs):
             raise ValueError(f'{manifest} must use the {NAMESPACE} namespace')
     connectivity_probe(settings)
@@ -183,7 +203,8 @@ def prerequisites(settings):
 def connectivity_probe(settings):
     """Check a temporary app/NodePort without touching campaign or shared workloads."""
     probe_id = 'mec-preflight-' + uuid.uuid4().hex[:12]
-    documents = [d for d in yaml.safe_load_all((ROOT / 'apps/face-detection/manifest.yaml').read_text()) if d]
+    documents = [d for d in yaml.safe_load_all(workload_manifest(selected_workload(settings)).read_text()) if d]
+    app = workload_identity(selected_workload(settings))
     for document in documents:
         document['metadata']['namespace'] = probe_id
     created = False
@@ -193,8 +214,8 @@ def connectivity_probe(settings):
         created = True
         print(f'[CHECK] Temporary connectivity workload: {probe_id}', flush=True)
         kube('create', '-f', '-', input=yaml.safe_dump_all(documents), text=True)
-        kube('-n', probe_id, 'rollout', 'status', 'deployment/' + APP, '--timeout=180s')
-        service = get('service', APP, probe_id)
+        kube('-n', probe_id, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
+        service = get('service', app, probe_id)
         check_service_routing(service)
         port = service['spec']['ports'][0]['nodePort']
         payload = remote_settings(settings) | {'probe_id': probe_id, 'site_urls': {
@@ -213,15 +234,16 @@ def connectivity_probe(settings):
     print(f'[OK] Connectivity probe complete; UE diagnostics: results/{probe_id}/ on UE host', flush=True)
 
 
-def reset():
-    """Delete only the experiment app, its HPA and dependent managed groups."""
-    kube('-n', NAMESPACE, 'delete', 'hpa/mec-placement-face-detection-baseline',
-         'deployment/' + APP, 'service/' + APP, '--ignore-not-found=true',
+def reset(workload='face-detection'):
+    """Delete only the selected experiment app, its HPA and dependent managed groups."""
+    app = workload_identity(workload)
+    kube('-n', NAMESPACE, 'delete', 'hpa/' + app + '-baseline',
+         'deployment/' + app, 'service/' + app, '--ignore-not-found=true',
          '--cascade=foreground', '--wait=true', '--timeout=180s')
-    pods = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', 'app=' + APP,
+    pods = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', 'app=' + app,
                           '-o', 'json', capture_output=True, text=True).stdout)['items']
     if pods:
-        kube('-n', NAMESPACE, 'wait', '--for=delete', 'pod', '-l', 'app=' + APP,
+        kube('-n', NAMESPACE, 'wait', '--for=delete', 'pod', '-l', 'app=' + app,
              '--timeout=180s')
 
 
@@ -281,9 +303,9 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
-def _campaign_manifest(root, use_tc):
+def _campaign_manifest(root, use_tc, workload='face-detection'):
     """Write one shared workload manifest for both methods."""
-    documents = list(yaml.safe_load_all((ROOT / 'apps/face-detection/manifest.yaml').read_text()))
+    documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
     if len(deployments) != 1:
         raise ValueError('application manifest requires exactly one Deployment')
@@ -297,7 +319,7 @@ def _campaign_manifest(root, use_tc):
 
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection'):
     """Persist the exact matched replica budget and manifests used by a method."""
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
@@ -311,18 +333,20 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed',
                   slo_seconds=slo_ms / 1000, max_replicas=max_replicas)
     if debug:
-        config.update(interval_seconds=5, cooldown_seconds=15,
+        config.update(interval_seconds=15, cooldown_seconds=15,
                       scale_down_seconds=30, deschedule_interval_seconds=30)
-        config['cpu_utilization_query'] = config['cpu_utilization_query'].replace('[2m]', '[30s]')
+        config['cpu_utilization_query'] = config['cpu_utilization_query'].replace('[2m]', '[1m]')
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
     hpa_path = None
     if method == 'baseline':
         hpa = yaml.safe_load((ROOT / 'experiments/hpa-baseline.yaml').read_text())
+        hpa['metadata']['name'] = workload_identity(workload) + '-baseline'
+        hpa['spec']['scaleTargetRef']['name'] = workload_identity(workload)
         hpa['spec'].update(minReplicas=config['min_replicas'], maxReplicas=max_replicas)
-        if debug:
-            hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = 30
+        # Generate both methods from the same effective stabilization duration.
+        hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = config['scale_down_seconds']
         hpa_path = root / 'baseline-hpa.yaml'
         with hpa_path.open('x') as stream:
             yaml.safe_dump(hpa, stream, sort_keys=False)
@@ -334,7 +358,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     output = root / method
     output.mkdir()
     config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
-                                                  resource_weights, locality_weight)
+                                                  resource_weights, locality_weight, selected_workload(settings))
+    app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
     completed = False
@@ -349,14 +374,14 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                 while time.monotonic() < deadline:
                     if processes[0].poll() is not None:
                         raise RuntimeError('controller startup failed; see controller.log')
-                    check = kube('-n', NAMESPACE, 'get', 'deployment', APP, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
+                    check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
                     if check.stdout.strip():
                         break
                     time.sleep(1)
                 else:
                     raise RuntimeError('controller did not deploy the workload')
-            kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + APP, '--timeout=180s')
-            service = get('service', APP)
+            kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
+            service = get('service', app)
             check_service_routing(service)
             port = service['spec']['ports'][0]['nodePort']
             site_urls = {site: f'http://{address}:{port}/detect'
@@ -364,7 +389,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
             if delay is not None:
                 delay.check()
             command([sys.executable, '-m', 'experiments.preflight', '--config', config_path])
-            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'experiments.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
+            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'experiments.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(sampler)
             payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
                        'schedule': settings['schedule'], 'duration': settings['phase_duration']}
@@ -418,6 +443,9 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
+    parser.add_argument('--workload', choices=WORKLOADS, default='face-detection')
+    parser.add_argument('--plan-only', type=Path, metavar='DIRECTORY',
+                        help='write workload/controller/HPA manifests locally without any probes or cluster access')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
     parser.add_argument('--check', action='store_true', help='dependency checks plus temporary workload and UE connectivity probes')
     parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
@@ -445,6 +473,13 @@ def main(argv=None):
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
+    if args.workload != 'face-detection':
+        settings['workload'] = args.workload
+        # Separate config and an explicit SLO prevent accidental reuse of face calibration.
+        if args.config == str(ROOT / 'experiments/campaign.yaml') or args.slo_ms is None:
+            parser.error('pedestrian workload requires a separate --config and explicit --slo-ms after calibration')
+        if '/face-detection/' in settings['image']:
+            parser.error('pedestrian workload must not use face-detection fixtures')
     if args.debug:
         settings['phase_duration'] = 60
     if args.phase_duration is not None:
@@ -464,8 +499,21 @@ def main(argv=None):
     max_replicas = args.max_replicas if args.max_replicas is not None else controller_config['max_replicas']
     if max_replicas < controller_config['min_replicas']:
         parser.error('--max-replicas must be at least min_replicas from config.yaml')
-    if not args.check and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
+    if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
+    if args.plan_only is not None:
+        output = args.plan_only.resolve()
+        output.mkdir(parents=True, exist_ok=False)
+        _campaign_manifest(output, args.tc_ms is not None, args.workload)
+        for method in ('baseline', 'proposed'):
+            _method_configs(output, method, slo_ms, max_replicas, args.debug,
+                            resource_weights, locality_weight, args.workload)
+        (output / 'plan.yaml').write_text(yaml.safe_dump({
+            'workload': args.workload, 'slo_ms': slo_ms, 'calibrated': False,
+            'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
+            'campaign_settings': settings}, sort_keys=False))
+        print(f'Offline plan written: {output}; no cluster access or traffic started.')
+        return
     with open('/tmp/mec-experiment-campaign.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         def interrupted(signum, frame):
@@ -482,7 +530,7 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
-                                       'max_replicas': max_replicas, 'debug': args.debug,
+                                       'max_replicas': max_replicas, 'debug': args.debug, 'workload': args.workload,
                                        'resource_weights': resource_weights,
                                        'locality_weight': locality_weight}, stream)
         phases = parse_schedule(settings['schedule'])
@@ -494,9 +542,9 @@ def main(argv=None):
         print(f'Proposed scoring: resource weights={resource_weights}; '
               f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
         if args.debug:
-            print('DEBUG profile: 15s collector window retained; controller interval 5s, '
-                  'cooldown 15s, scale-down stabilization 30s, descheduler 30s, '
-                  'node CPU window 30s; HPA scale-down stabilization 30s. '
+            print('DEBUG profile: 15s collector window retained; controller interval 15s, '
+                  'placement-only cooldown 15s, scale-down stabilization 30s, descheduler 30s, '
+                  'node CPU window 60s; HPA scale-down stabilization 30s. '
                   'Cluster scrape and metrics-server/HPA sync intervals are unchanged. '
                   'Short phases do not guarantee convergence.', flush=True)
         ns = kube('get', 'namespace', NAMESPACE, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
@@ -506,16 +554,16 @@ def main(argv=None):
         try:
             if delay is not None:
                 delay.start()
-            _campaign_manifest(root, delay is not None)
+            _campaign_manifest(root, delay is not None, args.workload)
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
-                reset()
+                reset(args.workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
                            resource_weights, locality_weight)
             command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:
-                reset()
+                reset(args.workload)
             finally:
                 if delay is not None:
                     delay.close()

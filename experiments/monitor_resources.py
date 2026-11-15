@@ -37,7 +37,7 @@ def quantity(value, kind):
     raise ValueError(f'unsupported {kind} quantity: {value}')
 
 
-def sample(output, namespace='services'):
+def sample(output, namespace='services', app='mec-placement-face-detection'):
     stop = False
     def request_stop(signum, frame):
         nonlocal stop
@@ -47,9 +47,9 @@ def sample(output, namespace='services'):
     with Path(output).open('x', encoding='utf-8') as stream:
         while not stop:
             try:
-                pods = kubectl(namespace, 'get', 'pods', '-l', LABEL, '-o', 'json')['items']
+                pods = kubectl(namespace, 'get', 'pods', '-l', 'app=' + app, '-o', 'json')['items']
                 measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
-                metrics = {m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(PREFIX)}
+                metrics = {m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(app + '-')}
                 rows = []
                 for pod in pods:
                     metadata, status = pod['metadata'], pod.get('status', {})
@@ -115,30 +115,31 @@ def summarize(raw, requests, summary_csv, output):
         writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
         for row in summary:
             phase = row['phase']; start = starts[phase]['start_time']; end = ends[phase]['end_time']
-            unique = {}
+            by_running = {}
             for observation in valid:
                 if not start <= observation['sample_time'] <= end + 60:
                     continue
-                metrics = observation['metrics']
-                candidates = set()
-                for entry in metrics.values():
+                for name, entry in observation['metrics'].items():
                     t = timestamp(entry['timestamp'])
-                    if start <= t <= end:
-                        running = running_at(t)
-                        if running:
-                            candidates.add(running)
-                for running in candidates:
-                    if any(name not in metrics for name in running):
+                    if not start <= t <= end:
                         continue
-                    entries = [metrics[name] for name in running]
-                    times = [timestamp(e['timestamp']) for e in entries]
-                    if any(not start <= t <= end or running_at(t) != running for t in times):
+                    running = running_at(t)
+                    if not running or name not in running:
                         continue
-                    key = tuple(sorted((name, metrics[name]['timestamp']) for name in running))
-                    cpu = sum(quantity(c['usage']['cpu'], 'cpu') for e in entries for c in e['containers'])
-                    memory = sum(quantity(c['usage']['memory'], 'memory') for e in entries for c in e['containers'])
-                    unique[key] = (cpu, memory, min(times), max(times))
-            vals = list(unique.values())
+                    cpu = sum(quantity(c['usage']['cpu'], 'cpu') for c in entry['containers'])
+                    memory = sum(quantity(c['usage']['memory'], 'memory') for c in entry['containers'])
+                    pod_samples = by_running.setdefault(running, {}).setdefault(name, {})
+                    pod_samples[entry['timestamp']] = (cpu, memory, t)
+            vals = []
+            for running, pod_samples in by_running.items():
+                if any(name not in pod_samples for name in running):
+                    continue
+                per_pod = [sorted(pod_samples[name].values(), key=lambda item: item[2]) for name in sorted(running)]
+                for round_entries in zip(*per_pod):
+                    times = [item[2] for item in round_entries]
+                    vals.append((sum(item[0] for item in round_entries),
+                                 sum(item[1] for item in round_entries),
+                                 min(times), max(times)))
             writer.writerow({'phase': phase, 'cpu_millicores': sum(v[0] for v in vals) / len(vals) if vals else '',
                              'memory_mib': sum(v[1] for v in vals) / len(vals) if vals else '',
                              'complete_samples': len(vals), 'first_metric_time': min((v[2] for v in vals), default=''),
@@ -152,10 +153,11 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('sample'); p.add_argument('output')
     p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
+    p.add_argument('--app', default='mec-placement-face-detection', help='workload app label and Pod prefix')
     p = sub.add_parser('summarize'); p.add_argument('samples'); p.add_argument('requests'); p.add_argument('summary'); p.add_argument('output')
     args = parser.parse_args()
     if args.action == 'sample':
-        sample(args.output, args.namespace)
+        sample(args.output, args.namespace, args.app)
     else:
         summarize(args.samples, args.requests, args.summary, args.output)
 

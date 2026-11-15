@@ -424,6 +424,8 @@ data:
     scrape_configs:
       # Scrape Node Exporter across all nodes directly via Pod discovery
       - job_name: 'node-exporter'
+        # Match the experiment control interval without changing other jobs.
+        scrape_interval: 15s
         kubernetes_sd_configs:
           - role: pod
             namespaces:

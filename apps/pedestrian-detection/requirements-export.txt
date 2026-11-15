@@ -1,0 +1,3 @@
+ultralytics==8.4.213
+onnx==1.23.2
+# Install CPU-only torch/torchvision first using the official PyTorch CPU index.

@@ -254,19 +254,42 @@ def test_batch_scale_up_retries_only_unapplied_nodes_after_api_failure(world):
     assert apps.create_namespaced_deployment.call_args.args[1]['spec']['replicas'] == 1
 
 
-@pytest.mark.parametrize('elapsed,allowed', [(10, False), (20, True)])
-def test_scale_up_uses_short_cooldown_instead_of_general_cooldown(world, elapsed, allowed):
-    controller, original, apps, _, _, prom, _ = world
+def test_scaling_ignores_general_cooldown_while_descheduling_uses_it(world):
+    controller, original, apps, _, _, prom, observe = world
     controller.settings.cooldown_seconds = 120
-    controller.settings.scale_up_cooldown_seconds = 15
-    controller.last_action = 100 - elapsed
+    controller.last_action = 99
     prom.scalar.return_value = 2
     with patch('controller.reconcile.time.monotonic', return_value=100):
         controller.run_once()
-    assert apps.patch_namespaced_deployment.called is allowed
-    if allowed:
-        state = json.loads(apps.patch_namespaced_deployment.call_args.args[2]['metadata']['annotations'][MIGRATION_ANNOTATION])
-        assert state['kind'] == 'batch-scale-up'
+    state = json.loads(apps.patch_namespaced_deployment.call_args.args[2]['metadata']['annotations'][MIGRATION_ANNOTATION])
+    assert state['kind'] == 'batch-scale-up'
+
+    apps.patch_namespaced_deployment.reset_mock()
+    settle(original, 0)
+    source = group(controller, original, 'a', 2)
+    observe([source])
+    controller.last_action = 99
+    prom.scalar.return_value = 0.5
+    with patch('controller.reconcile.time.monotonic', return_value=100):
+        controller.run_once()
+    state = json.loads(apps.patch_namespaced_deployment.call_args.args[2]['metadata']['annotations'][MIGRATION_ANNOTATION])
+    assert state['kind'] == 'scale'
+    assert state['after'] == 1
+
+    apps.patch_namespaced_deployment.reset_mock()
+    dest = group(controller, original, 'b', 0)
+    observe([source, dest])
+    controller._nodes.return_value = [
+        Node('a', {'cpu': 10, 'memory': 10}, {'cpu': 2, 'memory': 2}, .1, 0),
+        Node('b', {'cpu': 10, 'memory': 10}, {}, .1, 10)]
+    controller.last_action = 99
+    prom.scalar.return_value = 1
+    with patch('controller.reconcile.time.monotonic', return_value=100):
+        controller.run_once()
+    apps.patch_namespaced_deployment.assert_not_called()
+    with patch('controller.reconcile.time.monotonic', return_value=220):
+        controller.run_once()
+    assert save_state(original, apps)['kind'] == 'deschedule'
 
 
 def test_periodic_descheduling_waits_until_next_check(world):

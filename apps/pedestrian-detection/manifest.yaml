@@ -1,0 +1,95 @@
+# Preview only. Resource allocations are starting values, not calibrated capacity.
+# Replace the local-only image with an immutable digest after validation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mec-placement-pedestrian-detection
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mec-placement-pedestrian-detection
+  template:
+    metadata:
+      labels:
+        app: mec-placement-pedestrian-detection
+    spec:
+      schedulerName: default-scheduler
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                - gnb1
+            - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                - gnb-2
+            - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                - gnb-3
+            - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                - core-5g
+      containers:
+      - name: pedestrian-detection
+        image: 10.34.211.140:30500/pedestrian-detection@sha256:e7fbf9a1792fd20dc312c0a24dffc6d64c0b9b85fbaf6bb56c2e426ca4474970
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 5000
+        resources:
+          requests:
+            cpu: 500m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        env:
+        - name: ORT_THREADS
+          value: '1'
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          periodSeconds: 2
+          failureThreshold: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mec-placement-pedestrian-detection
+  namespace: services
+spec:
+  type: NodePort
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+  sessionAffinity: None
+  selector:
+    app: mec-placement-pedestrian-detection
+  ports:
+  - name: http
+    port: 5000
+    targetPort: http
+    protocol: TCP

@@ -249,6 +249,29 @@ class ReconciliationTests(unittest.TestCase):
         controller.run_once()
         apps.patch_namespaced_deployment.assert_called_once_with('app', 'ns', {'metadata': {'resourceVersion': '42'}, 'spec': {'replicas': 4}})
 
+    def test_scaling_only_scaling_has_no_general_cooldown(self):
+        controller, apps, prom = self.setup_controller(mutate=True)
+        controller.last_action = 99
+        with patch('controller.reconcile.time.monotonic', return_value=100):
+            controller.run_once()
+        apps.patch_namespaced_deployment.assert_called_once_with('app', 'ns', {'metadata': {'resourceVersion': '42'}, 'spec': {'replicas': 4}})
+
+        apps.patch_namespaced_deployment.reset_mock()
+        controller.settings.scale_down_seconds = 0
+        controller.policy.down_seconds = 0
+        prom.scalar.return_value = 0.5
+        controller.last_action = 99
+        with patch('controller.reconcile.time.monotonic', return_value=100):
+            controller.run_once()
+        apps.patch_namespaced_deployment.assert_called_once_with('app', 'ns', {'metadata': {'resourceVersion': '42'}, 'spec': {'replicas': 1}})
+
+    def test_scale_up_cooldown_seconds_is_rejected_as_unknown_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'config.yaml'
+            config.write_text('manifest: app.yaml\nprometheus_url: http://localhost:9090\nlatency_query: latency\nslo_seconds: 1\nmin_replicas: 1\nmax_replicas: 4\nmode: scaling-only\nscale_up_cooldown_seconds: 15\n')
+            with self.assertRaisesRegex(ValueError, 'unknown configuration keys'):
+                load_settings(str(config))
+
     def test_missing_metric_and_hpa_fail_closed(self):
         controller, apps, prom = self.setup_controller(mutate=True)
         prom.scalar.side_effect = ValueError('missing metric')

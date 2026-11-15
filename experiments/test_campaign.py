@@ -195,16 +195,31 @@ def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp
     saved = yaml.safe_load(config_path.read_text())
     hpa = yaml.safe_load(path.read_text())
     for config in (baseline, proposed, saved):
-        assert config['interval_seconds'] == 5
+        assert 'scale_up_cooldown_seconds' not in config
+        assert config['interval_seconds'] == 15
         assert config['cooldown_seconds'] == 15
         assert config['scale_down_seconds'] == 30
         assert config['deschedule_interval_seconds'] == 30
-        assert '[30s]' in config['cpu_utilization_query']
+        assert '[1m]' in config['cpu_utilization_query']
         assert config['slo_seconds'] == .3
         assert config['max_replicas'] == 30
         assert config['mobility_query'].endswith('/ 15')
+    assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
     assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 30
     assert hpa['spec']['metrics'][0]['resource']['target']['averageValue'] == '1000m'
+
+
+def test_normal_hpa_and_proposed_share_15s_interval_and_300s_stabilization(tmp_path):
+    config, _, path = campaign._method_configs(tmp_path, 'baseline', 500, 30, debug=False)
+    hpa = yaml.safe_load(path.read_text())
+    assert 'scale_up_cooldown_seconds' not in config
+    assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
+    assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == config['scale_down_seconds'] == 300
+    proposed, proposed_path, _ = campaign._method_configs(tmp_path, 'proposed', 500, 30)
+    from controller.config import load_settings
+    effective = load_settings(proposed_path)
+    assert proposed['interval_seconds'] == effective.interval_seconds == config['interval_seconds'] == 15
+    assert effective.scale_down_seconds == 300
 
 
 def test_debug_cli_uses_60_second_phases(monkeypatch):
@@ -222,7 +237,7 @@ def test_custom_weights_are_saved_without_changing_source_config(tmp_path):
     saved = yaml.safe_load(path.read_text())
     assert saved['resource_weights'] == config['resource_weights'] == weights
     assert saved['locality_weight'] == 0
-    assert saved['interval_seconds'] == 5
+    assert saved['interval_seconds'] == 15
     assert (campaign.ROOT / 'config.yaml').read_bytes() == before
 
 

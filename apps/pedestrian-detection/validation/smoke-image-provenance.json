@@ -1,0 +1,23 @@
+{
+  "source_url": "https://github.com/ultralytics/assets/blob/main/im/bus.jpg",
+  "license": "Upstream Ultralytics assets example; local smoke test only, not redistributed",
+  "max_side": 640,
+  "jpeg_quality": 85,
+  "images": [
+    {
+      "source_name": "bus.jpg",
+      "source_sha256": "c02019c4979c191eb739ddd944445ef408dad5679acab6fd520ef9d434bfbc63",
+      "source_size": [
+        810,
+        1080
+      ],
+      "filename": "0000.jpg",
+      "sha256": "6a050270675e1bc453f790aed2015362285b83e63673af780a166cd361547a73",
+      "bytes": 101526,
+      "size": [
+        480,
+        640
+      ]
+    }
+  ]
+}

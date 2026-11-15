@@ -1,0 +1,3 @@
+Place licensed road-scene JPG/PNG images here before calibration. Include pedestrians at varied scales, occlusion, and negative scenes. Do not copy face fixtures or use these instructions as an image. Record source, license, SHA-256 and dimensions. No calibration dataset is bundled.
+
+`bus.jpg` is the original Ultralytics bus example (810×1080), copied from the local smoke-test source. Source: https://github.com/ultralytics/assets/blob/main/im/bus.jpg . It is a smoke-test example, not a pedestrian calibration dataset. See `../validation/smoke-image-provenance.json` for the original hash and the separately resized smoke-test variant.

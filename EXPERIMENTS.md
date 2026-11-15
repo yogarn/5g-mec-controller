@@ -31,18 +31,20 @@ The debug profile retains all 19 phases, using 60 seconds each: 19 minutes per m
 
 | Timing | Normal | Debug |
 |---|---:|---:|
-| Controller reconciliation | 5 s | 5 s |
-| Scale-up cooldown | 15 s | 15 s |
-| Other-action cooldown | 120 s | 15 s |
-| Proposed scale-down stabilization | 180 s | 30 s |
+| Controller reconciliation | 15 s | 15 s |
+| Proposed scale-up cooldown | none (0 s) | none (0 s) |
+| HPA scale-up stabilization | 0 s | 0 s |
+| Placement-only / descheduling cooldown (`desired == replicas`) | 120 s | 15 s |
+| Proposed scale-down stabilization (sustained-lower) | 300 s | 30 s |
 | Descheduler check | 120 s | 30 s |
-| Node CPU rate window | 120 s | 30 s |
-| HPA scale-down stabilization | 180 s | 30 s |
+| Node CPU rate window | 120 s | 60 s |
+| HPA scale-down stabilization (rolling-max) | 300 s | 30 s |
 | Collector p90/site-count window | 15 s | unchanged |
-| UE telemetry scrape | 5 s | unchanged |
-| Node metrics scrape / evaluation | 1 s | unchanged |
+| UE telemetry scrape | 15 s | unchanged |
+| Node metrics scrape | 15 s | unchanged |
+| Prometheus rule evaluation (p90 is not a recording rule) | 1 s | unchanged |
 
-The scrape values above reflect the inspected testbed configuration; the profile does not reconfigure shared Prometheus or the collector. The p90 is exported directly by the collector, rather than computed by a Prometheus recording rule. After switching phases, allow roughly 15 seconds for old observations to leave its window, up to 5 seconds for the next telemetry scrape, and up to 5 seconds for a debug reconciliation. These are indicative sampling delays, not a response deadline; Pod readiness, CPU metrics collection, processing and UE reattachment add time. HPA sync and metrics-server collection remain cluster settings and are not accelerated by this flag. Removal-first relocation can still take tens of seconds. Short phases show transitions and need not reach steady state or complete scale-down. Debug runs change the policies' timing and must be labeled separately from evaluation runs.
+The scrape values above are the agreed experiment configuration; the profile does not reconfigure shared Prometheus or the collector. The p90 is exported directly by the collector, rather than computed by a Prometheus recording rule. After switching phases, allow roughly 15 seconds for old observations to leave its window, up to 15 seconds for the next telemetry scrape, and up to 15 seconds for a debug reconciliation. These are indicative sampling delays, not a response deadline; Pod readiness, CPU metrics collection, processing and UE reattachment add time. HPA sync and metrics-server collection remain cluster settings and are not accelerated by this flag. Removal-first relocation can still take tens of seconds. Short phases show transitions and need not reach steady state or complete scale-down. Debug runs change the policies' timing and must be labeled separately from evaluation runs.
 
 The effective phase duration and debug flag are saved in `campaign.yaml`; generated controller and HPA manifests retain the exact policy settings. Traffic shaping, request timeouts, UE cleanup deadlines and Pod readiness checks are unchanged.
 
@@ -146,7 +148,7 @@ The controller computes `ceil(current replicas × all-attempt p90 / target)`, wi
 
 The objective is **all-attempt p90 <=500 ms** by default, not a p95 objective. Per-attempt violation rates and p95 remain supplementary diagnostics.
 
-Each phase generates traffic for **300 seconds**. The 19 phases traverse the original ascending schedule and then reverse it, with the peak included once. Traffic takes **95 minutes per method**, or **190 minutes per paired campaign**, plus UE switching, setup, and transfer. The longer phases allow observation of the 180-second scale-down stabilization and 120-second cooldown, but do not guarantee full convergence at every tier. The wrapper prints each phase number, ramp direction, UE split, and traffic-start/completion messages, with a progress reminder every 30 seconds. The schedule is `total:gnb1:gnb2:gnb3`:
+Each phase generates traffic for **300 seconds**. The 19 phases traverse the original ascending schedule and then reverse it, with the peak included once. Traffic takes **95 minutes per method**, or **190 minutes per paired campaign**, plus UE switching, setup, and transfer. A 300-second phase cannot guarantee a completed 300-second scale-down stabilization after detection and readiness delays. Evaluate transition behavior separately; extend the common phase duration before evaluation if completed scale-down is an endpoint. The placement-only cooldown remains 120 seconds. The wrapper prints each phase number, ramp direction, UE split, and traffic-start/completion messages, with a progress reminder every 30 seconds. The schedule is `total:gnb1:gnb2:gnb3`:
 
 ```text
 3:1:1:1
@@ -176,7 +178,7 @@ Locality is relative request-attempt demand: `site attempts / total attempts`. I
 
 Descheduling uses `delta = best feasible target score after adding the Pod - current node score`, and acts only when the largest delta is positive. Node-name order breaks ties. This adapts the maximum-score-improvement selection described by Marchese and Tomarchio in [Enhancing the Kubernetes Platform with a Load-Aware Orchestration Strategy](https://doi.org/10.1007/s42979-025-03712-z); our resource/locality score and Deployment-based removal/replacement mechanism differ from their scheduler/descheduler implementation. Replicas of this homogeneous service on the same node have equal scores. The original default-scheduled Pod is retained unless another node offers a positive delta; it is not recreated merely to normalize ownership. If original replicas span multiple nodes, only the pinned groups are eligible for descheduling, because Deployment scale-down cannot select a particular original Pod. After removal, an unavailable destination is retried without clearing the durable replacement obligation.
 
-Scale-up applies every node Deployment target in a durable batch during the same reconciliation, creating new groups directly at their target counts. API requests are issued sequentially in that pass, without waiting for Pod readiness between nodes. Partial batches resume without repeating completed increases; a fresh scaling decision still waits for ready, settled Pods. `scale_up_cooldown_seconds` defaults to 15 seconds, independently of the general cooldown. Decision logs report latency, desired/ready/pending counts, batch targets and wait reasons. Descheduling still relocates one replica at a time.
+Scale-up applies every node Deployment target in a durable batch during the same reconciliation, creating new groups directly at their target counts. API requests are issued sequentially in that pass, without waiting for Pod readiness between nodes. Partial batches resume without repeating completed increases; a fresh scaling decision still waits for ready, settled Pods. Neither scale-up nor scale-down has a fixed post-action `cooldown_seconds` delay (matching HPA's absence of a fixed post-action scaling cooldown and `scaleUp.stabilizationWindowSeconds: 0`), while `cooldown_seconds` (120 s normal, 15 s debug) still applies when `desired == replicas` (placement-only/descheduling). Scale-down stabilization durations match (300 s normal, 30 s debug), though the algorithms differ: proposed requires sustained lower targets and applies the latest target, whereas HPA uses a rolling maximum over the stabilization window. Decision logs report latency, desired/ready/pending counts, batch targets and wait reasons. Descheduling still relocates one replica at a time.
 
 Placement scoring can be configured per campaign without editing `config.yaml`:
 
@@ -189,7 +191,7 @@ bash experiments/run.sh debug_resource_01 --debug --slo-ms 500 --tc-ms 10 --max-
 
 `--resource-weights CPU MEMORY GPU VRAM` requires four finite nonnegative numbers summing to 1. These are weights *inside* the resource component. `--locality-weight L` selects the traffic-share contribution; the resource contribution is `1-L`. Both flags affect proposed placement/descheduling, not the baseline HPA or default scheduler. Enabling GPU/VRAM weights requires valid exporter telemetry. Effective weights are printed and saved in campaign metadata and generated controller configs. Weights cannot make an infeasible node eligible or guarantee equal Pod counts. Keep matched comparisons and change one scoring factor per experiment.
 
-Controller reconciliation is 5 seconds in both profiles, matching the inspected UE-telemetry scrape interval. Node metrics remain scraped every second. This is configured timing, not phase-lock synchronization: a controller check can still precede a scrape. The runner does not change the live Prometheus scrape configuration.
+Controller reconciliation is 15 seconds in both profiles to match Kubernetes' documented default HPA sync period (`--horizontal-pod-autoscaler-sync-period`, 15 s). Read-only inspection on `core` (K3s `v1.35.4+k3s1`) found no `--horizontal-pod-autoscaler-sync-period` or `kube-controller-manager-arg` in `/etc/systemd/system/k3s.service` or `/etc/rancher/k3s/config.yaml` and no `config.yaml.d` fragments, though `/etc/systemd/system/k3s.service.env` was unreadable, so the 15 s runtime sync period is strongly indicated rather than fully verified. The agreed UE telemetry and node-exporter scrape intervals are both 15 seconds; other jobs and global rule evaluation retain their existing settings. Metrics Server was inspected with `--metric-resolution=15s`. The debug CPU rate window is 60 seconds to retain about four samples at the new scrape interval. Verify live timing before evaluation; the campaign runner does not deploy monitoring changes. The controller currently sleeps 15 seconds after each reconciliation, so its actual start-to-start interval also includes processing time. Matching configured periods reduces a timing difference but does not establish identical metric age, phase alignment, or stabilization algorithms. This is configured timing, not phase-lock synchronization: a controller check can still precede a scrape. The runner does not change the live Prometheus scrape configuration or cluster controller-manager settings.
 
 `bash experiments/run.sh check` and automatic campaign preflight create an isolated temporary namespace with the same image-inference application and a cluster-wide NodePort. They register one reserved UE at each gNB, submit one image inference request per site, then repeat after tearing down and reattaching the three UEs. Both cycles must succeed before the campaign starts. This tests data-session setup and UE-to-NodePort/application connectivity, not physical attachment independently or all 24 subscriber configurations. It does not reproduce campaign load or apply the campaign's `tc` shaping. A passing probe cannot rule out a later intermittent storage or network failure.
 

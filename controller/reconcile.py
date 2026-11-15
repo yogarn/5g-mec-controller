@@ -412,11 +412,10 @@ class Reconciler:
         LOG.info('scaling decision latency_seconds=%s replicas=%s ready=%s pending=%s target=%s state=%s',
                  latency, replicas, ready, max(0, replicas - ready), desired,
                  state.get('kind') if state else None)
-        cooldown = (getattr(s, 'scale_up_cooldown_seconds', 15)
-                    if desired > replicas else s.cooldown_seconds)
-        if not state and self.last_action is not None and now - self.last_action < cooldown:
+        if (not state and desired == replicas and
+                self.last_action is not None and now - self.last_action < s.cooldown_seconds):
             LOG.info('scaling deferred reason=cooldown remaining_seconds=%.1f',
-                     cooldown - (now - self.last_action))
+                     s.cooldown_seconds - (now - self.last_action))
             return
         if not all_ready or any(not self._settled(d) or pod_counts[name] != d['spec'].get('replicas', 1)
                                 for name, d in managed.items()):
@@ -536,11 +535,6 @@ class Reconciler:
         LOG.info('latency_seconds=%s replicas=%s ready=%s target=%s placement=%s mutation=%s', latency, replicas, ready, target, choice, s.mutate)
         if changes and s.mutate:
             now = time.monotonic()
-            cooldown = (getattr(s, 'scale_up_cooldown_seconds', 15)
-                        if target > replicas else s.cooldown_seconds)
-            if self.last_action is not None and now - self.last_action < cooldown:
-                LOG.info('cooldown active; no mutation')
-                return
             self.apps.patch_namespaced_deployment(self.name, self.namespace, patch)
             self.policy.action_applied(now)
             self.last_action = now

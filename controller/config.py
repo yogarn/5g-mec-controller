@@ -32,7 +32,6 @@ class Settings:
     vram_utilization_query: str | None
     zero_locality_nodes: tuple[str, ...]
     deschedule_interval_seconds: float
-    scale_up_cooldown_seconds: float = 15
 
 
 def load_settings(path: str) -> Settings:
@@ -47,7 +46,7 @@ def load_settings(path: str) -> Settings:
                'locality_weight', 'cooldown_seconds', 'max_metric_age_seconds',
                'scale_down_seconds', 'resource_weights', 'gpu_nodes',
                'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes',
-               'deschedule_interval_seconds', 'scale_up_cooldown_seconds'}
+               'deschedule_interval_seconds'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
     for key in ('manifest', 'prometheus_url', 'latency_query', 'slo_seconds', 'min_replicas', 'max_replicas', 'mode'):
@@ -110,15 +109,14 @@ def load_settings(path: str) -> Settings:
         raise ValueError('invalid locality_weight')
     return Settings(manifest, namespace, data['prometheus_url'].rstrip('/'), data['latency_query'],
                     number('slo_seconds', None, 0), data['min_replicas'], data['max_replicas'],
-                    number('interval_seconds', 30, 0), mode, data.get('mutate', False), tuple(nodes),
+                    number('interval_seconds', 15, 0), mode, data.get('mutate', False), tuple(nodes),
                     data.get('cpu_utilization_query'), data.get('mobility_query'),
                     number('cpu_saturation', .8, 0, 1), float(locality_weight),
                     number('cooldown_seconds', 120, 0),
                     number('max_metric_age_seconds', 120, 0),
-                    number('scale_down_seconds', 180, 0), resource_weights, tuple(gpu_nodes),
+                    number('scale_down_seconds', 300, 0), resource_weights, tuple(gpu_nodes),
                     data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
-                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0),
-                    number('scale_up_cooldown_seconds', 15, 0))
+                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0))
 
 
 def workload_identity(path: Path, namespace: str | None) -> tuple[str, str]:
