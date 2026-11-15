@@ -9,3 +9,6 @@ archives/
 # Generated pedestrian model binaries; reproduce with export_model.py.
 apps/pedestrian-detection/models/*.pt
 apps/pedestrian-detection/models/*.onnx
+
+# Compiled Go controller binary; reproduce with `cd placement && go build ./cmd/placement-controller`.
+placement/placement-controller

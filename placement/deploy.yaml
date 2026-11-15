@@ -1,0 +1,128 @@
+# In-cluster RBAC, mounted configuration, and Deployment for the Go placement-controller
+# (schedulerName: mec-placement-scheduler + policy/v1 descheduler).
+# Build & push from core-5g (use localhost:30500 so Docker uses HTTP without daemon.json):
+#   docker build --network=host -t localhost:30500/placement-controller:latest placement
+#   docker push localhost:30500/placement-controller:latest
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: placement-controller
+  namespace: placement
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: placement-controller
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/binding"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: placement-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: placement-controller
+subjects:
+  - kind: ServiceAccount
+    name: placement-controller
+    namespace: placement
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placement-controller-config
+  namespace: placement
+data:
+  config.yaml: |
+    manifest: /etc/placement/manifest.yaml
+    namespace: services
+    prometheus_url: "http://placement-prometheus.placement.svc:9090"
+    latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
+    slo_seconds: 0.5
+    min_replicas: 1
+    max_replicas: 100
+    interval_seconds: 15
+    scale_down_seconds: 300
+    max_metric_age_seconds: 120
+    cooldown_seconds: 120
+    mode: mobility-aware
+    mutate: true
+    scheduler_name: mec-placement-scheduler
+    scheduler_interval_seconds: 1.0
+    deschedule_interval_seconds: 120
+    cpu_saturation: 0.8
+    locality_weight: 0.4
+    eligible_nodes: [gnb1, gnb-2, gnb-3, core-5g]
+    zero_locality_nodes: [core-5g]
+    gpu_nodes: [gnb-2, gnb-3]
+    resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
+    cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3|core-5g"}[2m]))'
+    mobility_query: 'ue_request_node_window_attempts{job="ue-telemetry",node=~"gnb1|gnb-2|gnb-3"} / 15'
+    gpu_utilization_query: 'avg by (node) (DCGM_FI_DEV_GPU_UTIL{node=~"gnb-2|gnb-3"} / 100)'
+    vram_utilization_query: 'sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) / (sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) + sum by (node) (DCGM_FI_DEV_FB_FREE{node=~"gnb-2|gnb-3"}))'
+  manifest.yaml: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: mec-placement-pedestrian-detection
+      namespace: services
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: placement-controller
+  namespace: placement
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: placement-controller
+  template:
+    metadata:
+      labels:
+        app: placement-controller
+    spec:
+      nodeSelector:
+        site: core
+      serviceAccountName: placement-controller
+      containers:
+        - name: placement-controller
+          # For immutable releases, pin 10.34.211.140:30500/placement-controller@sha256:<digest>.
+          # Always pull when using mutable tags so rebuilt images never reuse cached node layers.
+          image: 10.34.211.140:30500/placement-controller:latest
+          imagePullPolicy: Always
+          args:
+            - --config=/etc/placement/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/placement
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: placement-controller-config
