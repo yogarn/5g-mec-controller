@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot measured autoscaler comparisons.
 
-Usage: python -m experiments.plot_autoscaler RESULTS_DIR OUTPUT_DIR
+Usage: python -m utils.plot_autoscaler RESULTS_DIR OUTPUT_DIR
 
 RESULTS_DIR/{baseline,proposed} must each contain summary.csv, ramp-summary.csv,
 pods-by-ramp.csv, and resource-by-ramp.csv. Placement files must explicitly

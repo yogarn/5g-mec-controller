@@ -17,7 +17,7 @@ from pathlib import Path
 import yaml
 
 from experiments.campaign import APP, NAMESPACE, check_service_routing, command, kube, remote, stop_process
-from experiments.traffic_control import POOL_NAME, TrafficDelay
+from utils.traffic_control import POOL_NAME, TrafficDelay
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = Path('/tmp/mec-experiment-campaign.lock')
@@ -186,13 +186,13 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
         site_urls = {site: f'http://{ip}:{nodeport}/detect' for site, ip in settings['site_node_ips'].items()}
         res_file = run_dir / 'resources.jsonl'
         sampler = subprocess.Popen(
-            [sys.executable, '-m', 'experiments.monitor_resources', 'sample', str(res_file), '--namespace', NAMESPACE],
+            [sys.executable, '-m', 'utils.monitor_resources', 'sample', str(res_file), '--namespace', NAMESPACE],
             cwd=str(ROOT),
         )
 
         ue_out = f'results/{campaign_dir.name}/{run_id}'
         ue_cmd = [
-            'sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.experiment', '--armed',
+            'sudo', '-n', '.venv/bin/python', '-u', '-m', 'utils.experiment', '--armed',
             '--site-urls', json.dumps(site_urls),
             '--image', settings['image'],
             '--ue-config', settings['inventory'],

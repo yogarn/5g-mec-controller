@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from experiments import experiment, summarize
+from utils import experiment, summarize
 
 
 class FakeUEs:

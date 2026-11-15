@@ -216,7 +216,7 @@ def test_normal_hpa_and_proposed_share_15s_interval_and_300s_stabilization(tmp_p
     assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
     assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == config['scale_down_seconds'] == 300
     proposed, proposed_path, _ = campaign._method_configs(tmp_path, 'proposed', 500, 30)
-    from controller.config import load_settings
+    from utils.config import load_settings
     effective = load_settings(proposed_path)
     assert proposed['interval_seconds'] == effective.interval_seconds == config['interval_seconds'] == 15
     assert effective.scale_down_seconds == 300
@@ -282,3 +282,233 @@ def test_campaign_manifest_reserves_pool_only_with_tc(tmp_path, use_tc):
         assert json.loads(annotations[key]) == [campaign.POOL_NAME]
     else:
         assert key not in annotations
+
+
+def test_separated_comparison_a_placement_vs_comparison_b_full(tmp_path):
+    placement_dir = tmp_path / 'placement'
+    placement_dir.mkdir()
+    base_p, _, no_hpa = campaign._method_configs(
+        placement_dir, 'baseline', 500, 10, comparison='placement')
+    prop_p, _, prop_hpa = campaign._method_configs(
+        placement_dir, 'proposed', 500, 10, comparison='placement')
+    assert no_hpa is None
+    assert prop_hpa is None
+    assert base_p['mode'] == 'scaling-only' and base_p['mutate'] is True
+    assert prop_p['mode'] == 'mobility-aware' and prop_p['mutate'] is True
+    base_dep = next(d for d in yaml.safe_load_all(Path(base_p['manifest']).read_text()) if d['kind'] == 'Deployment')
+    prop_dep = next(d for d in yaml.safe_load_all(Path(prop_p['manifest']).read_text()) if d['kind'] == 'Deployment')
+    assert base_dep['spec']['template']['spec']['schedulerName'] == 'default-scheduler'
+    assert prop_dep['spec']['template']['spec']['schedulerName'] == 'mec-placement-scheduler'
+
+    full_dir = tmp_path / 'full'
+    full_dir.mkdir()
+    base_f, _, hpa_f = campaign._method_configs(
+        full_dir, 'baseline', 500, 10, comparison='full')
+    assert hpa_f is not None
+    assert base_f['mutate'] is False
+
+    hpa_dir = tmp_path / 'hpa_placement'
+    hpa_dir.mkdir()
+    _, _, base_lat_hpa = campaign._method_configs(
+        hpa_dir, 'baseline', 450, 12, comparison='placement', autoscaler='hpa')
+    _, _, prop_lat_hpa = campaign._method_configs(
+        hpa_dir, 'proposed', 450, 12, comparison='placement', autoscaler='hpa')
+    assert base_lat_hpa is not None and prop_lat_hpa is not None
+    prop_hpa = yaml.safe_load(prop_lat_hpa.read_text())
+    assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '450m'
+    assert prop_hpa['spec']['maxReplicas'] == 12
+    assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+
+
+def test_prometheus_adapter_external_rule_sets_namespaced_false():
+    docs = list(yaml.safe_load_all((campaign.ROOT / 'telemetry/05-prometheus-adapter.yaml').read_text()))
+    cm = next(d for d in docs if d and d.get('kind') == 'ConfigMap'
+              and d.get('metadata', {}).get('name') == 'prometheus-adapter-config')
+    adapter_cfg = yaml.safe_load(cm['data']['config.yaml'])
+    assert adapter_cfg['externalRules'][0]['resources'] == {'namespaced': False}
+
+
+def test_campaign_defaults_to_hpa_and_incluster_go_and_rejects_mixed_controller(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    out_dir = tmp_path / 'plan'
+    campaign.main([
+        '--config', str(campaign.ROOT / 'experiments' / 'campaign-pedestrian.example.yaml'),
+        '--slo-ms', '500',
+        '--plan-only', str(out_dir),
+    ])
+    plan = yaml.safe_load((out_dir / 'plan.yaml').read_text())
+    assert plan['autoscaler'] == 'hpa'
+    assert plan['placement_engine'] == 'go'
+
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('preflight ran'))
+    with pytest.raises(SystemExit) as error:
+        campaign.main([
+            'run_test',
+            '--config', str(campaign.ROOT / 'experiments' / 'campaign-pedestrian.example.yaml'),
+            '--placement-engine', 'go',
+            '--autoscaler', 'controller',
+        ])
+    assert error.value.code == 2
+
+
+def test_verify_incluster_components_checks_adapter_and_go_deployment(monkeypatch):
+    def fake_get(kind, name, namespace=campaign.NAMESPACE):
+        if kind == 'deployment' and name == 'prometheus-adapter' and namespace == 'placement':
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+        if kind == 'deployment' and name == 'placement-controller' and namespace == 'placement':
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+        raise AssertionError(f'unexpected get {kind} {name} {namespace}')
+
+    apiservice_payload = {
+        'spec': {'service': {'namespace': 'placement', 'name': 'prometheus-adapter'}},
+        'status': {'conditions': [{'type': 'Available', 'status': 'True'}]},
+    }
+    queried_paths = []
+
+    def fake_kube(*args, **kwargs):
+        if args[:2] == ('get', 'apiservice'):
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(apiservice_payload), stderr='')
+        if args[:2] == ('get', '--raw'):
+            queried_paths.append(args[2])
+            if args[2] == '/apis/external.metrics.k8s.io/v1beta1':
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({'kind': 'APIResourceList'}), stderr='')
+            if 'ue_p90_latency_seconds' in args[2]:
+                raise subprocess.CalledProcessError(1, ['kubectl', *args], stderr='Error from server (NotFound)')
+        raise AssertionError(f'unexpected kube {args}')
+
+    monkeypatch.setattr(campaign, 'get', fake_get)
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    campaign.verify_incluster_components('hpa', 'go')
+    assert any('ue_p90_latency_seconds' in p for p in queried_paths)
+
+    # KEDA owning v1beta1.external.metrics.k8s.io must be rejected even with Available=True.
+    apiservice_payload['spec']['service'] = {'namespace': 'keda', 'name': 'keda-metrics-apiserver'}
+    with pytest.raises(RuntimeError, match='placement/prometheus-adapter'):
+        campaign.verify_incluster_components('hpa', 'go')
+    apiservice_payload['spec']['service'] = {'namespace': 'placement', 'name': 'prometheus-adapter'}
+
+    # Non-NotFound adapter query failure (e.g. 500 namespaced error) must fail preflight.
+    def fake_kube_500(*args, **kwargs):
+        if args[:2] == ('get', 'apiservice'):
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(apiservice_payload), stderr='')
+        if args[:2] == ('get', '--raw') and args[2] == '/apis/external.metrics.k8s.io/v1beta1':
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({'kind': 'APIResourceList'}), stderr='')
+        if args[:2] == ('get', '--raw') and 'ue_p90_latency_seconds' in args[2]:
+            raise subprocess.CalledProcessError(1, ['kubectl', *args], stderr='InternalError: unable to find a resource')
+        raise AssertionError(f'unexpected kube {args}')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube_500)
+    with pytest.raises(subprocess.CalledProcessError):
+        campaign.verify_incluster_components('hpa', 'go')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(
+        campaign, 'get',
+        lambda kind, name, ns=campaign.NAMESPACE: {'spec': {'replicas': 1}, 'status': {'readyReplicas': 0}},
+    )
+    with pytest.raises(RuntimeError, match='prometheus-adapter|placement-controller'):
+        campaign.verify_incluster_components('hpa', 'go')
+
+
+def test_incluster_go_with_hpa_applies_manifests_without_host_controller_processes(monkeypatch, tmp_path):
+    spawned = []
+    kube_calls = []
+
+    class FakeProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.pid = 1000 + len(spawned)
+            self.returncode = None
+            self._polls = 0
+            self.stdin = io.StringIO()
+
+        def poll(self):
+            if 'experiments.campaign_ue' in ' '.join(self.cmd):
+                self._polls += 1
+                if self._polls >= 2:
+                    self.returncode = 0
+                    return 0
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        proc = FakeProc(cmd)
+        spawned.append(cmd)
+        return proc
+
+    def fake_kube(*args, **kwargs):
+        kube_calls.append(args)
+        if 'logs' in args and 'stdout' in kwargs:
+            kwargs['stdout'].write('scheduler bound pod=test node=gnb-2\n')
+        if args[:2] == ('get', '--raw') and 'ue_p90_latency_seconds' in args[2]:
+            return subprocess.CompletedProcess(
+                args, 0,
+                stdout=json.dumps({'items': [{'metricName': 'ue_p90_latency_seconds', 'value': '100m'}]}),
+                stderr='',
+            )
+        return subprocess.CompletedProcess(args, 0, stdout='deployment.apps/mec-placement-pedestrian-detection\n', stderr='')
+
+    def fake_get(kind, name, namespace=campaign.NAMESPACE):
+        if kind == 'deployment' and name == 'placement-controller' and namespace == 'placement':
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+        if kind == 'service':
+            return {'spec': {'ports': [{'nodePort': 30080}]}}
+        raise AssertionError(f'unexpected get {kind} {name} {namespace}')
+
+    monkeypatch.setattr(campaign.subprocess, 'Popen', fake_popen)
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(campaign, 'get', fake_get)
+    monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'active_telemetry', lambda url: True)
+    monkeypatch.setattr(campaign, 'stop_process', lambda p: None)
+    monkeypatch.setattr(campaign, 'check_service_routing', lambda s: None)
+    monkeypatch.setattr(campaign, 'transfer', lambda *a: None)
+    monkeypatch.setattr(campaign, 'time', type('T', (), {'monotonic': lambda: 0.0, 'sleep': lambda _: None}))
+
+    class DummyProgress:
+        def __init__(self, *a): pass
+        def poll(self, final=False): pass
+
+    monkeypatch.setattr(campaign, 'RunnerProgress', DummyProgress)
+
+    settings = {
+        'workload': 'pedestrian-detection',
+        'site_node_ips': {'gnb-1': '127.0.0.1', 'gnb-2': '127.0.0.2', 'gnb-3': '127.0.0.3'},
+        'schedule': '3:1:1:1',
+        'phase_duration': 60,
+        'prometheus_url': 'http://prom',
+        'ue_host': 'ue',
+        'ue_project': '/tmp',
+        'ue_ssh_port': 22,
+        'image': 'img:latest',
+        'ssh_key': '/dev/null',
+        'ue_user': 'root',
+        'ue_password': '',
+        'inventory': '/dev/null',
+        'nr_ue': 'nr-ue',
+        'token': 'tok',
+        'telemetry_url': 'http://tel',
+    }
+    run_root = tmp_path / 'run'
+    run_root.mkdir()
+    campaign.run_method(
+        settings, 'camp', run_root, 'proposed', delay=None, slo_ms=500, max_replicas=10,
+        comparison='full', autoscaler='hpa', placement_engine='go',
+    )
+
+    assert not any('controller' in ' '.join(map(str, c)) for c in spawned)
+    cm_file = run_root / 'proposed' / 'placement-configmap.yaml'
+    assert any(args[:2] == ('apply', '-f') and str(cm_file) in args for args in kube_calls)
+    assert any(args[:4] == ('-n', 'placement', 'rollout', 'restart') for args in kube_calls)
+    assert any(args[:4] == ('-n', 'placement', 'rollout', 'status') for args in kube_calls)
+    assert any(args[:2] == ('apply', '-f') and str(run_root / 'proposed-workload.yaml') in map(str, args) for args in kube_calls)
+    assert any(args[:2] == ('apply', '-f') and str(run_root / 'proposed-hpa.yaml') in map(str, args) for args in kube_calls)
+    assert any(args[:2] == ('get', '--raw') and 'ue_p90_latency_seconds' in args[2] for args in kube_calls)
+    cm = yaml.safe_load(cm_file.read_text())
+    cfg = yaml.safe_load(cm['data']['config.yaml'])
+    assert cfg['manifest'] == '/etc/placement/manifest.yaml'
+    assert cfg['prometheus_url'] == 'http://placement-prometheus.placement.svc:9090'
+    assert cfg['mutate'] is True
+    assert 'scheduler bound pod=test' in (run_root / 'proposed' / 'controller.log').read_text()

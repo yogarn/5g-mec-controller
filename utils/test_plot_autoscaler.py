@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from experiments.plot_autoscaler import load_slo
+from utils.plot_autoscaler import load_slo
 
 
 def write_summary(root, method, rows):

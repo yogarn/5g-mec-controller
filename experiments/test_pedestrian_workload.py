@@ -67,7 +67,7 @@ def test_plan_only_does_not_probe_network_or_touch_campaign_lock(tmp_path, monke
 
 
 def test_resource_sampler_selects_pedestrian_pods_only(tmp_path, monkeypatch):
-    from experiments import monitor_resources as monitor
+    from utils import monitor_resources as monitor
     app = 'mec-placement-pedestrian-detection'
     calls = []
     def kube(namespace, *args):

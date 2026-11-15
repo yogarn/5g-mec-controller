@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 from benchmark.client import attempt
-from experiments.experiment import validate_site_urls
-from experiments.ue_lifecycle import OwnedUELifecycle
+from utils.experiment import validate_site_urls
+from utils.ue_lifecycle import OwnedUELifecycle
 
 
 def probe(settings, output):

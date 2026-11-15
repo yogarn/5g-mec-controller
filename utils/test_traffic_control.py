@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from experiments.traffic_control import POOL_CIDR, POOL_NAME, TrafficDelay
+from utils.traffic_control import POOL_CIDR, POOL_NAME, TrafficDelay
 
 
 def test_reserved_pool_rejects_overlapping_existing_pool():

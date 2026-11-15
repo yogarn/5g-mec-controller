@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from experiments import summarize
+from utils import summarize
 
 
 def records():

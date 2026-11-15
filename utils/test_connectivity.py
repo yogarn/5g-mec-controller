@@ -1,8 +1,10 @@
+import subprocess
 from unittest.mock import Mock
 
 import pytest
 
-from experiments import campaign, connectivity
+from experiments import campaign
+from utils import connectivity
 
 
 @pytest.mark.parametrize('failure', [None, 'registration', 'request'])
@@ -42,6 +44,7 @@ def test_preflight_removes_temporary_namespace_even_on_failure(monkeypatch, fail
         calls.append(args)
         if failure == 'rollout' and 'rollout' in args:
             raise RuntimeError('rollout failed')
+        return subprocess.CompletedProcess(args, 0, stdout='{"items": []}', stderr='')
     monkeypatch.setattr(campaign, 'kube', kube)
     monkeypatch.setattr(campaign, 'get', lambda *args: {'spec': {'ports': [{'nodePort': 30000}]}})
     def command(args, **kwargs):

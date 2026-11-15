@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from experiments.provision_ues import build_documents, main, provision
+from utils.provision_ues import build_documents, main, provision
 
 
 class Collection:

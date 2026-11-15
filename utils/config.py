@@ -3,7 +3,17 @@ from dataclasses import dataclass
 from pathlib import Path
 import math
 import yaml
-from controller.policy import DEFAULT_RESOURCE_WEIGHTS, validate_resource_weights
+
+DEFAULT_RESOURCE_WEIGHTS = {'cpu': .5, 'memory': .5, 'gpu': 0., 'vram': 0.}
+
+
+def validate_resource_weights(weights):
+    if (not isinstance(weights, dict) or set(weights) != set(DEFAULT_RESOURCE_WEIGHTS) or
+            any(isinstance(v, bool) or not isinstance(v, (int, float)) or
+                not math.isfinite(v) or v < 0 for v in weights.values()) or
+            not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-9)):
+        raise ValueError('resource_weights must contain nonnegative finite cpu, memory, gpu and vram weights summing to 1')
+    return {key: float(value) for key, value in weights.items()}
 
 
 @dataclass(frozen=True)
@@ -32,6 +42,8 @@ class Settings:
     vram_utilization_query: str | None
     zero_locality_nodes: tuple[str, ...]
     deschedule_interval_seconds: float
+    scheduler_name: str = 'mec-placement-scheduler'
+    scheduler_interval_seconds: float = 1.0
 
 
 def load_settings(path: str) -> Settings:
@@ -46,7 +58,7 @@ def load_settings(path: str) -> Settings:
                'locality_weight', 'cooldown_seconds', 'max_metric_age_seconds',
                'scale_down_seconds', 'resource_weights', 'gpu_nodes',
                'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes',
-               'deschedule_interval_seconds'}
+               'deschedule_interval_seconds', 'scheduler_name', 'scheduler_interval_seconds'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
     for key in ('manifest', 'prometheus_url', 'latency_query', 'slo_seconds', 'min_replicas', 'max_replicas', 'mode'):
@@ -93,11 +105,13 @@ def load_settings(path: str) -> Settings:
     if mode == 'mobility-aware':
         if not nodes or any(not isinstance(data.get(k), str) or not data[k].strip() for k in ('cpu_utilization_query', 'mobility_query')):
             raise ValueError('mobility-aware mode requires eligible_nodes, cpu_utilization_query and mobility_query')
+
     def number(key, default, low, high=None):
         value = data.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= low or (high is not None and value > high):
             raise ValueError(f'invalid {key}')
         return float(value)
+
     namespace = data.get('namespace')
     if namespace is not None and (not isinstance(namespace, str) or not namespace):
         raise ValueError('namespace must be a nonempty string')
@@ -107,6 +121,9 @@ def load_settings(path: str) -> Settings:
     locality_weight = data.get('locality_weight', .4)
     if isinstance(locality_weight, bool) or not isinstance(locality_weight, (int, float)) or not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
         raise ValueError('invalid locality_weight')
+    scheduler_name = data.get('scheduler_name', 'mec-placement-scheduler')
+    if not isinstance(scheduler_name, str) or not scheduler_name.strip():
+        raise ValueError('scheduler_name must be a nonempty string')
     return Settings(manifest, namespace, data['prometheus_url'].rstrip('/'), data['latency_query'],
                     number('slo_seconds', None, 0), data['min_replicas'], data['max_replicas'],
                     number('interval_seconds', 15, 0), mode, data.get('mutate', False), tuple(nodes),
@@ -116,7 +133,8 @@ def load_settings(path: str) -> Settings:
                     number('max_metric_age_seconds', 120, 0),
                     number('scale_down_seconds', 300, 0), resource_weights, tuple(gpu_nodes),
                     data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
-                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0))
+                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0),
+                    scheduler_name.strip(), number('scheduler_interval_seconds', 1.0, 0))
 
 
 def workload_identity(path: Path, namespace: str | None) -> tuple[str, str]:

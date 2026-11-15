@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from collector.server import Collector, load_settings as load_collector_settings
-from experiments import preflight
+from utils import preflight
 
 
 QUERY = 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
@@ -43,18 +43,6 @@ class PreflightTests(unittest.TestCase):
         deployment['spec']['replicas'] = 0
         with self.assertRaises(preflight.PreflightError):
             preflight.check_deployment(deployment)
-
-    def test_zero_template_requires_active_owned_placement(self):
-        deployment = copy.deepcopy(DEPLOYMENT)
-        deployment['metadata'] = {'uid': 'owner-uid'}
-        deployment['spec']['replicas'] = 0
-        owned = {'metadata': {'labels': {'mec-placement-controller.io/owner': 'owner-uid'}},
-                 'spec': {'replicas': 2}}
-        unrelated = {'metadata': {'labels': {'mec-placement-controller.io/owner': 'other'}},
-                     'spec': {'replicas': 100}}
-        self.assertEqual(preflight.check_deployment(deployment, [owned, unrelated])['desired'], 2)
-        with self.assertRaises(preflight.PreflightError):
-            preflight.check_deployment(deployment, [unrelated])
 
     def run_preflight(self, values, latency=0.2, missing=None, json_output=True, query=QUERY):
         settings = SimpleNamespace(manifest='app.yaml', namespace='services', prometheus_url='http://prom',

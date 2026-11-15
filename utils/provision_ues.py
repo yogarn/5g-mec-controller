@@ -8,8 +8,8 @@ import sys
 
 import yaml
 
-from experiments import defaults
-from experiments.ue_lifecycle import _load_config
+from utils import defaults
+from utils.ue_lifecycle import _load_config
 
 
 def _auth_and_session(path):

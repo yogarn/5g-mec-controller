@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from experiments import monitor_resources
+from utils import monitor_resources
 
-from experiments.monitor_resources import summarize
+from utils.monitor_resources import summarize
 
 
 def test_delayed_metric_uses_historical_pods_and_missing_is_not_zero(tmp_path):

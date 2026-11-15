@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 import sys
 
-from experiments import defaults
+from utils import defaults
 
 
 def number(value, name, *, minimum=None):

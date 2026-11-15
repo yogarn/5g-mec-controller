@@ -44,7 +44,7 @@ def stop(campaign, method):
 
 
 def check(settings):
-    from experiments.ue_lifecycle import _load_config
+    from utils.ue_lifecycle import _load_config
     subscribers = _load_config(settings['inventory'])
     if len(subscribers) < settings['max_ues']:
         raise ValueError('not enough reserved subscribers for the campaign')
@@ -65,13 +65,13 @@ def check(settings):
             argv = path.read_bytes().split(b'\0')
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
-        if argv and (Path(os.fsdecode(argv[0])).name == 'nr-ue' or b'experiments.experiment' in argv):
+        if argv and (Path(os.fsdecode(argv[0])).name == 'nr-ue' or b'utils.experiment' in argv):
             raise RuntimeError('a UE workload is already active; finish it before starting a campaign')
     print(f'UE prerequisites ready: {len(subscribers)} reserved subscribers', flush=True)
 
 
 def run(settings):
-    from experiments.experiment import validate_site_urls
+    from utils.experiment import validate_site_urls
     validate_site_urls(settings['site_urls'])
     campaign, method = settings['campaign'], settings['method']
     root = Path('results') / campaign
@@ -79,7 +79,7 @@ def run(settings):
     output = root / method
     if output.exists():
         raise FileExistsError(output)
-    args = [sys.executable, '-u', '-m', 'experiments.experiment', '--armed',
+    args = [sys.executable, '-u', '-m', 'utils.experiment', '--armed',
             '--site-urls', json.dumps(settings['site_urls']), '--image', settings['image'],
             '--ue-config', settings['inventory'], '--nr-ue', settings['nr_ue'],
             '--phase-schedule', settings['schedule'], '--phase-duration', str(settings['duration']),
@@ -108,7 +108,7 @@ def run(settings):
 
 
 def probe(settings):
-    from experiments.connectivity import probe as connectivity_probe
+    from utils.connectivity import probe as connectivity_probe
     campaign = settings['probe_id']
     root = Path('results') / campaign
     root.mkdir(parents=True, exist_ok=False)

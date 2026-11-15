@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# One-time setup: bash experiments/run.sh setup
-# Prerequisites plus temporary application and UE connectivity probes: bash experiments/run.sh check
-# Whole campaign: bash experiments/run.sh run_2
+# One-time setup (venv on core + UE host): bash experiments/run.sh setup
+# Prerequisites + temporary workload and UE connectivity probes: bash experiments/run.sh check [--workload face-detection|pedestrian-detection]
+# Render manifests without cluster access: bash experiments/run.sh --plan-only /tmp/plan [--workload ...] [--comparison full|placement]
+# Whole campaign: bash experiments/run.sh run_2 [--workload face-detection|pedestrian-detection] [--comparison full|placement]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -30,7 +31,7 @@ if [[ "${1:-}" == check ]]; then
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh setup | check | NEW_CAMPAIGN_NAME [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT]' >&2
+  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"

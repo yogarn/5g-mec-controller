@@ -14,8 +14,8 @@ from urllib.parse import urlsplit
 
 from benchmark.client import attempt, parse_schedule
 from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, telemetry_config
-from experiments import defaults
-from experiments.ue_lifecycle import OwnedUELifecycle
+from utils import defaults
+from utils.ue_lifecycle import OwnedUELifecycle
 
 
 def validate_url(value):

@@ -1,5 +1,6 @@
 """Run the matched gNB3-hotspot campaign from core, including remote UEs and plots."""
 import argparse
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import ipaddress
@@ -21,13 +22,22 @@ from urllib.request import urlopen
 
 import yaml
 from benchmark.client import parse_schedule
-from experiments.traffic_control import POOL_NAME, TrafficDelay
-from controller.policy import validate_resource_weights
+from utils.traffic_control import POOL_NAME, TrafficDelay
+from utils.config import validate_resource_weights
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
+COMPARISONS = ('full', 'placement')
+AUTOSCALERS = ('controller', 'hpa')
+PLACEMENT_ENGINES = ('python', 'go')
+PLACEMENT_NAMESPACE = 'placement'
+PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
+COMPARISON_NOTES = {
+    'placement': 'Comparison A (placement): same latency-ratio autoscaler for both methods; isolates scheduler/descheduler placement.',
+    'full': 'Comparison B (full system): default-scheduler + CPU HPA vs full proposed system (autoscaler + scheduler + descheduler); do not attribute results solely to placement.',
+}
 
 
 def workload_identity(workload='face-detection'):
@@ -167,9 +177,21 @@ def load(path):
     return data
 
 
+def _pod_nodes(namespace):
+    """Return formatted '<pod>@<node> (<phase>)' entries for pods in namespace."""
+    pods = json.loads(kube('-n', namespace, 'get', 'pods', '-o', 'json', capture_output=True, text=True).stdout)
+    entries = []
+    for pod in pods.get('items', []):
+        name = pod.get('metadata', {}).get('name', '<unknown>')
+        node = pod.get('spec', {}).get('nodeName') or '<unscheduled>'
+        phase = pod.get('status', {}).get('phase', 'Unknown')
+        entries.append(f'{name}@{node} ({phase})')
+    return entries
+
+
 def prerequisites(settings):
     import matplotlib
-    from controller.config import load_settings
+    from utils.config import load_settings
     config = load_settings(ROOT / 'config.yaml')
     workload = selected_workload(settings)
     if workload != 'face-detection':
@@ -194,9 +216,10 @@ def prerequisites(settings):
         raise RuntimeError('core and UE project revisions differ; git pull --ff-only on both first')
     command(remote(settings, ['sudo', '-n', '.venv/bin/python', '-m', 'experiments.campaign_ue', 'check']),
             input=json.dumps(remote_settings(settings)), text=True)
-    from experiments.preflight import collector_status
+    from utils.preflight import collector_status
     collector_status(config)
-    for manifest in (workload_manifest(workload), ROOT / 'experiments/hpa-baseline.yaml'):
+    verify_incluster_components(settings.get('_autoscaler', 'hpa'), settings.get('_placement_engine', 'go'))
+    for manifest in (workload_manifest(workload), ROOT / 'autoscaler/hpa-baseline.yaml'):
         docs = [d for d in yaml.safe_load_all(Path(manifest).read_text()) if d]
         if any(d['metadata'].get('namespace') != NAMESPACE for d in docs):
             raise ValueError(f'{manifest} must use the {NAMESPACE} namespace')
@@ -219,6 +242,7 @@ def connectivity_probe(settings):
         print(f'[CHECK] Temporary connectivity workload: {probe_id}', flush=True)
         kube('create', '-f', '-', input=yaml.safe_dump_all(documents), text=True)
         kube('-n', probe_id, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
+        print('[CHECK] Probe pod(s): ' + ', '.join(_pod_nodes(probe_id)), flush=True)
         service = get('service', app, probe_id)
         check_service_routing(service)
         port = service['spec']['ports'][0]['nodePort']
@@ -239,9 +263,10 @@ def connectivity_probe(settings):
 
 
 def reset(workload='face-detection'):
-    """Delete only the selected experiment app, its HPA and dependent managed groups."""
+    """Delete only the selected experiment app and its HPAs."""
     app = workload_identity(workload)
     kube('-n', NAMESPACE, 'delete', 'hpa/' + app + '-baseline',
+         'hpa/' + app + '-proposed',
          'deployment/' + app, 'service/' + app, '--ignore-not-found=true',
          '--cascade=foreground', '--wait=true', '--timeout=180s')
     pods = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', 'app=' + app,
@@ -307,24 +332,112 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
-def _campaign_manifest(root, use_tc, workload='face-detection'):
+def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml'):
     """Write one shared workload manifest for both methods."""
     documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
     if len(deployments) != 1:
         raise ValueError('application manifest requires exactly one Deployment')
+    if scheduler_name is not None:
+        deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
     if use_tc:
         metadata = deployments[0]['spec']['template'].setdefault('metadata', {})
         metadata.setdefault('annotations', {})['cni.projectcalico.org/ipv4pools'] = json.dumps([POOL_NAME])
-    path = root / 'workload.yaml'
+    path = root / filename
     with path.open('x') as stream:
         yaml.safe_dump_all(documents, stream, sort_keys=False)
     return path
 
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection'):
+def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds, slo_ms=None):
+    hpa = yaml.safe_load((ROOT / template_name).read_text())
+    hpa['metadata']['name'] = hpa_name
+    hpa['spec']['scaleTargetRef']['name'] = app_name
+    hpa['spec'].update(minReplicas=min_replicas, maxReplicas=max_replicas)
+    hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = int(scale_down_seconds)
+    if slo_ms is not None:
+        hpa['spec']['metrics'][0]['external']['target']['value'] = f'{int(round(slo_ms))}m'
+    with output_path.open('x') as stream:
+        yaml.safe_dump(hpa, stream, sort_keys=False)
+    return output_path
+
+
+def _render_incluster_placement_configmap(config, manifest_path):
+    """Build the placement-controller-config ConfigMap for the in-cluster Go scheduler/descheduler."""
+    incluster_cfg = dict(config)
+    incluster_cfg['manifest'] = '/etc/placement/manifest.yaml'
+    incluster_cfg['namespace'] = NAMESPACE
+    incluster_cfg['prometheus_url'] = PLACEMENT_PROMETHEUS_URL
+    incluster_cfg['mode'] = 'mobility-aware'
+    incluster_cfg['mutate'] = True
+    return {
+        'apiVersion': 'v1',
+        'kind': 'ConfigMap',
+        'metadata': {
+            'name': 'placement-controller-config',
+            'namespace': PLACEMENT_NAMESPACE,
+        },
+        'data': {
+            'config.yaml': yaml.safe_dump(incluster_cfg, sort_keys=False),
+            'manifest.yaml': Path(manifest_path).read_text(),
+        },
+    }
+
+
+def _query_external_latency_metric(allow_not_found=False):
+    """Query Kubernetes external metrics API for ue_p90_latency_seconds via prometheus-adapter."""
+    path = f'/apis/external.metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/ue_p90_latency_seconds?labelSelector=job%3Due-telemetry'
+    try:
+        raw = kube('get', '--raw', path, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as exc:
+        detail = ((exc.stderr or '') + '\n' + (exc.stdout or '')).lower()
+        if allow_not_found and ('notfound' in detail or 'not found' in detail):
+            return None
+        raise
+    payload = json.loads(raw)
+    items = payload.get('items') or []
+    if not items:
+        return [] if allow_not_found else None
+    return items
+
+
+def verify_incluster_components(autoscaler, placement_engine):
+    """Verify required in-cluster HPA external metrics adapter and Go placement Deployment are ready."""
+    if autoscaler == 'hpa':
+        adapter = get('deployment', 'prometheus-adapter', PLACEMENT_NAMESPACE)
+        if adapter['spec'].get('replicas') != 1 or adapter.get('status', {}).get('readyReplicas') != 1:
+            raise RuntimeError('placement/prometheus-adapter must have exactly one ready replica')
+        apiservice = json.loads(kube('get', 'apiservice', 'v1beta1.external.metrics.k8s.io', '-o', 'json',
+                                     capture_output=True, text=True).stdout)
+        svc = apiservice.get('spec', {}).get('service') or {}
+        if svc.get('namespace') != PLACEMENT_NAMESPACE or svc.get('name') != 'prometheus-adapter':
+            raise RuntimeError(
+                'APIService v1beta1.external.metrics.k8s.io must point to '
+                f'{PLACEMENT_NAMESPACE}/prometheus-adapter (got {svc.get("namespace")}/{svc.get("name")})'
+            )
+        conditions = apiservice.get('status', {}).get('conditions', [])
+        if not any(c.get('type') == 'Available' and c.get('status') == 'True' for c in conditions):
+            raise RuntimeError('APIService v1beta1.external.metrics.k8s.io must be Available=True')
+        discovery = json.loads(kube('get', '--raw', '/apis/external.metrics.k8s.io/v1beta1',
+                                    capture_output=True, text=True).stdout)
+        if discovery.get('kind') != 'APIResourceList':
+            raise RuntimeError('external.metrics.k8s.io discovery did not return APIResourceList')
+        # Probe ue_p90_latency_seconds directly; NotFound is tolerated only when telemetry is idle,
+        # whereas 5xx/adapter configuration errors (e.g. missing namespaced: false) fail preflight.
+        _query_external_latency_metric(allow_not_found=True)
+    if placement_engine == 'go':
+        placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
+        if placement_dep['spec'].get('replicas') != 1 or placement_dep.get('status', {}).get('readyReplicas') != 1:
+            raise RuntimeError('placement/placement-controller must have exactly one ready replica')
+
+
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller'):
     """Persist the exact matched replica budget and manifests used by a method."""
+    if comparison not in COMPARISONS:
+        raise ValueError(f'comparison must be one of {COMPARISONS}')
+    if autoscaler not in AUTOSCALERS:
+        raise ValueError(f'autoscaler must be one of {AUTOSCALERS}')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
         raise ValueError('max replicas must be an integer at least min_replicas')
@@ -334,7 +447,28 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
         if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
             raise ValueError('locality weight must be between 0 and 1')
         config['locality_weight'] = locality_weight
-    config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed',
+    base_manifest = root / 'workload.yaml'
+    source_text = base_manifest.read_text() if base_manifest.exists() else workload_manifest(workload).read_text()
+    documents = list(yaml.safe_load_all(source_text))
+    deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
+    if len(deployments) != 1:
+        raise ValueError('application manifest requires exactly one Deployment')
+    scheduler_name = ('default-scheduler' if method == 'baseline'
+                      else config.get('scheduler_name', 'mec-placement-scheduler'))
+    deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
+    method_manifest = root / f'{method}-workload.yaml'
+    with method_manifest.open('x') as stream:
+        yaml.safe_dump_all(documents, stream, sort_keys=False)
+    if method == 'proposed':
+        mode = 'mobility-aware'
+        mutate = True
+    elif comparison == 'placement' and autoscaler == 'controller':
+        mode = 'scaling-only'
+        mutate = True
+    else:
+        mode = 'mobility-aware'
+        mutate = False
+    config.update(manifest=str(method_manifest), mode=mode, mutate=mutate,
                   slo_seconds=slo_ms / 1000, max_replicas=max_replicas)
     if debug:
         config.update(interval_seconds=15, cooldown_seconds=15,
@@ -343,47 +477,73 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
+    app_name = workload_identity(workload)
     hpa_path = None
-    if method == 'baseline':
-        hpa = yaml.safe_load((ROOT / 'experiments/hpa-baseline.yaml').read_text())
-        hpa['metadata']['name'] = workload_identity(workload) + '-baseline'
-        hpa['spec']['scaleTargetRef']['name'] = workload_identity(workload)
-        hpa['spec'].update(minReplicas=config['min_replicas'], maxReplicas=max_replicas)
-        # Generate both methods from the same effective stabilization duration.
-        hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = config['scale_down_seconds']
-        hpa_path = root / 'baseline-hpa.yaml'
-        with hpa_path.open('x') as stream:
-            yaml.safe_dump(hpa, stream, sort_keys=False)
+    if method == 'baseline' and comparison == 'full':
+        hpa_path = _render_hpa(
+            'autoscaler/hpa-baseline.yaml', root / 'baseline-hpa.yaml',
+            app_name + '-baseline', app_name,
+            config['min_replicas'], max_replicas, config['scale_down_seconds'],
+        )
+    elif autoscaler == 'hpa' and (method == 'proposed' or comparison == 'placement'):
+        hpa_path = _render_hpa(
+            'autoscaler/hpa-proposed.yaml', root / f'{method}-hpa.yaml',
+            f'{app_name}-{method}', app_name,
+            config['min_replicas'], max_replicas, config['scale_down_seconds'], slo_ms=slo_ms,
+        )
     return config, config_path, hpa_path
 
 
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
-               resource_weights=None, locality_weight=None):
+               resource_weights=None, locality_weight=None, comparison='full',
+               autoscaler='controller', placement_engine='python'):
+    if placement_engine not in PLACEMENT_ENGINES:
+        raise ValueError(f'placement_engine must be one of {PLACEMENT_ENGINES}')
     output = root / method
     output.mkdir()
     config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
-                                                  resource_weights, locality_weight, selected_workload(settings))
+                                                  resource_weights, locality_weight, selected_workload(settings),
+                                                  comparison, autoscaler)
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
     completed = False
+    incluster_go = placement_engine == 'go' and method == 'proposed'
+    method_start_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     with (output / 'controller.log').open('x') as control_log, (output / 'sampler.log').open('x') as sampler_log, (output / 'runner-ssh.log').open('x') as runner_log:
         try:
-            if method == 'baseline':
-                kube('apply', '-f', root / 'workload.yaml')
+            if incluster_go:
+                cm = _render_incluster_placement_configmap(config, config['manifest'])
+                cm_path = output / 'placement-configmap.yaml'
+                with cm_path.open('x') as stream:
+                    yaml.safe_dump(cm, stream, sort_keys=False)
+                kube('apply', '-f', str(cm_path))
+                kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'restart', 'deployment/placement-controller')
+                kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'status', 'deployment/placement-controller', '--timeout=120s')
+                placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
+                if placement_dep.get('status', {}).get('readyReplicas') != 1:
+                    raise RuntimeError('placement/placement-controller is not ready before workload deployment')
+            if hpa_path is not None:
+                kube('apply', '-f', config['manifest'])
                 kube('apply', '-f', hpa_path)
-            else:
-                processes.append(subprocess.Popen([sys.executable, '-u', '-m', 'controller', '--config', str(config_path), '--deploy'], stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    if processes[0].poll() is not None:
-                        raise RuntimeError('controller startup failed; see controller.log')
-                    check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
-                    if check.stdout.strip():
-                        break
-                    time.sleep(1)
+            if placement_engine == 'python' and (method == 'proposed' or (comparison == 'placement' and autoscaler == 'controller')):
+                cmd = [sys.executable, '-u', '-m', 'controller', '--config', str(config_path)]
+                if hpa_path is None:
+                    cmd.append('--deploy')
                 else:
-                    raise RuntimeError('controller did not deploy the workload')
+                    cmd.append('--placement-only')
+                processes.append(subprocess.Popen(cmd, stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
+                if hpa_path is None:
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        if processes[0].poll() is not None:
+                            raise RuntimeError('controller startup failed; see controller.log')
+                        check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
+                        if check.stdout.strip():
+                            break
+                        time.sleep(1)
+                    else:
+                        raise RuntimeError('controller did not deploy the workload')
             kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
             service = get('service', app)
             check_service_routing(service)
@@ -392,8 +552,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                          for site, address in settings['site_node_ips'].items()}
             if delay is not None:
                 delay.check()
-            command([sys.executable, '-m', 'experiments.preflight', '--config', config_path])
-            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'experiments.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
+            command([sys.executable, '-m', 'utils.preflight', '--config', config_path])
+            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(sampler)
             payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
                        'schedule': settings['schedule'], 'duration': settings['phase_duration']}
@@ -410,7 +570,9 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                 if any(p.poll() is not None for p in processes):
                     raise RuntimeError('controller or sampler exited during traffic; see logs')
                 if not verified:
-                    verified = active_telemetry(config['prometheus_url'])
+                    prom_ok = active_telemetry(config['prometheus_url'])
+                    adapter_ok = True if autoscaler != 'hpa' else bool(_query_external_latency_metric(allow_not_found=True))
+                    verified = prom_ok and adapter_ok
                     if verified:
                         print(f'{method}: active UE latency telemetry verified', flush=True)
                     elif time.monotonic() > deadline:
@@ -421,8 +583,18 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                 raise RuntimeError(f'UE workload failed ({ue.returncode}); see runner-ssh.log')
             if not verified:
                 raise RuntimeError('UE workload ended without valid active telemetry')
+            if incluster_go:
+                placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
+                if placement_dep.get('status', {}).get('readyReplicas') != 1:
+                    raise RuntimeError('placement/placement-controller became unready during traffic')
             completed = True
         finally:
+            if incluster_go:
+                try:
+                    kube('-n', PLACEMENT_NAMESPACE, 'logs', 'deployment/placement-controller',
+                         f'--since-time={method_start_iso}', stdout=control_log)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    control_log.write(f'failed to fetch in-cluster placement-controller logs: {exc}\n')
             try:
                 if remote_started and not completed:
                     command(remote(settings, ['sudo', '-n', '.venv/bin/python', '-m', 'experiments.campaign_ue', 'stop', '--campaign', campaign, '--method', method]))
@@ -439,9 +611,9 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     with (output / 'deployments-after.json').open('x') as stream:
         kube('-n', NAMESPACE, 'get', 'deployments,pods,hpa', '-o', 'json', stdout=stream)
     transfer(settings, campaign, method, output)
-    command([sys.executable, '-m', 'experiments.summarize', output / 'requests.jsonl', '--slo-ms', str(slo_ms)])
-    command([sys.executable, '-m', 'experiments.monitor_resources', 'summarize', output / 'metrics.jsonl', output / 'requests.jsonl', output / 'summary.csv', output])
-    command([sys.executable, '-m', 'experiments.telemetry_history', output / 'requests.jsonl', output, '--prometheus-url', config['prometheus_url']])
+    command([sys.executable, '-m', 'utils.summarize', output / 'requests.jsonl', '--slo-ms', str(slo_ms)])
+    command([sys.executable, '-m', 'utils.monitor_resources', 'summarize', output / 'metrics.jsonl', output / 'requests.jsonl', output / 'summary.csv', output])
+    command([sys.executable, '-m', 'utils.telemetry_history', output / 'requests.jsonl', output, '--prometheus-url', config['prometheus_url']])
 
 
 def main(argv=None):
@@ -449,6 +621,12 @@ def main(argv=None):
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or face-detection)')
+    parser.add_argument('--comparison', choices=COMPARISONS, default='full',
+                        help='placement: same latency autoscaler for both methods; full: default-scheduler+CPU HPA vs full proposed system')
+    parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
+                        help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter) or controller (Python fallback)')
+    parser.add_argument('--placement-engine', choices=PLACEMENT_ENGINES, default='go',
+                        help='scheduler/descheduler runtime for proposed method: go (in-cluster Deployment) or python (host fallback)')
     parser.add_argument('--plan-only', type=Path, metavar='DIRECTORY',
                         help='write workload/controller/HPA manifests locally without any probes or cluster access')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
@@ -513,13 +691,19 @@ def main(argv=None):
         _campaign_manifest(output, args.tc_ms is not None, workload)
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
-                            resource_weights, locality_weight, workload)
+                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler)
         (output / 'plan.yaml').write_text(yaml.safe_dump({
-            'workload': workload, 'slo_ms': slo_ms, 'calibrated': False,
+            'workload': workload, 'comparison': args.comparison,
+            'autoscaler': args.autoscaler,
+            'placement_engine': args.placement_engine,
+            'attribution_note': COMPARISON_NOTES[args.comparison],
+            'slo_ms': slo_ms, 'calibrated': False,
             'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
             'campaign_settings': settings}, sort_keys=False))
         print(f'Offline plan written: {output}; no cluster access or traffic started.')
         return
+    if args.placement_engine == 'go' and args.autoscaler != 'hpa':
+        parser.error('--placement-engine go requires --autoscaler hpa (no Python controller process)')
     with open('/tmp/mec-experiment-campaign.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         def interrupted(signum, frame):
@@ -527,7 +711,7 @@ def main(argv=None):
         signal.signal(signal.SIGTERM, interrupted)
         if not args.check:
             check_result_name(settings, args.campaign)
-        prerequisites(settings)
+        prerequisites(settings | {'_autoscaler': args.autoscaler, '_placement_engine': args.placement_engine})
         if args.check:
             return
         root = ROOT / 'results' / args.campaign
@@ -537,6 +721,10 @@ def main(argv=None):
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
                                        'max_replicas': max_replicas, 'debug': args.debug, 'workload': workload,
+                                       'comparison': args.comparison,
+                                       'autoscaler': args.autoscaler,
+                                       'placement_engine': args.placement_engine,
+                                       'attribution_note': COMPARISON_NOTES[args.comparison],
                                        'resource_weights': resource_weights,
                                        'locality_weight': locality_weight}, stream)
         phases = parse_schedule(settings['schedule'])
@@ -565,8 +753,9 @@ def main(argv=None):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset(workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
-                           resource_weights, locality_weight)
-            command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
+                           resource_weights, locality_weight, args.comparison,
+                           args.autoscaler, args.placement_engine)
+            command([sys.executable, '-m', 'utils.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:
                 reset(workload)
