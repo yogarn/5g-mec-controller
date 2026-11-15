@@ -32,6 +32,7 @@ class Settings:
     vram_utilization_query: str | None
     zero_locality_nodes: tuple[str, ...]
     deschedule_interval_seconds: float
+    scale_up_cooldown_seconds: float = 15
 
 
 def load_settings(path: str) -> Settings:
@@ -46,7 +47,7 @@ def load_settings(path: str) -> Settings:
                'locality_weight', 'cooldown_seconds', 'max_metric_age_seconds',
                'scale_down_seconds', 'resource_weights', 'gpu_nodes',
                'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes',
-               'deschedule_interval_seconds'}
+               'deschedule_interval_seconds', 'scale_up_cooldown_seconds'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
     for key in ('manifest', 'prometheus_url', 'latency_query', 'slo_seconds', 'min_replicas', 'max_replicas', 'mode'):
@@ -116,7 +117,8 @@ def load_settings(path: str) -> Settings:
                     number('max_metric_age_seconds', 120, 0),
                     number('scale_down_seconds', 180, 0), resource_weights, tuple(gpu_nodes),
                     data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
-                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0))
+                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0),
+                    number('scale_up_cooldown_seconds', 15, 0))
 
 
 def workload_identity(path: Path, namespace: str | None) -> tuple[str, str]:

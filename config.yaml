@@ -33,6 +33,7 @@ slo_seconds: 0.5
 min_replicas: 1
 max_replicas: 100
 interval_seconds: 10
+scale_up_cooldown_seconds: 15
 mode: mobility-aware
 mutate: false
 eligible_nodes: [gnb1, gnb-2, gnb-3, core-5g]

@@ -207,22 +207,16 @@ def test_batch_scale_up_resumes_without_cooldown_or_readiness(world):
     assert sum(state['targets'].values()) == 3
     assert state['original'] == 1
     original['metadata']['annotations'] = {MIGRATION_ANNOTATION: json.dumps(state)}
-    children = []
-    for node in controller.settings.eligible_nodes:
-        if not state['targets'][node]:
-            continue
-        observe(children, pending=True)
-        apps.create_namespaced_deployment.reset_mock()
-        controller.run_once()
-        assert apps.create_namespaced_deployment.call_count == 1
-        child = group(controller, original, node, 0)
-        children.append(child)
-        observe(children, pending=True)
-        apps.patch_namespaced_deployment.reset_mock()
-        controller.run_once()
-        assert apps.patch_namespaced_deployment.call_args.args[0] == child['metadata']['name']
-        assert apps.patch_namespaced_deployment.call_args.args[2]['spec']['replicas'] == state['targets'][node]
-        child['spec']['replicas'] = state['targets'][node]
+    # Both node groups are created at their final batch counts in one pass.
+    state['targets'] = {'a': 2, 'b': 1}
+    original['metadata']['annotations'][MIGRATION_ANNOTATION] = json.dumps(state)
+    observe([], pending=True)
+    apps.create_namespaced_deployment.reset_mock()
+    controller.run_once()
+    created = [call.args[1] for call in apps.create_namespaced_deployment.call_args_list]
+    assert len(created) == 2
+    assert sorted(d['spec']['replicas'] for d in created) == [1, 2]
+    children = [group(controller, original, node, count) for node, count in state['targets'].items()]
     observe(children, pending=True)
     apps.patch_namespaced_deployment.reset_mock()
     controller.run_once()
@@ -240,6 +234,39 @@ def test_batch_scale_up_rejects_external_replica_change(world):
     with pytest.raises(ValueError, match='changed externally'):
         controller.run_once()
     apps.patch_namespaced_deployment.assert_not_called()
+
+
+def test_batch_scale_up_retries_only_unapplied_nodes_after_api_failure(world):
+    controller, original, apps, _, _, _, observe = world
+    controller.settings.max_replicas = 10
+    state = {'kind': 'batch-scale-up', 'original': 1,
+             'before': {'a': 0, 'b': 0}, 'targets': {'a': 2, 'b': 1}}
+    original['metadata']['annotations'] = {MIGRATION_ANNOTATION: json.dumps(state)}
+    apps.create_namespaced_deployment.side_effect = [None, RuntimeError('API unavailable')]
+    with pytest.raises(RuntimeError, match='API unavailable'):
+        controller.run_once()
+    assert apps.create_namespaced_deployment.call_count == 2
+    observe([group(controller, original, 'a', 2)], pending=True)
+    apps.create_namespaced_deployment.reset_mock()
+    apps.create_namespaced_deployment.side_effect = None
+    controller.run_once()
+    apps.create_namespaced_deployment.assert_called_once()
+    assert apps.create_namespaced_deployment.call_args.args[1]['spec']['replicas'] == 1
+
+
+@pytest.mark.parametrize('elapsed,allowed', [(10, False), (20, True)])
+def test_scale_up_uses_short_cooldown_instead_of_general_cooldown(world, elapsed, allowed):
+    controller, original, apps, _, _, prom, _ = world
+    controller.settings.cooldown_seconds = 120
+    controller.settings.scale_up_cooldown_seconds = 15
+    controller.last_action = 100 - elapsed
+    prom.scalar.return_value = 2
+    with patch('controller.reconcile.time.monotonic', return_value=100):
+        controller.run_once()
+    assert apps.patch_namespaced_deployment.called is allowed
+    if allowed:
+        state = json.loads(apps.patch_namespaced_deployment.call_args.args[2]['metadata']['annotations'][MIGRATION_ANNOTATION])
+        assert state['kind'] == 'batch-scale-up'
 
 
 def test_periodic_descheduling_waits_until_next_check(world):

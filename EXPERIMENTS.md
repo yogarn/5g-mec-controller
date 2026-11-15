@@ -32,7 +32,8 @@ The debug profile retains all 19 phases, using 90 seconds each: 28.5 minutes per
 | Timing | Normal | Debug |
 |---|---:|---:|
 | Controller reconciliation | 10 s | 5 s |
-| Controller cooldown | 120 s | 15 s |
+| Scale-up cooldown | 15 s | 15 s |
+| Other-action cooldown | 120 s | 15 s |
 | Proposed scale-down stabilization | 180 s | 30 s |
 | Descheduler check | 120 s | 30 s |
 | Node CPU rate window | 120 s | 30 s |
@@ -174,3 +175,5 @@ UE switching is stop-and-reattach, **not handover**. This is closed-loop traffic
 Locality is relative request-attempt demand: `site attempts / total attempts`. Its 40% score contribution is unchanged by assigning another replica until observed demand changes; resource headroom is recomputed after each proposed addition. This is a site-demand preference, not residual demand per replica. The CPU-only resource score uses 50% CPU and 50% RAM, with GPU and VRAM weights zero.
 
 Descheduling uses `delta = best feasible target score after adding the Pod - current node score`, and acts only when the largest delta is positive. Node-name order breaks ties. This adapts the maximum-score-improvement selection described by Marchese and Tomarchio in [Enhancing the Kubernetes Platform with a Load-Aware Orchestration Strategy](https://doi.org/10.1007/s42979-025-03712-z); our resource/locality score and Deployment-based removal/replacement mechanism differ from their scheduler/descheduler implementation. Replicas of this homogeneous service on the same node have equal scores. The original default-scheduled Pod is retained unless another node offers a positive delta; it is not recreated merely to normalize ownership. If original replicas span multiple nodes, only the pinned groups are eligible for descheduling, because Deployment scale-down cannot select a particular original Pod. After removal, an unavailable destination is retried without clearing the durable replacement obligation.
+
+Scale-up applies every node Deployment target in a durable batch during the same reconciliation, creating new groups directly at their target counts. API requests are issued sequentially in that pass, without waiting for Pod readiness between nodes. Partial batches resume without repeating completed increases; a fresh scaling decision still waits for ready, settled Pods. `scale_up_cooldown_seconds` defaults to 15 seconds, independently of the general cooldown. Decision logs report latency, desired/ready/pending counts, batch targets and wait reasons. Descheduling still relocates one replica at a time.
