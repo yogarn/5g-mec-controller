@@ -32,7 +32,7 @@ latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 slo_seconds: 0.5
 min_replicas: 1
 max_replicas: 100
-interval_seconds: 10
+interval_seconds: 5
 scale_up_cooldown_seconds: 15
 mode: mobility-aware
 mutate: false

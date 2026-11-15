@@ -27,11 +27,11 @@ For faster debugging, use a separate campaign name and `--debug`:
 bash experiments/run.sh debug_01 --debug --tc-ms 10 --slo-ms 300 --max-replicas 30
 ```
 
-The debug profile retains all 19 phases, using 90 seconds each: 28.5 minutes per method or 57 minutes per pair, plus UE reattachment, startup and transfer. `--phase-duration 60` reduces paired traffic to 38 minutes; the CLI requires at least 60 seconds. A duration override alone does not change controller timers. Normal runs retain the configured 300-second phases and original controller timers.
+The debug profile retains all 19 phases, using 60 seconds each: 19 minutes per method or 38 minutes per pair, plus UE reattachment, startup and transfer. `--phase-duration` can increase the phase duration; the CLI requires at least 60 seconds. A duration override alone does not change controller timers. Normal runs retain the configured 300-second phases and original controller timers.
 
 | Timing | Normal | Debug |
 |---|---:|---:|
-| Controller reconciliation | 10 s | 5 s |
+| Controller reconciliation | 5 s | 5 s |
 | Scale-up cooldown | 15 s | 15 s |
 | Other-action cooldown | 120 s | 15 s |
 | Proposed scale-down stabilization | 180 s | 30 s |
@@ -177,3 +177,16 @@ Locality is relative request-attempt demand: `site attempts / total attempts`. I
 Descheduling uses `delta = best feasible target score after adding the Pod - current node score`, and acts only when the largest delta is positive. Node-name order breaks ties. This adapts the maximum-score-improvement selection described by Marchese and Tomarchio in [Enhancing the Kubernetes Platform with a Load-Aware Orchestration Strategy](https://doi.org/10.1007/s42979-025-03712-z); our resource/locality score and Deployment-based removal/replacement mechanism differ from their scheduler/descheduler implementation. Replicas of this homogeneous service on the same node have equal scores. The original default-scheduled Pod is retained unless another node offers a positive delta; it is not recreated merely to normalize ownership. If original replicas span multiple nodes, only the pinned groups are eligible for descheduling, because Deployment scale-down cannot select a particular original Pod. After removal, an unavailable destination is retried without clearing the durable replacement obligation.
 
 Scale-up applies every node Deployment target in a durable batch during the same reconciliation, creating new groups directly at their target counts. API requests are issued sequentially in that pass, without waiting for Pod readiness between nodes. Partial batches resume without repeating completed increases; a fresh scaling decision still waits for ready, settled Pods. `scale_up_cooldown_seconds` defaults to 15 seconds, independently of the general cooldown. Decision logs report latency, desired/ready/pending counts, batch targets and wait reasons. Descheduling still relocates one replica at a time.
+
+Placement scoring can be configured per campaign without editing `config.yaml`:
+
+```bash
+# CPU-only resource component, retaining the default 40% locality contribution:
+bash experiments/run.sh debug_cpu_01 --debug --slo-ms 500 --tc-ms 10 --max-replicas 30 --resource-weights 1 0 0 0
+# CPU/RAM component with no locality contribution:
+bash experiments/run.sh debug_resource_01 --debug --slo-ms 500 --tc-ms 10 --max-replicas 30 --resource-weights 0.5 0.5 0 0 --locality-weight 0
+```
+
+`--resource-weights CPU MEMORY GPU VRAM` requires four finite nonnegative numbers summing to 1. These are weights *inside* the resource component. `--locality-weight L` selects the traffic-share contribution; the resource contribution is `1-L`. Both flags affect proposed placement/descheduling, not the baseline HPA or default scheduler. Enabling GPU/VRAM weights requires valid exporter telemetry. Effective weights are printed and saved in campaign metadata and generated controller configs. Weights cannot make an infeasible node eligible or guarantee equal Pod counts. Keep matched comparisons and change one scoring factor per experiment.
+
+Controller reconciliation is 5 seconds in both profiles, matching the inspected UE-telemetry scrape interval. Node metrics remain scraped every second. This is configured timing, not phase-lock synchronization: a controller check can still precede a scrape. The runner does not change the live Prometheus scrape configuration.

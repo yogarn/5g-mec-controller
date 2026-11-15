@@ -181,6 +181,39 @@ def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp
     assert hpa['spec']['metrics'][0]['resource']['target']['averageValue'] == '1000m'
 
 
+def test_debug_cli_uses_60_second_phases(monkeypatch):
+    observed = []
+    monkeypatch.setattr(campaign, 'prerequisites', lambda settings: observed.append(settings.copy()))
+    campaign.main(['--check', '--debug'])
+    assert observed[0]['phase_duration'] == 60
+
+
+def test_custom_weights_are_saved_without_changing_source_config(tmp_path):
+    before = (campaign.ROOT / 'config.yaml').read_bytes()
+    weights = {'cpu': 1., 'memory': 0., 'gpu': 0., 'vram': 0.}
+    config, path, _ = campaign._method_configs(tmp_path, 'proposed', 500, 30,
+                                              resource_weights=weights, locality_weight=0.)
+    saved = yaml.safe_load(path.read_text())
+    assert saved['resource_weights'] == config['resource_weights'] == weights
+    assert saved['locality_weight'] == 0
+    assert saved['interval_seconds'] == 5
+    assert (campaign.ROOT / 'config.yaml').read_bytes() == before
+
+
+@pytest.mark.parametrize('options', [
+    ['--resource-weights', '0', '0', '0', '0'],
+    ['--resource-weights', '1', '1', '0', '0'],
+    ['--resource-weights', 'nan', '0', '0', '0'],
+    ['--resource-weights', '-1', '2', '0', '0'],
+    ['--locality-weight', '1.1'], ['--locality-weight', 'nan'],
+])
+def test_invalid_weights_fail_before_preflight(monkeypatch, options):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('preflight ran'))
+    with pytest.raises(SystemExit) as error:
+        campaign.main(['debug_test', *options])
+    assert error.value.code == 2
+
+
 @pytest.mark.parametrize('duration', ['0', '59', 'nan', 'inf'])
 def test_cli_rejects_short_or_invalid_phases_before_preflight(monkeypatch, duration):
     monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('preflight ran'))

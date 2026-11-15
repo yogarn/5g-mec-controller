@@ -20,6 +20,7 @@ from urllib.request import urlopen
 import yaml
 from benchmark.client import parse_schedule
 from experiments.traffic_control import POOL_NAME, TrafficDelay
+from controller.policy import validate_resource_weights
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
@@ -233,11 +234,17 @@ def _campaign_manifest(root, use_tc):
 
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None):
     """Persist the exact matched replica budget and manifests used by a method."""
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
         raise ValueError('max replicas must be an integer at least min_replicas')
+    if resource_weights is not None:
+        config['resource_weights'] = validate_resource_weights(resource_weights)
+    if locality_weight is not None:
+        if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
+            raise ValueError('locality weight must be between 0 and 1')
+        config['locality_weight'] = locality_weight
     config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed',
                   slo_seconds=slo_ms / 1000, max_replicas=max_replicas)
     if debug:
@@ -259,10 +266,12 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False):
     return config, config_path, hpa_path
 
 
-def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False):
+def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
+               resource_weights=None, locality_weight=None):
     output = root / method
     output.mkdir()
-    config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug)
+    config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
+                                                  resource_weights, locality_weight)
     processes = []
     remote_started = False
     completed = False
@@ -353,9 +362,14 @@ def main(argv=None):
     parser.add_argument('--max-replicas', type=int,
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
     parser.add_argument('--debug', action='store_true',
-                        help='90s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
+                        help='60s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
     parser.add_argument('--phase-duration', type=float,
-                        help='traffic seconds per phase (minimum 60; default: campaign config, or 90 with --debug)')
+                        help='traffic seconds per phase (minimum 60; default: campaign config, or 60 with --debug)')
+    parser.add_argument('--resource-weights', nargs=4, type=float,
+                        metavar=('CPU', 'MEMORY', 'GPU', 'VRAM'),
+                        help='proposed resource-score weights, nonnegative and summing to 1')
+    parser.add_argument('--locality-weight', type=float,
+                        help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     args = parser.parse_args(argv)
     if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
         parser.error('--tc-ms must be finite and at least 0.001 ms')
@@ -369,10 +383,20 @@ def main(argv=None):
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
     if args.debug:
-        settings['phase_duration'] = 90
+        settings['phase_duration'] = 60
     if args.phase_duration is not None:
         settings['phase_duration'] = args.phase_duration
     controller_config = yaml.safe_load((ROOT / 'config.yaml').read_text())
+    try:
+        resource_weights = validate_resource_weights(
+            dict(zip(('cpu', 'memory', 'gpu', 'vram'), args.resource_weights))
+            if args.resource_weights is not None else controller_config['resource_weights'])
+    except ValueError as exc:
+        parser.error(str(exc))
+    locality_weight = (args.locality_weight if args.locality_weight is not None
+                       else controller_config.get('locality_weight', .4))
+    if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
+        parser.error('--locality-weight must be finite and between 0 and 1')
     slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
     max_replicas = args.max_replicas if args.max_replicas is not None else controller_config['max_replicas']
     if max_replicas < controller_config['min_replicas']:
@@ -389,13 +413,17 @@ def main(argv=None):
         command(remote(settings, ['test', '!', '-e', f'results/{args.campaign}']))
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
-                                       'max_replicas': max_replicas, 'debug': args.debug}, stream)
+                                       'max_replicas': max_replicas, 'debug': args.debug,
+                                       'resource_weights': resource_weights,
+                                       'locality_weight': locality_weight}, stream)
         phases = parse_schedule(settings['schedule'])
         minutes = len(phases) * settings['phase_duration'] / 60
         print(f'Campaign: {len(phases)} phases per method, {settings["phase_duration"]:g}s each; '
               f'{minutes:g} minutes traffic per method ({2 * minutes:g} minutes total), '
               'plus UE switching, setup and transfer. Objective: all-attempt p90 '
               f'<= {slo_ms:g} ms. Shared replica ceiling: {max_replicas}.', flush=True)
+        print(f'Proposed scoring: resource weights={resource_weights}; '
+              f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
         if args.debug:
             print('DEBUG profile: 15s collector window retained; controller interval 5s, '
                   'cooldown 15s, scale-down stabilization 30s, descheduler 30s, '
@@ -416,7 +444,8 @@ def main(argv=None):
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset()
-                run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug)
+                run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
+                           resource_weights, locality_weight)
             command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:
