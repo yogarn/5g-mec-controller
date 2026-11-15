@@ -164,9 +164,9 @@ def test_default_campaign_has_matched_ascending_and_descending_phases():
     settings = yaml.safe_load((campaign.ROOT / 'experiments/campaign.yaml').read_text())
     phases = parse_schedule(settings['schedule'])
     counts = [tuple(p[f'gnb{i}_ues'] for i in (1, 2, 3)) for p in phases]
-    assert len(phases) == 19
-    assert counts[:9] == list(reversed(counts[10:]))
-    assert settings['phase_duration'] == 300
+    assert len(phases) == 13
+    assert counts[:6] == list(reversed(counts[7:]))
+    assert settings['phase_duration'] == 60
 
 
 @pytest.mark.parametrize('cap', [1, 3, 8, 100])
