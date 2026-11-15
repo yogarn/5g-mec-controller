@@ -248,3 +248,7 @@ bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-re
 ```
 
 `utils/summarize.py` writes `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` across `summary.csv` (by phase), `summary-sites.csv` (by phase and gNB site), and `summary-ues.csv` (by phase and UE). `utils/plot_autoscaler.py` plots request coverage alongside SLO violations in `slo-violations.{png,pdf}`.
+
+### Short calibration command
+
+On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one balanced `9:3:3:3` phase per method with six replicas, 10 ms TC, 5 RPS/UE, and 60-second phases. This reuses campaign preflight, collection, and cleanup. Choose a fresh name on each run. Other campaign flags can override the defaults. Preview without traffic using `.venv/bin/python -m utils.calibrate_mobility --plan-only /tmp/calibration-plan`.
