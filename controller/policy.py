@@ -16,35 +16,37 @@ class Node:
 
 
 class LatencyRatioPolicy:
-    """Scale by the latency/SLO ratio, stabilizing sustained scale-down."""
+    """Scale by the latency/SLO ratio using HPA-style sliding-window scale-down stabilization."""
 
     def __init__(self, down_seconds):
         self.down_seconds = down_seconds
-        self.down_since = None
+        self._recommendations = []
+
+    def _prune(self, now):
+        self._recommendations = [
+            (ts, rec) for ts, rec in self._recommendations
+            if now - ts < self.down_seconds
+        ]
 
     def target(self, replicas, ready, latency, slo, minimum, maximum, now):
         if (not all(math.isfinite(v) for v in (latency, slo, now)) or
                 latency <= 0 or slo <= 0 or replicas < 1 or
                 ready < 0 or ready > replicas):
-            self.down_since = None
             raise ValueError('invalid scaling input')
+        self._prune(now)
         if ready != replicas:
-            self.down_since = None
             return replicas
         ratio = latency / slo
         desired = maximum if ratio >= maximum / replicas else max(
             minimum, math.ceil(ratio * replicas))
+        self._recommendations.append((now, desired))
         if desired >= replicas:
-            self.down_since = None
             return desired
-        if self.down_since is None:
-            self.down_since = now
-        if now - self.down_since < self.down_seconds:
-            return replicas
-        return desired
+        stabilized = max(rec for _, rec in self._recommendations)
+        return min(replicas, stabilized)
 
     def action_applied(self, now):
-        self.down_since = None
+        """Retain recommendation history across scaling actions, matching HPA."""
 
 
 DEFAULT_RESOURCE_WEIGHTS = {'cpu': .5, 'memory': .5, 'gpu': 0., 'vram': 0.}

@@ -42,7 +42,6 @@ def main():
         try:
             controller.run_once()
         except Exception as exc:
-            controller.policy.down_since = None
             logging.error('Reconciliation failed: %s', exc)
             if args.once:
                 raise SystemExit(1) from None

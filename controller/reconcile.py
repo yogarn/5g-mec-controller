@@ -395,16 +395,12 @@ class Reconciler:
             self.policy.action_applied(time.monotonic())
             self.last_action = time.monotonic()
             return
-        try:
-            latency = self.prometheus.scalar(s.latency_query)
-            ready = sum(d.get('status', {}).get('readyReplicas', 0) for d in managed.values())
-            desired = self.policy.target(replicas, min(ready, replicas), latency, s.slo_seconds,
-                                         s.min_replicas, maximum, time.monotonic())
-            placement = plan_placement(nodes, request, candidate_counts, sum(candidate_counts.values()),
-                                       s.cpu_saturation, s.locality_weight, s.resource_weights)
-        except Exception:
-            self.policy.down_since = None
-            raise
+        latency = self.prometheus.scalar(s.latency_query)
+        ready = sum(d.get('status', {}).get('readyReplicas', 0) for d in managed.values())
+        desired = self.policy.target(replicas, min(ready, replicas), latency, s.slo_seconds,
+                                     s.min_replicas, maximum, time.monotonic())
+        placement = plan_placement(nodes, request, candidate_counts, sum(candidate_counts.values()),
+                                   s.cpu_saturation, s.locality_weight, s.resource_weights)
         if not s.mutate:
             LOG.info('mobility dry run replicas=%s target=%s placement=%s', replicas, desired, placement)
             return
@@ -518,13 +514,9 @@ class Reconciler:
         if any(h.get('spec', {}).get('scaleTargetRef', {}).get('kind') == 'Deployment' and
                h['spec']['scaleTargetRef'].get('name') == self.name for h in hpas):
             raise ValueError('an HPA targets this Deployment; refusing to compete for replicas')
-        try:
-            latency = self.prometheus.scalar(s.latency_query)
-            target = self.policy.target(replicas, ready, latency, s.slo_seconds,
-                                        s.min_replicas, s.max_replicas, time.monotonic())
-        except Exception:
-            self.policy.down_since = None
-            raise
+        latency = self.prometheus.scalar(s.latency_query)
+        target = self.policy.target(replicas, ready, latency, s.slo_seconds,
+                                    s.min_replicas, s.max_replicas, time.monotonic())
         patch = {'metadata': {'resourceVersion': metadata['resourceVersion']}}
         changes = {}
         if target != replicas:

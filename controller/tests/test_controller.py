@@ -108,15 +108,18 @@ class PolicyTests(unittest.TestCase):
         policy = LatencyRatioPolicy(20)
         self.assertEqual(policy.target(2, 2, 2, 1, 1, 4, 0), 4)
         self.assertEqual(policy.target(2, 2, 100, 1, 1, 4, 1), 4)
-        self.assertEqual(policy.target(3, 2, .2, 1, 1, 4, 20), 3)
-        self.assertEqual(policy.target(3, 3, .2, 1, 1, 4, 21), 3)
-        self.assertEqual(policy.target(3, 3, .2, 1, 1, 4, 40), 3)
-        self.assertEqual(policy.target(3, 3, .2, 1, 1, 4, 41), 1)
-        policy.action_applied(41)
-        self.assertEqual(policy.target(3, 3, .2, 1, 1, 4, 42), 3)
+        self.assertEqual(policy.target(4, 3, .2, 1, 1, 4, 10), 4)
+        self.assertEqual(policy.target(4, 4, .5, 1, 1, 4, 15), 4)
+        self.assertEqual(policy.target(4, 4, .2, 1, 1, 4, 20), 4)
+        # Once (0, 4) and (1, 4) expire at t=21, window max drops to 2 from t=15.
+        self.assertEqual(policy.target(4, 4, .2, 1, 1, 4, 21), 2)
+        policy.action_applied(21)
+        # History is preserved across action_applied; at t=35 (15, 2) expires so target drops to 1.
+        self.assertEqual(policy.target(2, 2, .2, 1, 1, 4, 34), 2)
+        self.assertEqual(policy.target(2, 2, .2, 1, 1, 4, 35), 1)
         with self.assertRaises(ValueError):
-            policy.target(2, 2, float('nan'), 1, 1, 4, 43)
-        self.assertEqual(policy.target(3, 3, .2, 1, 1, 4, 44), 3)
+            policy.target(2, 2, float('nan'), 1, 1, 4, 36)
+        self.assertEqual(policy.target(2, 2, .2, 1, 1, 4, 37), 1)
 
     def test_capacity_saturation_and_locality(self):
         nodes = [Node('a', {'cpu': 4, 'memory': 8}, {'cpu': 1, 'memory': 2}, .2, 8),

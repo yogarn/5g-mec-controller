@@ -8,7 +8,6 @@ from controller import __main__ as cli
 class ControllerCLITests(unittest.TestCase):
     def test_once_failure_reports_error_without_traceback(self):
         reconciler = Mock()
-        reconciler.policy = SimpleNamespace(down_since=1)
         reconciler.run_once.side_effect = ValueError('latency unavailable')
         with patch('sys.argv', ['controller', '--once']), \
              patch.object(cli, 'load_settings', return_value=SimpleNamespace(manifest='m', namespace=None, prometheus_url='http://localhost', max_metric_age_seconds=10)), \
@@ -21,7 +20,6 @@ class ControllerCLITests(unittest.TestCase):
         self.assertEqual(result.exception.code, 1)
         self.assertIn('latency unavailable', logs.output[0])
         self.assertNotIn('Traceback', logs.output[0])
-        self.assertIsNone(reconciler.policy.down_since)
         deploy.assert_not_called()
 
     def test_deploy_requires_mutate_before_cluster_access(self):
