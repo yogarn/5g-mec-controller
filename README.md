@@ -113,3 +113,24 @@ To run the proposed system outside an experiment campaign (assuming Section 1 on
    kubectl get hpa -w
    kubectl -n placement logs -f deploy/placement-controller
    ```
+
+## Rebuild and redeploy the Go scheduler
+
+After pulling scheduler changes on **core-5g**, run:
+
+```bash
+cd ~/skripsi_yoga/5g-mec-controller
+.venv/bin/python -m utils.redeploy_placement
+```
+
+The helper builds `placement/Dockerfile`, pushes a unique image tag via `localhost:30500`, resolves its published SHA-256 digest, updates the existing `placement/placement-controller` Deployment to pull that digest via `10.34.211.140:30500`, waits for rollout, and verifies one updated, ready replica. Docker and kubectl must already work for the current user. For first-time installation, use the setup instructions above; this helper expects the Deployment and ConfigMap to exist.
+
+The current scheduler ConfigMap is preserved. The script shares the campaign lock and refuses to redeploy during an active campaign. It does not start an experiment or change UE pacing. On failure it exits nonzero; inspect `kubectl -n placement logs deployment/placement-controller` and Deployment status before retrying. The previous image is printed before the update; rollback is available through `kubectl -n placement rollout undo deployment/placement-controller`.
+
+Preview commands without building, pushing, or accessing the cluster:
+
+```bash
+.venv/bin/python -m utils.redeploy_placement --plan-only
+```
+
+Override registry addresses with `--push-repository` and `--pull-repository` only when both refer to the same registry repository. Both arguments omit the tag/digest. `--timeout` sets the rollout timeout in seconds (default 180).
