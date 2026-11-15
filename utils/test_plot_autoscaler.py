@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from utils.plot_autoscaler import load_slo
+from utils.plot_autoscaler import load_coverage, load_slo
 
 
 def write_summary(root, method, rows):
@@ -40,3 +40,19 @@ def test_slo_violations_reject_more_met_than_attempts(tmp_path):
         write_summary(tmp_path, method, rows)
     with pytest.raises(ValueError, match='exceeds attempts'):
         load_slo(tmp_path, ['one'], 500)
+
+
+def test_load_coverage_computes_completed_over_scheduled(tmp_path):
+    for method, rows in [
+        ('baseline', [{'phase': 'one', 'attempts': 8, 'scheduled': 10, 'completed': 8}]),
+        ('proposed', [{'phase': 'one', 'attempts': 10, 'scheduled': 10, 'completed': 10}]),
+    ]:
+        directory = tmp_path / method
+        directory.mkdir()
+        with (directory / 'summary.csv').open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=['phase', 'attempts', 'scheduled', 'completed'])
+            writer.writeheader()
+            writer.writerows(rows)
+    cov = load_coverage(tmp_path, ['one'])
+    assert cov['baseline'] == [80.0]
+    assert cov['proposed'] == [100.0]

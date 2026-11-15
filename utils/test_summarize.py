@@ -194,7 +194,7 @@ class SummaryTests(unittest.TestCase):
         with redirect_stdout(stdout):
             summarize.main([str(self.source), '--output-prefix', str(self.prefix)])
         output = stdout.getvalue()
-        self.assertIn('1 phase(s) and 2 per-UE result(s)', output)
+        self.assertIn('1 phase(s), 3 per-site result(s), and 2 per-UE result(s)', output)
         for suffix in ('.json', '.csv', '-ues.json', '-ues.csv'):
             self.assertIn(f'{self.prefix}{suffix}', output)
             self.assertTrue(Path(f'{self.prefix}{suffix}').is_file())
@@ -225,6 +225,45 @@ class SummaryTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 summarize.main([])
             self.assertFalse((second / 'summary.csv').exists())
+
+    def test_summarize_reports_arrival_rate_coverage_and_site_breakdown(self):
+        events = records()
+        # Add fixed-rate arrival counters with missed slots kept separate from HTTP failures.
+        events[-1]['scheduled'] = 6
+        events[-1]['started'] = 4
+        events[-1]['completed'] = 4
+        events[-1]['missed'] = 2
+        events[-1]['per_ue'][0].update({'scheduled': 3, 'started': 2, 'completed': 2, 'missed': 1})
+        events[-1]['per_ue'][1].update({'scheduled': 3, 'started': 2, 'completed': 2, 'missed': 1})
+        self.source.write_text(''.join(json.dumps(r) + '\n' for r in events))
+        ue_rows = []
+        site_rows = []
+        phases = summarize.summarize(self.source, 25, ue_rows, site_rows)
+        self.assertEqual(len(phases), 1)
+        p = phases[0]
+        self.assertEqual(p['scheduled'], 6)
+        self.assertEqual(p['started'], 4)
+        self.assertEqual(p['completed'], 4)
+        self.assertEqual(p['failures'], 2)
+        self.assertEqual(p['missed'], 2)
+        self.assertAlmostEqual(p['actual_start_rate'], 0.4)
+        self.assertAlmostEqual(p['request_coverage'], 4 / 6)
+        self.assertEqual(p['slo_attainment_all_attempts'], 2 / 4)
+        self.assertEqual(p['slo_attainment_scheduled'], 2 / 6)
+
+        by_site = {row['group']: row for row in site_rows}
+        self.assertEqual(set(by_site), {'gnb-1', 'gnb-2', 'gnb-3'})
+        self.assertEqual(by_site['gnb-1']['scheduled'], 0)
+        self.assertEqual(by_site['gnb-2']['scheduled'], 3)
+        self.assertEqual(by_site['gnb-2']['started'], 2)
+        self.assertEqual(by_site['gnb-2']['completed'], 2)
+        self.assertEqual(by_site['gnb-2']['missed'], 1)
+        self.assertEqual(by_site['gnb-2']['failures'] + by_site['gnb-3']['failures'], 2)
+        self.assertEqual(by_site['gnb-3']['missed'], 1)
+
+        summarize.main([str(self.source), '--output-prefix', str(self.prefix), '--slo-ms', '25'])
+        self.assertTrue(Path(f'{self.prefix}-sites.csv').is_file())
+        self.assertTrue(Path(f'{self.prefix}-sites.json').is_file())
 
 
 if __name__ == '__main__':

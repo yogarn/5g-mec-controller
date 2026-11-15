@@ -136,6 +136,30 @@ def load_slo(root, phases, slo_ms):
     return violations
 
 
+def load_coverage(root, phases):
+    """Return request coverage percentages (completed / scheduled); 100% if legacy summary lacks scheduled."""
+    coverage = {}
+    for method in METHODS:
+        path = root / method / 'summary.csv'
+        rows, fields = read_rows(path, ('phase', 'attempts'))
+        summaries = phase_rows(rows, path)
+        if set(summaries) != set(phases):
+            raise ValueError(f'{path}: phases must match ramp-summary.csv')
+        coverage[method] = []
+        for phase in phases:
+            row = summaries[phase]
+            if 'scheduled' not in fields:
+                attempts = number(row['attempts'], f'{path}: {phase} attempts', integer=True)
+                coverage[method].append(100.0 if attempts else math.nan)
+                continue
+            scheduled = number(row['scheduled'], f'{path}: {phase} scheduled', integer=True)
+            completed = number(row['completed'], f'{path}: {phase} completed', integer=True) if 'completed' in fields else number(row['attempts'], f'{path}: {phase} attempts', integer=True)
+            if completed > scheduled:
+                raise ValueError(f'{path}: {phase} completed exceeds scheduled')
+            coverage[method].append(100 * completed / scheduled if scheduled else math.nan)
+    return coverage
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_dir", type=Path, help="directory containing baseline/ and proposed/ CSV inputs")
@@ -146,6 +170,7 @@ def main():
     try:
         summaries, placements, resources, site_keys, phases, nodes = load(args.results_dir)
         violations = load_slo(args.results_dir, phases, args.slo_ms)
+        coverage = load_coverage(args.results_dir, phases)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -179,7 +204,8 @@ def main():
         axes[-1].set(xticks=x, xticklabels=labels, xlabel=xlabel)
         export(fig, "response-time")
 
-        fig, ax = plt.subplots(figsize=(width, 4.5), layout="constrained")
+        fig, axes = plt.subplots(2, 1, figsize=(width, 7), sharex=True, layout="constrained")
+        ax, cov_ax = axes
         for method, offset, color in (("baseline", -0.2, "#0072B2"), ("proposed", 0.2, "#D55E00")):
             values = violations[method]
             ax.bar([v + offset for v in x], values, width=0.4, color=color,
@@ -188,11 +214,21 @@ def main():
             for pos, value in zip(x, values):
                 if math.isnan(value):
                     ax.annotate("N/A", (pos + offset, 0), ha="center", va="bottom", fontsize=8)
-        ax.set(xticks=x, xticklabels=labels, xlabel=xlabel, ylim=(0, 100),
-               ylabel="Attempts violating SLO (%)",
+            cov_values = coverage[method]
+            cov_ax.bar([v + offset for v in x], cov_values, width=0.4, color=color,
+                       edgecolor="black", linewidth=0.5,
+                       hatch="xx" if method == "baseline" else None, label=METHOD_LABELS[method])
+            for pos, value in zip(x, cov_values):
+                if math.isnan(value):
+                    cov_ax.annotate("N/A", (pos + offset, 0), ha="center", va="bottom", fontsize=8)
+        ax.set(ylim=(0, 100), ylabel="Attempts violating SLO (%)",
                title=f"Failed or slower than {args.slo_ms:g} ms; denominator: all attempts")
         ax.grid(axis="y", linestyle=":")
         ax.legend(frameon=False, ncols=2)
+        cov_ax.set(xticks=x, xticklabels=labels, xlabel=xlabel, ylim=(0, 105),
+                   ylabel="Request coverage (%)",
+                   title="Completed / scheduled requests (100% = no omitted or dropped slots)")
+        cov_ax.grid(axis="y", linestyle=":")
         export(fig, "slo-violations")
 
         fig, ax = plt.subplots(figsize=(width, 4.5), layout="constrained")
