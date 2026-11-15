@@ -591,3 +591,38 @@ def test_fixed_mobility_rejects_invalid_or_conflicting_options(flags, monkeypatc
     with pytest.raises(SystemExit) as exc:
         campaign.main(['fixed_test', *flags])
     assert exc.value.code == 2
+
+
+def test_arrival_rate_settings_propagate_across_standard_and_mobility9_plans(tmp_path):
+    std_out = tmp_path / 'std'
+    campaign.main(['--plan-only', str(std_out)])
+    std_plan = yaml.safe_load((std_out / 'plan.yaml').read_text())
+    assert std_plan['campaign_settings']['rps_per_ue'] == 5.0
+    assert std_plan['campaign_settings']['max_in_flight_per_ue'] == 8
+    remote_std = campaign.remote_settings(std_plan['campaign_settings'])
+    assert remote_std['rps_per_ue'] == 5.0
+    assert remote_std['max_in_flight_per_ue'] == 8
+
+    mob_out = tmp_path / 'mob'
+    campaign.main(['--scenario', 'mobility9', '--fixed-replicas', '6',
+                   '--rps-per-ue', '3.5', '--max-in-flight-per-ue', '4',
+                   '--plan-only', str(mob_out)])
+    mob_plan = yaml.safe_load((mob_out / 'plan.yaml').read_text())
+    assert mob_plan['campaign_settings']['rps_per_ue'] == 3.5
+    assert mob_plan['campaign_settings']['max_in_flight_per_ue'] == 4
+    remote_mob = campaign.remote_settings(mob_plan['campaign_settings'])
+    assert remote_mob['rps_per_ue'] == 3.5
+    assert remote_mob['max_in_flight_per_ue'] == 4
+
+
+@pytest.mark.parametrize('flags', [
+    ['--rps-per-ue', '0'],
+    ['--rps-per-ue', '-1'],
+    ['--rps-per-ue', 'nan'],
+    ['--max-in-flight-per-ue', '0'],
+])
+def test_invalid_arrival_rate_flags_rejected(flags, monkeypatch):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
+    with pytest.raises(SystemExit) as exc:
+        campaign.main(['rate_test', *flags])
+    assert exc.value.code == 2

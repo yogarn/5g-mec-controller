@@ -278,6 +278,7 @@ def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
     settings = {'campaign': 'campaign', 'method': 'hpa', 'site_urls': site_urls,
                 'image': 'image.jpg', 'inventory': 'ue.yaml', 'nr_ue': '/bin/nr-ue',
                 'schedule': '1:1:0:0', 'duration': 1,
+                'rps_per_ue': 7.5, 'max_in_flight_per_ue': 6,
                 'telemetry_url': 'http://collector/observations', 'token': 'token'}
     captured = []
     def capture(args, **kwargs):
@@ -289,6 +290,8 @@ def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
         campaign_ue.run(settings)
     assert json.loads(captured[captured.index('--site-urls') + 1]) == site_urls
     assert '--url' not in captured
+    assert captured[captured.index('--rps-per-ue') + 1] == '7.5'
+    assert captured[captured.index('--max-in-flight-per-ue') + 1] == '6'
     assert captured[captured.index('--telemetry-url') + 1] == settings['telemetry_url']
     assert captured[captured.index('--telemetry-token-file') + 1] == settings['token']
 
@@ -351,6 +354,7 @@ def test_fixed_rate_bounded_concurrency_and_missed_slots_without_catchup():
     clock_lock = threading.Lock()
     gate = threading.Event()
     reached_08 = threading.Event()
+    drained_before_08 = threading.Event()
     active = 0
     peak_active = 0
     dispatched_offsets = []
@@ -365,7 +369,7 @@ def test_fixed_rate_bounded_concurrency_and_missed_slots_without_catchup():
             cur = clock[0]
         if cur >= 0.79:
             reached_08.set()
-            gate.wait(timeout=2)
+            drained_before_08.wait(timeout=2)
         return False
 
     def dispatch_fn(group, source, ue_index, image):
@@ -382,14 +386,18 @@ def test_fixed_rate_bounded_concurrency_and_missed_slots_without_catchup():
 
     def release_later():
         reached_08.wait(timeout=2)
-        # Wait until the 2 in-flight slots finish releasing? Wait: gate unblocks both 0.0 and 0.2,
-        # and then 0.8 dispatches once in_flight drops below 2.
         while True:
             with clock_lock:
                 if active == 2:
                     break
             time.sleep(0.001)
         gate.set()
+        while True:
+            with clock_lock:
+                if active == 0:
+                    break
+            time.sleep(0.001)
+        drained_before_08.set()
 
     t = threading.Thread(target=release_later, daemon=True)
     t.start()

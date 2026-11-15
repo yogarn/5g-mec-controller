@@ -24,6 +24,7 @@ import yaml
 from benchmark.client import parse_schedule
 from utils.traffic_control import POOL_NAME, TrafficDelay
 from utils.config import validate_resource_weights
+from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
@@ -119,7 +120,9 @@ def remote(settings, args):
 
 def remote_settings(settings):
     return {k: settings[k] for k in ('inventory', 'nr_ue', 'token', 'image', 'telemetry_url')} | {
-        'max_ues': max(p['workload_ue'] for p in parse_schedule(settings['schedule']))}
+        'max_ues': max(p['workload_ue'] for p in parse_schedule(settings['schedule'])),
+        'rps_per_ue': float(settings.get('rps_per_ue', DEFAULT_RPS_PER_UE)),
+        'max_in_flight_per_ue': int(settings.get('max_in_flight_per_ue', DEFAULT_MAX_IN_FLIGHT_PER_UE))}
 
 
 def check_result_name(settings, name):
@@ -656,6 +659,10 @@ def main(argv=None):
                         help='60s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
     parser.add_argument('--phase-duration', type=float,
                         help='traffic seconds per phase (minimum 60; default: campaign config, or 60 with --debug)')
+    parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE,
+                        help='target request arrival rate per active UE in requests/second (default: 5)')
+    parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE,
+                        help='maximum concurrent in-flight requests per UE (default: 8)')
     parser.add_argument('--resource-weights', nargs=4, type=float,
                         metavar=('CPU', 'MEMORY', 'GPU', 'VRAM'),
                         help='proposed resource-score weights, nonnegative and summing to 1')
@@ -689,9 +696,15 @@ def main(argv=None):
         parser.error('--max-replicas must be a positive integer')
     if args.phase_duration is not None and (not math.isfinite(args.phase_duration) or args.phase_duration < 60):
         parser.error('--phase-duration must be finite and at least 60 seconds')
+    if not math.isfinite(args.rps_per_ue) or args.rps_per_ue <= 0:
+        parser.error('--rps-per-ue must be finite and positive')
+    if args.max_in_flight_per_ue < 1:
+        parser.error('--max-in-flight-per-ue must be a positive integer')
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
+    settings['rps_per_ue'] = float(args.rps_per_ue)
+    settings['max_in_flight_per_ue'] = args.max_in_flight_per_ue
     if args.scenario == 'mobility9':
         settings.update(schedule=MOBILITY9_SCHEDULE, phase_duration=60)
     workload = args.workload if args.workload is not None else selected_workload(settings)

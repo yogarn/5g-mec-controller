@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from experiments.campaign import APP, NAMESPACE, check_service_routing, command, kube, remote, stop_process
+from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
 from utils.traffic_control import POOL_NAME, TrafficDelay
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -149,7 +150,8 @@ def summarize_resources(res_jsonl, t_measure_start, t_end):
     }
 
 
-def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedule, duration, warmup, tc_ms):
+def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedule, duration, warmup, tc_ms,
+            rps_per_ue=DEFAULT_RPS_PER_UE, max_in_flight_per_ue=DEFAULT_MAX_IN_FLIGHT_PER_UE):
     run_dir = campaign_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     pod_logs_dir = run_dir / 'pod-logs'
@@ -165,6 +167,7 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
         'stage': stage, 'block': block, 'run_id': run_id, 'revision': rev,
         'replicas': replicas, 'node': node, 'schedule': schedule,
         'duration_s': duration, 'warmup_s': warmup, 'measure_s': duration - warmup,
+        'rps_per_ue': float(rps_per_ue), 'max_in_flight_per_ue': int(max_in_flight_per_ue),
         'tc_ms': tc_ms, 'namespace': NAMESPACE,
     }
     (run_dir / 'effective-config.json').write_text(json.dumps(eff_cfg, indent=2) + '\n')
@@ -199,6 +202,8 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
             '--nr-ue', settings['nr_ue'],
             '--phase-schedule', schedule,
             '--phase-duration', str(duration),
+            '--rps-per-ue', str(float(rps_per_ue)),
+            '--max-in-flight-per-ue', str(int(max_in_flight_per_ue)),
             '--telemetry-url', settings['telemetry_url'],
             '--telemetry-token-file', settings['token'],
             '--output-dir', ue_out,
@@ -309,8 +314,14 @@ def main():
     p.add_argument('--duration', type=float, default=180.0)
     p.add_argument('--warmup', type=float, default=60.0)
     p.add_argument('--tc-ms', type=float, default=None)
+    p.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE)
+    p.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE)
     p.add_argument('--cooldown-after', type=float, default=16.0)
     args = p.parse_args()
+    if not math.isfinite(args.rps_per_ue) or args.rps_per_ue <= 0:
+        p.error('--rps-per-ue must be finite and positive')
+    if args.max_in_flight_per_ue < 1:
+        p.error('--max-in-flight-per-ue must be a positive integer')
 
     settings = yaml.safe_load((ROOT / 'experiments/campaign.yaml').read_text())
     cdir = Path(args.campaign_dir)
@@ -318,7 +329,8 @@ def main():
     with LOCK_PATH.open('w') as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         summary = run_one(settings, cdir, args.stage, args.block, args.run_id,
-                          args.replicas, args.node, args.schedule, args.duration, args.warmup, args.tc_ms)
+                          args.replicas, args.node, args.schedule, args.duration, args.warmup, args.tc_ms,
+                          args.rps_per_ue, args.max_in_flight_per_ue)
         append_ledger(cdir / 'runs.csv', summary)
         if args.cooldown_after > 0:
             time.sleep(args.cooldown_after)
