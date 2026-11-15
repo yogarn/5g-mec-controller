@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One-time setup (venv on core + UE host): bash experiments/run.sh setup
 # Prerequisites + temporary workload and UE connectivity probes: bash experiments/run.sh check [--workload face-detection|pedestrian-detection]
-# Render manifests without cluster access: bash experiments/run.sh --plan-only /tmp/plan [--workload ...] [--comparison full|placement]
+# Render manifests without cluster access: bash experiments/run.sh --plan-only /tmp/plan [--workload ...] [--comparison full|placement|scaling]
 # Nine-UE mobility: bash experiments/run.sh mobility9_01 --scenario mobility9
+# Scaler-only balanced: bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced [--final-hold]
 # Whole campaign: bash experiments/run.sh run_2 [--workload face-detection|pedestrian-detection] [--comparison full|placement]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,7 +33,7 @@ if [[ "${1:-}" == check ]]; then
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement] [--scenario mobility9] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
+  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement|scaling] [--scenario mobility9|scaler-balanced] [--final-hold] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"

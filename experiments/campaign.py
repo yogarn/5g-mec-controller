@@ -31,7 +31,12 @@ NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
 MOBILITY9_SCHEDULE = '9:3:3:3,9:7:1:1,9:1:7:1,9:1:1:7,9:1:7:1,9:7:1:1,9:3:3:3'
-COMPARISONS = ('full', 'placement')
+SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
+SCALER_NODE = 'gnb-3'
+SCALER_MIN_REPLICAS = 1
+SCALER_DEFAULT_MAX_REPLICAS = 24
+FINAL_HOLD_SECONDS = 360
+COMPARISONS = ('full', 'placement', 'scaling')
 AUTOSCALERS = ('controller', 'hpa')
 PLACEMENT_ENGINES = ('python', 'go')
 PLACEMENT_NAMESPACE = 'placement'
@@ -39,6 +44,7 @@ PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
 COMPARISON_NOTES = {
     'placement': 'Comparison A (placement): same latency-ratio autoscaler for both methods; isolates scheduler/descheduler placement.',
     'full': 'Comparison B (full system): default-scheduler + CPU HPA vs full proposed system (autoscaler + scheduler + descheduler); do not attribute results solely to placement.',
+    'scaling': 'Comparison C (scaling): default-scheduler + gnb-3-only required affinity for both methods; native CPU HPA (60% target) vs native latency HPA (100 ms p90 target).',
 }
 
 
@@ -222,7 +228,9 @@ def prerequisites(settings):
             input=json.dumps(remote_settings(settings)), text=True)
     from utils.preflight import collector_status
     collector_status(config)
-    verify_incluster_components(settings.get('_autoscaler', 'hpa'), settings.get('_placement_engine', 'go'))
+    verify_incluster_components(settings.get('_autoscaler', 'hpa'),
+                                settings.get('_placement_engine', 'go'),
+                                settings.get('_comparison', 'full'))
     for manifest in (workload_manifest(workload), ROOT / 'autoscaler/hpa-baseline.yaml'):
         docs = [d for d in yaml.safe_load_all(Path(manifest).read_text()) if d]
         if any(d['metadata'].get('namespace') != NAMESPACE for d in docs):
@@ -406,7 +414,82 @@ def _query_external_latency_metric(allow_not_found=False):
     return items
 
 
-def verify_incluster_components(autoscaler, placement_engine):
+def _parse_cpu_millicores(raw):
+    text = str(raw).strip()
+    if text.endswith('n'):
+        return float(text[:-1]) / 1e6
+    if text.endswith('u'):
+        return float(text[:-1]) / 1e3
+    if text.endswith('m'):
+        return float(text[:-1])
+    return float(text) * 1000.0
+
+
+def _parse_memory_bytes(raw):
+    text = str(raw).strip()
+    units = {
+        'Ki': 1024, 'Mi': 1024 ** 2, 'Gi': 1024 ** 3, 'Ti': 1024 ** 4,
+        'K': 1000, 'M': 1000 ** 2, 'G': 1000 ** 3, 'T': 1000 ** 4,
+    }
+    for suffix, scale in units.items():
+        if text.endswith(suffix):
+            return float(text[:-len(suffix)]) * scale
+    return float(text)
+
+
+def _pod_requests(containers):
+    cpu_m = 0.0
+    mem_b = 0.0
+    for container in containers:
+        req = (container.get('resources') or {}).get('requests') or {}
+        if 'cpu' in req:
+            cpu_m += _parse_cpu_millicores(req['cpu'])
+        if 'memory' in req:
+            mem_b += _parse_memory_bytes(req['memory'])
+    return cpu_m, mem_b
+
+
+def check_node_capacity(node_name, manifest_path, max_replicas, workload_app=None):
+    """Fail clearly before traffic if node_name cannot fit max_replicas of manifest_path."""
+    docs = [d for d in yaml.safe_load_all(Path(manifest_path).read_text()) if d]
+    deployments = [d for d in docs if d.get('kind') == 'Deployment']
+    if len(deployments) != 1:
+        raise ValueError('application manifest requires exactly one Deployment')
+    per_pod_cpu, per_pod_mem = _pod_requests(deployments[0]['spec']['template']['spec'].get('containers', []))
+    node = json.loads(kube('get', 'node', node_name, '-o', 'json', capture_output=True, text=True).stdout)
+    alloc = node.get('status', {}).get('allocatable') or {}
+    alloc_cpu = _parse_cpu_millicores(alloc.get('cpu', 0))
+    alloc_mem = _parse_memory_bytes(alloc.get('memory', 0))
+    pods = json.loads(kube('get', 'pods', '-A', '--field-selector', f'spec.nodeName={node_name}',
+                           '-o', 'json', capture_output=True, text=True).stdout)
+    used_cpu = 0.0
+    used_mem = 0.0
+    for pod in pods.get('items', []):
+        phase = pod.get('status', {}).get('phase')
+        if phase in ('Succeeded', 'Failed'):
+            continue
+        meta = pod.get('metadata') or {}
+        if workload_app and meta.get('namespace') == NAMESPACE and (meta.get('labels') or {}).get('app') == workload_app:
+            continue
+        c_cpu, c_mem = _pod_requests((pod.get('spec') or {}).get('containers', []))
+        used_cpu += c_cpu
+        used_mem += c_mem
+    need_cpu = max_replicas * per_pod_cpu
+    need_mem = max_replicas * per_pod_mem
+    avail_cpu = alloc_cpu - used_cpu
+    avail_mem = alloc_mem - used_mem
+    if need_cpu > avail_cpu or need_mem > avail_mem:
+        mib = 1024 ** 2
+        raise RuntimeError(
+            f'node {node_name} cannot fit {max_replicas} replicas: '
+            f'needs {need_cpu:.0f}m CPU / {need_mem / mib:.0f}Mi memory, '
+            f'available {avail_cpu:.0f}m CPU / {avail_mem / mib:.0f}Mi memory '
+            f'(allocatable {alloc_cpu:.0f}m / {alloc_mem / mib:.0f}Mi, '
+            f'used {used_cpu:.0f}m / {used_mem / mib:.0f}Mi)'
+        )
+
+
+def verify_incluster_components(autoscaler, placement_engine, comparison='full'):
     """Verify required in-cluster HPA external metrics adapter and Go placement Deployment are ready."""
     if autoscaler == 'hpa':
         adapter = get('deployment', 'prometheus-adapter', PLACEMENT_NAMESPACE)
@@ -430,7 +513,7 @@ def verify_incluster_components(autoscaler, placement_engine):
         # Probe ue_p90_latency_seconds directly; NotFound is tolerated only when telemetry is idle,
         # whereas 5xx/adapter configuration errors (e.g. missing namespaced: false) fail preflight.
         _query_external_latency_metric(allow_not_found=True)
-    if placement_engine == 'go':
+    if comparison != 'scaling' and placement_engine == 'go':
         placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
         if placement_dep['spec'].get('replicas') != 1 or placement_dep.get('status', {}).get('readyReplicas') != 1:
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
@@ -461,9 +544,25 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
     if len(deployments) != 1:
         raise ValueError('application manifest requires exactly one Deployment')
-    scheduler_name = ('default-scheduler' if method == 'baseline'
+    scheduler_name = ('default-scheduler' if (method == 'baseline' or comparison == 'scaling')
                       else config.get('scheduler_name', 'mec-placement-scheduler'))
     deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
+    if comparison == 'scaling':
+        deployments[0]['spec']['replicas'] = SCALER_MIN_REPLICAS
+        deployments[0]['spec']['template']['spec']['affinity'] = {
+            'nodeAffinity': {
+                'requiredDuringSchedulingIgnoredDuringExecution': {
+                    'nodeSelectorTerms': [{
+                        'matchFields': [{
+                            'key': 'metadata.name',
+                            'operator': 'In',
+                            'values': [SCALER_NODE],
+                        }]
+                    }]
+                }
+            }
+        }
+        config['min_replicas'] = SCALER_MIN_REPLICAS
     if fixed_replicas is not None:
         deployments[0]['spec']['replicas'] = fixed_replicas
     method_manifest = root / f'{method}-workload.yaml'
@@ -493,7 +592,7 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
         yaml.safe_dump(config, stream, sort_keys=False)
     app_name = workload_identity(workload)
     hpa_path = None
-    if method == 'baseline' and comparison == 'full':
+    if method == 'baseline' and comparison in ('full', 'scaling'):
         hpa_path = _render_hpa(
             'autoscaler/hpa-baseline.yaml', root / 'baseline-hpa.yaml',
             app_name + '-baseline', app_name,
@@ -522,7 +621,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     processes = []
     remote_started = False
     completed = False
-    incluster_go = placement_engine == 'go' and method == 'proposed'
+    incluster_go = comparison != 'scaling' and placement_engine == 'go' and method == 'proposed'
     method_start_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     with (output / 'controller.log').open('x') as control_log, (output / 'sampler.log').open('x') as sampler_log, (output / 'runner-ssh.log').open('x') as runner_log:
         try:
@@ -571,6 +670,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
             processes.append(sampler)
             payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
                        'schedule': settings['schedule'], 'duration': settings['phase_duration']}
+            if settings.get('phase_durations'):
+                payload['phase_durations'] = settings['phase_durations']
             ue = subprocess.Popen(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'run']), stdin=subprocess.PIPE, stdout=runner_log, stderr=subprocess.STDOUT, text=True, start_new_session=True)
             remote_started = True
             ue.stdin.write(json.dumps(payload)); ue.stdin.close()
@@ -635,12 +736,14 @@ def main(argv=None):
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or face-detection)')
-    parser.add_argument('--scenario', choices=['mobility9'],
-                        help='mobility9: fixed nine UEs, rotating hotspots, shared latency HPA, 60s phases')
+    parser.add_argument('--scenario', choices=['mobility9', 'scaler-balanced'],
+                        help='mobility9: 9 UEs rotating hotspots; scaler-balanced: balanced 3..24..3 UEs on gnb-3 only')
+    parser.add_argument('--final-hold', action='store_true',
+                        help='extend the final scaler-balanced phase by 360s (420s total) to observe HPA scale-down')
     parser.add_argument('--deschedule-interval', type=float,
                         help='seconds between proposed descheduler checks (mobility9 default: 30; otherwise config.yaml)')
     parser.add_argument('--comparison', choices=COMPARISONS, default=None,
-                        help='placement: same latency autoscaler for both methods; full: default-scheduler+CPU HPA vs full proposed system')
+                        help='placement: same latency autoscaler; full: CPU HPA vs full proposed; scaling: CPU HPA vs latency HPA on gnb-3')
     parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
                         help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter) or controller (Python fallback)')
     parser.add_argument('--placement-engine', choices=PLACEMENT_ENGINES, default='go',
@@ -676,8 +779,20 @@ def main(argv=None):
             parser.error('--fixed-replicas requires --scenario mobility9')
         if args.max_replicas is not None:
             parser.error('use --fixed-replicas without --max-replicas')
-    args.comparison = args.comparison or ('placement' if args.scenario else 'full')
-    if args.scenario:
+    if args.scenario == 'scaler-balanced' and args.comparison not in (None, 'scaling'):
+        parser.error('--scenario scaler-balanced requires --comparison scaling')
+    if args.comparison == 'scaling' and args.scenario not in (None, 'scaler-balanced'):
+        parser.error('--comparison scaling requires --scenario scaler-balanced')
+    if args.comparison == 'scaling' and args.scenario is None:
+        args.scenario = 'scaler-balanced'
+    args.comparison = args.comparison or (
+        'scaling' if args.scenario == 'scaler-balanced' else
+        'placement' if args.scenario else
+        'full'
+    )
+    if args.final_hold and args.scenario != 'scaler-balanced':
+        parser.error('--final-hold requires --scenario scaler-balanced')
+    if args.scenario == 'mobility9':
         if args.debug:
             parser.error('mobility9 uses standard HPA timers; omit --debug')
         if args.autoscaler != 'hpa' or args.placement_engine != 'go':
@@ -686,6 +801,19 @@ def main(argv=None):
             args.slo_ms = 100
         if args.deschedule_interval is None:
             args.deschedule_interval = 30
+    elif args.scenario == 'scaler-balanced':
+        if args.debug:
+            parser.error('scaler-balanced uses standard HPA timers; omit --debug')
+        if args.autoscaler != 'hpa':
+            parser.error('scaler-balanced requires native HPA (--autoscaler hpa)')
+        if args.placement_engine != 'go':
+            parser.error('scaler-balanced does not use a custom placement engine; omit --placement-engine python')
+        if args.deschedule_interval is not None:
+            parser.error('scaler-balanced does not use the descheduler; omit --deschedule-interval')
+        if args.resource_weights is not None or args.locality_weight is not None:
+            parser.error('scaler-balanced does not use custom placement scoring')
+        if args.slo_ms is None:
+            args.slo_ms = 100
     if args.deschedule_interval is not None and (not math.isfinite(args.deschedule_interval) or args.deschedule_interval <= 0):
         parser.error('--deschedule-interval must be finite and positive')
     if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
@@ -707,6 +835,8 @@ def main(argv=None):
     settings['max_in_flight_per_ue'] = args.max_in_flight_per_ue
     if args.scenario == 'mobility9':
         settings.update(schedule=MOBILITY9_SCHEDULE, phase_duration=60)
+    elif args.scenario == 'scaler-balanced':
+        settings.update(schedule=SCALER_BALANCED_SCHEDULE, phase_duration=60)
     workload = args.workload if args.workload is not None else selected_workload(settings)
     settings['workload'] = workload
     if args.workload is not None and args.workload != 'face-detection':
@@ -719,6 +849,14 @@ def main(argv=None):
         settings['phase_duration'] = 60
     if args.phase_duration is not None:
         settings['phase_duration'] = args.phase_duration
+    phases = parse_schedule(settings['schedule']) if 'schedule' in settings else []
+    hold_seconds = FINAL_HOLD_SECONDS if args.final_hold else 0
+    if args.scenario == 'scaler-balanced':
+        base_duration = float(settings['phase_duration'])
+        settings['phase_durations'] = [base_duration] * (len(phases) - 1) + [base_duration + hold_seconds]
+    phase_durations = settings.get('phase_durations') or (
+        [float(settings['phase_duration'])] * len(phases) if 'phase_duration' in settings and phases else []
+    )
     controller_config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     try:
         resource_weights = validate_resource_weights(
@@ -731,11 +869,45 @@ def main(argv=None):
     if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
         parser.error('--locality-weight must be finite and between 0 and 1')
     slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
-    max_replicas = args.max_replicas if args.max_replicas is not None else controller_config['max_replicas']
+    default_max = SCALER_DEFAULT_MAX_REPLICAS if args.comparison == 'scaling' else controller_config['max_replicas']
+    max_replicas = args.max_replicas if args.max_replicas is not None else default_max
     if args.fixed_replicas is not None:
         max_replicas = args.fixed_replicas
-    if args.fixed_replicas is None and max_replicas < controller_config['min_replicas']:
-        parser.error('--max-replicas must be at least min_replicas from config.yaml')
+    min_replicas = (args.fixed_replicas if args.fixed_replicas is not None
+                    else SCALER_MIN_REPLICAS if args.comparison == 'scaling'
+                    else controller_config['min_replicas'])
+    if args.fixed_replicas is None and max_replicas < min_replicas:
+        parser.error('--max-replicas must be at least min_replicas')
+    hpa_targets = (
+        {'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
+         'proposed': {'type': 'latency_p90_ms', 'target': slo_ms}}
+        if args.comparison == 'scaling' else
+        {'baseline': {'type': 'latency_p90_ms', 'target': slo_ms},
+         'proposed': {'type': 'latency_p90_ms', 'target': slo_ms}}
+        if args.comparison == 'placement' else
+        {'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
+         'proposed': {'type': 'latency_p90_ms' if args.autoscaler == 'hpa' else 'controller_latency_p90_ms', 'target': slo_ms}}
+    )
+    shared_metadata = {
+        'workload': workload,
+        'comparison': args.comparison,
+        'scenario': args.scenario,
+        'fixed_replicas': args.fixed_replicas,
+        'deschedule_interval_seconds': args.deschedule_interval,
+        'autoscaler': args.autoscaler,
+        'placement_engine': None if args.comparison == 'scaling' else args.placement_engine,
+        'attribution_note': COMPARISON_NOTES[args.comparison],
+        'slo_ms': slo_ms,
+        'schedule': settings.get('schedule'),
+        'phase_duration': settings.get('phase_duration'),
+        'phase_durations_s': phase_durations,
+        'final_hold_seconds': hold_seconds,
+        'node_restriction': SCALER_NODE if args.comparison == 'scaling' else None,
+        'hpa_targets': hpa_targets,
+        'replica_bounds': {'min': min_replicas, 'max': max_replicas},
+        'pacing': {'rps_per_ue': float(args.rps_per_ue), 'max_in_flight_per_ue': args.max_in_flight_per_ue},
+        'tc_ms': args.tc_ms,
+    }
     if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
     if args.plan_only is not None:
@@ -745,14 +917,8 @@ def main(argv=None):
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas)
-        (output / 'plan.yaml').write_text(yaml.safe_dump({
-            'workload': workload, 'comparison': args.comparison,
-            'fixed_replicas': args.fixed_replicas,
-            'scenario': args.scenario, 'deschedule_interval_seconds': args.deschedule_interval,
-            'autoscaler': args.autoscaler,
-            'placement_engine': args.placement_engine,
-            'attribution_note': COMPARISON_NOTES[args.comparison],
-            'slo_ms': slo_ms, 'calibrated': False,
+        (output / 'plan.yaml').write_text(yaml.safe_dump(shared_metadata | {
+            'calibrated': False,
             'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
             'campaign_settings': settings}, sort_keys=False))
         print(f'Offline plan written: {output}; no cluster access or traffic started.')
@@ -766,7 +932,7 @@ def main(argv=None):
         signal.signal(signal.SIGTERM, interrupted)
         if not args.check:
             check_result_name(settings, args.campaign)
-        prerequisites(settings | {'_autoscaler': args.autoscaler, '_placement_engine': args.placement_engine})
+        prerequisites(settings | {'_autoscaler': args.autoscaler, '_placement_engine': args.placement_engine, '_comparison': args.comparison})
         if args.check:
             return
         root = ROOT / 'results' / args.campaign
@@ -774,29 +940,27 @@ def main(argv=None):
         check_result_name(settings, args.campaign)
         root.mkdir(parents=True, exist_ok=False)
         with (root / 'campaign.yaml').open('x') as stream:
-            yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
-                                       'fixed_replicas': args.fixed_replicas,
-                                       'scenario': args.scenario,
-                                       'deschedule_interval_seconds': args.deschedule_interval,
-                                       'max_replicas': max_replicas, 'debug': args.debug, 'workload': workload,
-                                       'comparison': args.comparison,
-                                       'autoscaler': args.autoscaler,
-                                       'placement_engine': args.placement_engine,
-                                       'attribution_note': COMPARISON_NOTES[args.comparison],
-                                       'resource_weights': resource_weights,
-                                       'locality_weight': locality_weight}, stream)
-        phases = parse_schedule(settings['schedule'])
-        minutes = len(phases) * settings['phase_duration'] / 60
-        print(f'Campaign: {len(phases)} phases per method, {settings["phase_duration"]:g}s each; '
+            yaml.safe_dump(settings | shared_metadata | {
+                'max_replicas': max_replicas, 'debug': args.debug,
+                'resource_weights': resource_weights,
+                'locality_weight': locality_weight}, stream)
+        minutes = sum(phase_durations) / 60
+        duration_desc = (f'{settings["phase_duration"]:g}s each' if not hold_seconds
+                         else f'{settings["phase_duration"]:g}s each + {hold_seconds}s final hold')
+        print(f'Campaign: {len(phases)} phases per method, {duration_desc}; '
               f'{minutes:g} minutes traffic per method ({2 * minutes:g} minutes total), '
               'plus UE switching, setup and transfer. Objective: all-attempt p90 '
               f'<= {slo_ms:g} ms. Shared replica ceiling: {max_replicas}.', flush=True)
-        print(f'Proposed scoring: resource weights={resource_weights}; '
-              f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
-        if args.scenario:
+        if args.comparison != 'scaling':
+            print(f'Proposed scoring: resource weights={resource_weights}; '
+                  f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
+        if args.scenario == 'mobility9':
             print('Mobility scenario: fixed nine UEs; hotspot order gNB-1 -> gNB-2 -> gNB-3 -> gNB-2 -> gNB-1. '
                   f'Descheduler checks every {args.deschedule_interval:g}s; evictions require settled Pods and positive score improvement. '
                   'UE moves use stop-and-reattach, not handover.', flush=True)
+        elif args.scenario == 'scaler-balanced':
+            print(f'Scaling scenario: balanced UEs (3..24..3) on {SCALER_NODE} with default-scheduler; '
+                  f'CPU HPA (60%) vs latency HPA ({slo_ms:g} ms p90), replicas {min_replicas}..{max_replicas}.', flush=True)
         if args.fixed_replicas is not None:
             print(f'Fixed placement experiment: {args.fixed_replicas} replicas per method; '
                   'initial Deployment and HPA min/max are equal. Eviction may temporarily reduce readiness.', flush=True)
@@ -814,6 +978,9 @@ def main(argv=None):
             if delay is not None:
                 delay.start()
             _campaign_manifest(root, delay is not None, workload)
+            if args.comparison == 'scaling':
+                reset(workload)
+                check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, workload_identity(workload))
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset(workload)

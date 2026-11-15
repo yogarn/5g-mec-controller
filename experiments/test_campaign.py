@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import tarfile
+import types
 
 import pytest
 import yaml
@@ -625,4 +626,223 @@ def test_invalid_arrival_rate_flags_rejected(flags, monkeypatch):
     monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
     with pytest.raises(SystemExit) as exc:
         campaign.main(['rate_test', *flags])
+    assert exc.value.code == 2
+
+
+def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path):
+    out = tmp_path / 'scaler_plan'
+    campaign.main(['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--plan-only', str(out)])
+
+    base_docs = [d for d in yaml.safe_load_all((out / 'baseline-workload.yaml').read_text()) if d]
+    prop_docs = [d for d in yaml.safe_load_all((out / 'proposed-workload.yaml').read_text()) if d]
+    base_dep = next(d for d in base_docs if d['kind'] == 'Deployment')
+    prop_dep = next(d for d in prop_docs if d['kind'] == 'Deployment')
+    expected_affinity = {
+        'nodeAffinity': {
+            'requiredDuringSchedulingIgnoredDuringExecution': {
+                'nodeSelectorTerms': [{
+                    'matchFields': [{
+                        'key': 'metadata.name',
+                        'operator': 'In',
+                        'values': ['gnb-3'],
+                    }]
+                }]
+            }
+        }
+    }
+    for dep in (base_dep, prop_dep):
+        assert dep['spec']['replicas'] == 1
+        assert dep['spec']['template']['spec']['schedulerName'] == 'default-scheduler'
+        assert dep['spec']['template']['spec']['affinity'] == expected_affinity
+
+    base_hpa = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())
+    prop_hpa = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
+    assert base_hpa['spec']['minReplicas'] == 1
+    assert base_hpa['spec']['maxReplicas'] == 24
+    assert base_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+    assert base_hpa['spec']['metrics'][0]['resource']['name'] == 'cpu'
+    assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+
+    assert prop_hpa['spec']['minReplicas'] == 1
+    assert prop_hpa['spec']['maxReplicas'] == 24
+    assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+    assert prop_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
+    assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '100m'
+
+    plan = yaml.safe_load((out / 'plan.yaml').read_text())
+    assert plan['comparison'] == 'scaling'
+    assert plan['scenario'] == 'scaler-balanced'
+    assert plan['schedule'] == '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
+    assert plan['phase_durations_s'] == [60.0] * 7
+    assert plan['final_hold_seconds'] == 0
+    assert plan['node_restriction'] == 'gnb-3'
+    assert plan['replica_bounds'] == {'min': 1, 'max': 24}
+    assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
+    assert plan['hpa_targets'] == {
+        'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
+        'proposed': {'type': 'latency_p90_ms', 'target': 100},
+    }
+    assert plan['tc_ms'] is None
+
+
+def test_scaler_balanced_final_hold_and_overrides(tmp_path):
+    out = tmp_path / 'scaler_hold'
+    campaign.main([
+        '--comparison', 'scaling', '--scenario', 'scaler-balanced', '--final-hold',
+        '--max-replicas', '12', '--tc-ms', '15', '--rps-per-ue', '4', '--max-in-flight-per-ue', '6',
+        '--plan-only', str(out),
+    ])
+    plan = yaml.safe_load((out / 'plan.yaml').read_text())
+    assert plan['phase_durations_s'] == [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 420.0]
+    assert plan['final_hold_seconds'] == 360
+    assert plan['replica_bounds'] == {'min': 1, 'max': 12}
+    assert plan['tc_ms'] == 15.0
+    assert plan['pacing'] == {'rps_per_ue': 4.0, 'max_in_flight_per_ue': 6}
+    assert yaml.safe_load((out / 'baseline-hpa.yaml').read_text())['spec']['maxReplicas'] == 12
+    assert yaml.safe_load((out / 'proposed-hpa.yaml').read_text())['spec']['maxReplicas'] == 12
+
+
+def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_path, monkeypatch):
+    kube_calls = []
+
+    def fake_kube(*args, **kwargs):
+        kube_calls.append(args)
+        if args == ('get', 'apiservice', 'v1beta1.external.metrics.k8s.io', '-o', 'json'):
+            return types.SimpleNamespace(stdout=json.dumps({
+                'spec': {'service': {'namespace': 'placement', 'name': 'prometheus-adapter'}},
+                'status': {'conditions': [{'type': 'Available', 'status': 'True'}]},
+            }))
+        if args == ('get', '--raw', '/apis/external.metrics.k8s.io/v1beta1'):
+            return types.SimpleNamespace(stdout=json.dumps({'kind': 'APIResourceList'}))
+        if len(args) >= 3 and args[:2] == ('get', '--raw') and args[2].startswith('/apis/external.metrics.k8s.io/v1beta1/namespaces/services/ue_p90_latency_seconds'):
+            return types.SimpleNamespace(stdout=json.dumps({'items': []}))
+        if args[0] == 'apply' and 'placement-configmap' not in str(args):
+            return types.SimpleNamespace(stdout='')
+        if args[:3] == ('-n', 'services', 'rollout') and args[3] == 'status':
+            return types.SimpleNamespace(stdout='')
+        if args[:4] == ('-n', 'services', 'get', 'deployments,pods,hpa'):
+            return types.SimpleNamespace(stdout='{}')
+        raise AssertionError(f'unexpected kube call: {args}')
+
+    def fake_get(kind, name, namespace='services'):
+        if namespace == 'placement' and name == 'placement-controller':
+            raise AssertionError('placement-controller must not be queried in scaling mode')
+        if namespace == 'placement' and name == 'prometheus-adapter':
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+        if kind == 'service':
+            return {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}}
+        raise AssertionError(f'unexpected get({kind}, {name}, {namespace})')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(campaign, 'get', fake_get)
+    campaign.verify_incluster_components('hpa', 'go', comparison='scaling')
+
+    monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'active_telemetry', lambda *a, **kw: True)
+    monkeypatch.setattr(campaign, '_query_external_latency_metric', lambda allow_not_found=True: True)
+    monkeypatch.setattr(campaign, 'RunnerProgress', lambda *a, **kw: types.SimpleNamespace(poll=lambda final=False: None))
+
+    popen_cmds = []
+    written_payloads = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            popen_cmds.append(cmd)
+            self.is_ue = 'campaign_ue' in ' '.join(map(str, cmd))
+            self.ue_polls = 0
+            self.returncode = 0
+            self.stdin = types.SimpleNamespace(write=lambda data: written_payloads.append(json.loads(data)), close=lambda: None)
+
+        def poll(self):
+            if not self.is_ue:
+                return None
+            self.ue_polls += 1
+            return None if self.ue_polls == 1 else 0
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(campaign.subprocess, 'Popen', FakePopen)
+    monkeypatch.setattr(campaign.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(campaign, 'stop_process', lambda p: None)
+    monkeypatch.setattr(campaign, 'transfer', lambda *a, **kw: None)
+
+    settings = {
+        'inventory': 'inv.yaml', 'nr_ue': '/bin/nr-ue', 'token': 'tok', 'image': 'img',
+        'telemetry_url': 'http://127.0.0.1/obs', 'site_node_ips': {'gnb-1': '10.0.0.1', 'gnb-2': '10.0.0.2', 'gnb-3': '10.0.0.3'},
+        'schedule': campaign.SCALER_BALANCED_SCHEDULE, 'phase_duration': 60,
+        'phase_durations': [60.0] * 6 + [420.0], 'workload': 'face-detection',
+        'ue_host': 'ue', 'ue_project': '/ue',
+    }
+    kube_calls.clear()
+    root = tmp_path / 'run'
+    root.mkdir()
+    campaign.run_method(
+        settings, 'scaler_01', root, 'proposed', None, 100, 24,
+        comparison='scaling', autoscaler='hpa', placement_engine='go',
+    )
+    assert not (root / 'proposed' / 'placement-configmap.yaml').exists()
+    assert not any('placement-controller' in ' '.join(map(str, c)) for c in kube_calls)
+    assert not any('-m controller' in ' '.join(map(str, cmd)) for cmd in popen_cmds)
+    assert written_payloads[0]['phase_durations'] == [60.0] * 6 + [420.0]
+
+
+def test_check_node_capacity_passes_and_fails_clearly(tmp_path, monkeypatch):
+    manifest = tmp_path / 'workload.yaml'
+    manifest.write_text(yaml.safe_dump({
+        'apiVersion': 'apps/v1',
+        'kind': 'Deployment',
+        'metadata': {'name': 'mec-placement-face-detection', 'namespace': 'services'},
+        'spec': {'template': {'spec': {'containers': [{
+            'name': 'app',
+            'resources': {'requests': {'cpu': '500m', 'memory': '256Mi'}},
+        }]}}},
+    }))
+
+    def mock_node_and_pods(alloc_cpu, alloc_mem):
+        def fake_kube(*args, **kwargs):
+            if args[:3] == ('get', 'node', 'gnb-3'):
+                return types.SimpleNamespace(stdout=json.dumps({
+                    'status': {'allocatable': {'cpu': alloc_cpu, 'memory': alloc_mem}},
+                }))
+            if args[:3] == ('get', 'pods', '-A'):
+                return types.SimpleNamespace(stdout=json.dumps({'items': [
+                    {'metadata': {'namespace': 'kube-system'}, 'status': {'phase': 'Running'},
+                     'spec': {'containers': [{'resources': {'requests': {'cpu': '2', 'memory': '2Gi'}}}]}},
+                    {'metadata': {'namespace': 'services', 'labels': {'app': 'mec-placement-face-detection'}},
+                     'status': {'phase': 'Running'},
+                     'spec': {'containers': [{'resources': {'requests': {'cpu': '500m', 'memory': '256Mi'}}}]}},
+                ]}))
+            raise AssertionError(f'unexpected kube call: {args}')
+        return fake_kube
+
+    monkeypatch.setattr(campaign, 'kube', mock_node_and_pods('16', '32Gi'))
+    campaign.check_node_capacity('gnb-3', manifest, 24, 'mec-placement-face-detection')
+
+    monkeypatch.setattr(campaign, 'kube', mock_node_and_pods('8', '32Gi'))
+    with pytest.raises(RuntimeError, match='node gnb-3 cannot fit 24 replicas'):
+        campaign.check_node_capacity('gnb-3', manifest, 24, 'mec-placement-face-detection')
+
+
+@pytest.mark.parametrize('flags', [
+    ['--comparison', 'scaling', '--scenario', 'mobility9'],
+    ['--comparison', 'full', '--scenario', 'scaler-balanced'],
+    ['--comparison', 'placement', '--scenario', 'scaler-balanced'],
+    ['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--fixed-replicas', '6'],
+    ['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--debug'],
+    ['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--autoscaler', 'controller'],
+    ['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--placement-engine', 'python'],
+    ['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--deschedule-interval', '30'],
+    ['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--locality-weight', '0.4'],
+    ['--scenario', 'mobility9', '--final-hold'],
+    ['--final-hold'],
+])
+def test_scaler_balanced_rejects_incompatible_options_before_cluster_access(flags, monkeypatch):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
+    with pytest.raises(SystemExit) as exc:
+        campaign.main(['scaler_invalid', *flags])
     assert exc.value.code == 2
