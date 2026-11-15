@@ -94,6 +94,34 @@ def remote_settings(settings):
         'max_ues': max(p['workload_ue'] for p in parse_schedule(settings['schedule']))}
 
 
+def check_result_name(settings, name):
+    """Reject collisions before active preflight, without creating either directory."""
+    root = ROOT / 'results' / name
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f'Campaign name already exists on core: {root}. '
+                              'Archive it or use a new campaign name; UE results must also be absent.')
+    script = ('import os,sys\n'
+              'try: os.lstat(sys.argv[1])\n'
+              'except FileNotFoundError: sys.exit(0)\n'
+              'else: sys.exit(17)\n')
+    args = remote(settings, ['.venv/bin/python', '-c', script, f'results/{name}'])
+    # Keep SSH errors distinct from a positive remote existence check.
+    result = subprocess.run(args, text=True, capture_output=True, check=False)
+    if result.returncode == 17:
+        raise FileExistsError(f'Campaign name already exists on UE host {settings["ue_host"]}: '
+                              f'{settings["ue_project"]}/results/{name}. '
+                              'Archive that directory (it may be root-owned) or use a new campaign name. '
+                              'No connectivity probes or campaign traffic were started by this check.')
+    if result.returncode:
+        raise RuntimeError(f'Could not check result name on UE host {settings["ue_host"]} '
+                           f'(exit {result.returncode}): {result.stderr.strip()}. '
+                           'No result directory was created.')
+
+
 def load(path):
     data = yaml.safe_load(Path(path).read_text())
     expected = {'ue_host', 'ue_project', 'inventory', 'nr_ue', 'token', 'image', 'site_node_ips',
@@ -443,12 +471,15 @@ def main(argv=None):
         def interrupted(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupted)
+        if not args.check:
+            check_result_name(settings, args.campaign)
         prerequisites(settings)
         if args.check:
             return
         root = ROOT / 'results' / args.campaign
+        # Recheck after preflight in case another process reserved the name.
+        check_result_name(settings, args.campaign)
         root.mkdir(parents=True, exist_ok=False)
-        command(remote(settings, ['test', '!', '-e', f'results/{args.campaign}']))
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
                                        'max_replicas': max_replicas, 'debug': args.debug,

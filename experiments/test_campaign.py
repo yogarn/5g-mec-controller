@@ -116,6 +116,32 @@ def test_campaign_name_cannot_escape_results(monkeypatch):
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize('code', [0, 17, 255])
+def test_result_name_check_distinguishes_collision_from_ssh_failure(tmp_path, monkeypatch, code):
+    monkeypatch.setattr(campaign, 'ROOT', tmp_path)
+    monkeypatch.setattr(campaign.subprocess, 'run', lambda *a, **kw:
+                        subprocess.CompletedProcess(a[0], code, stdout='', stderr='SSH diagnostic'))
+    config = {'ue_host': 'ue', 'ue_project': '/project'}
+    if code == 17:
+        with pytest.raises(FileExistsError, match='UE host ue: /project/results/reused'):
+            campaign.check_result_name(config, 'reused')
+    elif code:
+        with pytest.raises(RuntimeError, match='SSH diagnostic'):
+            campaign.check_result_name(config, 'reused')
+    else:
+        campaign.check_result_name(config, 'reused')
+    assert not (tmp_path / 'results').exists()
+
+
+def test_duplicate_name_stops_before_preflight(monkeypatch):
+    def duplicate(*args):
+        raise FileExistsError('already exists on UE host')
+    monkeypatch.setattr(campaign, 'check_result_name', duplicate)
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('active probe ran'))
+    with pytest.raises(FileExistsError, match='UE host'):
+        campaign.main(['reused'])
+
+
 def test_progress_relays_phase_lines_without_duplicates_or_partial_lines(tmp_path, capsys):
     path = tmp_path / 'runner.log'
     path.write_text('[RUN] phase_02: 2/19 ramp-up; 9 UEs\n[--] phase_02: 10')
