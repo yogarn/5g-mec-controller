@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
+MOBILITY9_SCHEDULE = '9:3:3:3,9:7:1:1,9:1:7:1,9:1:1:7,9:1:7:1,9:7:1:1,9:3:3:3'
 COMPARISONS = ('full', 'placement')
 AUTOSCALERS = ('controller', 'hpa')
 PLACEMENT_ENGINES = ('python', 'go')
@@ -432,7 +433,7 @@ def verify_incluster_components(autoscaler, placement_engine):
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller'):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None):
     """Persist the exact matched replica budget and manifests used by a method."""
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
@@ -474,6 +475,10 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
         config.update(interval_seconds=15, cooldown_seconds=15,
                       scale_down_seconds=30, deschedule_interval_seconds=30)
         config['cpu_utilization_query'] = config['cpu_utilization_query'].replace('[2m]', '[1m]')
+    if deschedule_interval is not None:
+        if not math.isfinite(deschedule_interval) or deschedule_interval <= 0:
+            raise ValueError('descheduler interval must be finite and positive')
+        config['deschedule_interval_seconds'] = deschedule_interval
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
@@ -496,14 +501,14 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
 
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
                resource_weights=None, locality_weight=None, comparison='full',
-               autoscaler='controller', placement_engine='python'):
+               autoscaler='controller', placement_engine='python', deschedule_interval=None):
     if placement_engine not in PLACEMENT_ENGINES:
         raise ValueError(f'placement_engine must be one of {PLACEMENT_ENGINES}')
     output = root / method
     output.mkdir()
     config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
                                                   resource_weights, locality_weight, selected_workload(settings),
-                                                  comparison, autoscaler)
+                                                  comparison, autoscaler, deschedule_interval)
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -621,7 +626,11 @@ def main(argv=None):
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or face-detection)')
-    parser.add_argument('--comparison', choices=COMPARISONS, default='full',
+    parser.add_argument('--scenario', choices=['mobility9'],
+                        help='mobility9: fixed nine UEs, rotating hotspots, shared latency HPA, 60s phases')
+    parser.add_argument('--deschedule-interval', type=float,
+                        help='seconds between proposed descheduler checks (mobility9 default: 30; otherwise config.yaml)')
+    parser.add_argument('--comparison', choices=COMPARISONS, default=None,
                         help='placement: same latency autoscaler for both methods; full: default-scheduler+CPU HPA vs full proposed system')
     parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
                         help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter) or controller (Python fallback)')
@@ -645,6 +654,18 @@ def main(argv=None):
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     args = parser.parse_args(argv)
+    args.comparison = args.comparison or ('placement' if args.scenario else 'full')
+    if args.scenario:
+        if args.debug:
+            parser.error('mobility9 uses standard HPA timers; omit --debug')
+        if args.autoscaler != 'hpa' or args.placement_engine != 'go':
+            parser.error('mobility9 requires native HPA and Go placement')
+        if args.slo_ms is None:
+            args.slo_ms = 100
+        if args.deschedule_interval is None:
+            args.deschedule_interval = 30
+    if args.deschedule_interval is not None and (not math.isfinite(args.deschedule_interval) or args.deschedule_interval <= 0):
+        parser.error('--deschedule-interval must be finite and positive')
     if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
         parser.error('--tc-ms must be finite and at least 0.001 ms')
     if args.slo_ms is not None and (not math.isfinite(args.slo_ms) or args.slo_ms <= 0):
@@ -656,6 +677,8 @@ def main(argv=None):
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
+    if args.scenario == 'mobility9':
+        settings.update(schedule=MOBILITY9_SCHEDULE, phase_duration=60)
     workload = args.workload if args.workload is not None else selected_workload(settings)
     settings['workload'] = workload
     if args.workload is not None and args.workload != 'face-detection':
@@ -691,9 +714,10 @@ def main(argv=None):
         _campaign_manifest(output, args.tc_ms is not None, workload)
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
-                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler)
+                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval)
         (output / 'plan.yaml').write_text(yaml.safe_dump({
             'workload': workload, 'comparison': args.comparison,
+            'scenario': args.scenario, 'deschedule_interval_seconds': args.deschedule_interval,
             'autoscaler': args.autoscaler,
             'placement_engine': args.placement_engine,
             'attribution_note': COMPARISON_NOTES[args.comparison],
@@ -720,6 +744,8 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
+                                       'scenario': args.scenario,
+                                       'deschedule_interval_seconds': args.deschedule_interval,
                                        'max_replicas': max_replicas, 'debug': args.debug, 'workload': workload,
                                        'comparison': args.comparison,
                                        'autoscaler': args.autoscaler,
@@ -735,6 +761,10 @@ def main(argv=None):
               f'<= {slo_ms:g} ms. Shared replica ceiling: {max_replicas}.', flush=True)
         print(f'Proposed scoring: resource weights={resource_weights}; '
               f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
+        if args.scenario:
+            print('Mobility scenario: fixed nine UEs; hotspot order gNB-1 -> gNB-2 -> gNB-3 -> gNB-2 -> gNB-1. '
+                  f'Descheduler checks every {args.deschedule_interval:g}s; evictions require settled Pods and positive score improvement. '
+                  'UE moves use stop-and-reattach, not handover. HPA remains active.', flush=True)
         if args.debug:
             print('DEBUG profile: 15s collector window retained; controller interval 15s, '
                   'placement-only cooldown 15s, scale-down stabilization 30s, descheduler 30s, '
@@ -754,7 +784,7 @@ def main(argv=None):
                 reset(workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
                            resource_weights, locality_weight, args.comparison,
-                           args.autoscaler, args.placement_engine)
+                           args.autoscaler, args.placement_engine, args.deschedule_interval)
             command([sys.executable, '-m', 'utils.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:

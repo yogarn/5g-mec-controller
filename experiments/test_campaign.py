@@ -512,3 +512,50 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     assert cfg['prometheus_url'] == 'http://placement-prometheus.placement.svc:9090'
     assert cfg['mutate'] is True
     assert 'scheduler bound pod=test' in (run_root / 'proposed' / 'controller.log').read_text()
+
+
+def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / 'mobility-plan'
+    campaign.main(['--scenario', 'mobility9', '--plan-only', str(output)])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    assert plan['comparison'] == 'placement'
+    assert plan['slo_ms'] == 100
+    settings = plan['campaign_settings']
+    assert settings['phase_duration'] == 60
+    assert settings['schedule'] == '9:3:3:3,9:7:1:1,9:1:7:1,9:1:1:7,9:1:7:1,9:7:1:1,9:3:3:3'
+    baseline = yaml.safe_load((output / 'baseline-hpa.yaml').read_text())
+    proposed = yaml.safe_load((output / 'proposed-hpa.yaml').read_text())
+    assert baseline['spec'] == proposed['spec']
+    assert proposed['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+    assert proposed['spec']['metrics'][0]['external']['target']['value'] == '100m'
+    cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
+    assert cfg['deschedule_interval_seconds'] == 30
+    original = yaml.safe_load((campaign.ROOT / 'config.yaml').read_text())
+    assert cfg['cpu_utilization_query'] == original['cpu_utilization_query']
+    cm = campaign._render_incluster_placement_configmap(cfg, cfg['manifest'])
+    assert yaml.safe_load(cm['data']['config.yaml'])['deschedule_interval_seconds'] == 30
+
+
+def test_mobility9_preserves_explicit_timer_and_slo_overrides(tmp_path):
+    output = tmp_path / 'plan'
+    campaign.main(['--scenario', 'mobility9', '--deschedule-interval', '45',
+                   '--phase-duration', '90', '--slo-ms', '150', '--plan-only', str(output)])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    assert plan['campaign_settings']['phase_duration'] == 90
+    assert plan['slo_ms'] == 150
+    cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
+    assert cfg['deschedule_interval_seconds'] == 45
+
+
+@pytest.mark.parametrize('flags', [
+    ['--deschedule-interval', '0'], ['--deschedule-interval', 'nan'],
+    ['--deschedule-interval', '-1'], ['--deschedule-interval', 'inf'],
+    ['--scenario', 'mobility9', '--debug'],
+    ['--scenario', 'mobility9', '--placement-engine', 'python'],
+])
+def test_mobility_rejects_invalid_timing_and_runtime_before_cluster_access(flags, monkeypatch):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
+    with pytest.raises(SystemExit) as exc:
+        campaign.main(['test_mobility', *flags])
+    assert exc.value.code == 2

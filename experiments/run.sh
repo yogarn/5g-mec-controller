@@ -2,6 +2,7 @@
 # One-time setup (venv on core + UE host): bash experiments/run.sh setup
 # Prerequisites + temporary workload and UE connectivity probes: bash experiments/run.sh check [--workload face-detection|pedestrian-detection]
 # Render manifests without cluster access: bash experiments/run.sh --plan-only /tmp/plan [--workload ...] [--comparison full|placement]
+# Nine-UE mobility: bash experiments/run.sh mobility9_01 --scenario mobility9
 # Whole campaign: bash experiments/run.sh run_2 [--workload face-detection|pedestrian-detection] [--comparison full|placement]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -31,7 +32,7 @@ if [[ "${1:-}" == check ]]; then
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
+  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement] [--scenario mobility9] [--deschedule-interval SECONDS] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"

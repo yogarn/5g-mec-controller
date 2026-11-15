@@ -196,3 +196,23 @@ Controller reconciliation is 15 seconds in both profiles to match Kubernetes' do
 Probe traffic is not submitted to UE latency telemetry, and temporary sessions, routes, application and Service are cleaned up on completion/failure. UE logs and request records remain under `results/mec-preflight-<id>/` on the UE host; failure messages identify the expected UE address and registration/PDU setup log. Checks refuse to interfere with existing UE workloads and use the campaign lock. Probes add startup, registration and cleanup time; they are not read-only checks. Do not force-kill them during cleanup.
 
 Campaign names are checked on core and the configured UE host before active preflight. A duplicate name stops immediately with the host and absolute path; SSH/check failures are reported separately. Both paths must be absent. UE results can be root-owned because the runner requires root for UE interfaces. Archive rather than overwrite previous results. The runner rechecks name availability after preflight and does not create an empty core directory when it finds a remote collision.
+
+## Nine-UE mobility scenario
+
+Run from core with a new result name:
+
+```bash
+bash experiments/run.sh mobility9_01 --scenario mobility9
+```
+
+This scenario keeps nine UEs active per traffic phase, with splits `3:3:3 → 7:1:1 → 1:7:1 → 1:1:7 → 1:7:1 → 7:1:1 → 3:3:3`. Each phase lasts 60 seconds: seven minutes of traffic per method, fourteen minutes per pair, plus setup, UE reattachment and transfer. Movement means stop-and-reattach rather than seamless handover.
+
+The default comparison is `placement`: both methods use the same native latency HPA at 100 ms. Proposed uses the Go scheduler/descheduler. The descheduler checks every 30 seconds; HPA stabilization and the CPU measurement window retain their normal settings. Override the check interval independently with `--deschedule-interval SECONDS`; `--phase-duration`, `--slo-ms`, and `--locality-weight` remain available. `--debug` is rejected for this scenario to avoid changing other timers.
+
+The shorter descheduler interval gives each hotspot opportunities for eviction, but does not force a move. Pods must be settled, the destination must be feasible, and the score improvement must be positive; PDB rejection also defers eviction. In particular, gNB-1 may lack capacity. Inspect `proposed/controller.log` for `descheduler evicted`, `descheduler noop`, and `descheduler deferred`, alongside placement and latency plots. HPA remains active, so new-Pod scheduling also affects placement; this is a diagnostic of the placement system, not an isolated descheduler-only test. Repeat with reversed hotspot order before treating an observed effect as general.
+
+Preview locally without traffic or cluster access:
+
+```bash
+bash experiments/run.sh --scenario mobility9 --plan-only /tmp/mobility9-plan
+```
