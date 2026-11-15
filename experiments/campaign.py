@@ -233,13 +233,17 @@ def _campaign_manifest(root, use_tc):
 
 
 
-def _method_configs(root, method, slo_ms, max_replicas):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False):
     """Persist the exact matched replica budget and manifests used by a method."""
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
         raise ValueError('max replicas must be an integer at least min_replicas')
     config.update(manifest=str(root / 'workload.yaml'), mutate=method == 'proposed',
                   slo_seconds=slo_ms / 1000, max_replicas=max_replicas)
+    if debug:
+        config.update(interval_seconds=5, cooldown_seconds=15,
+                      scale_down_seconds=30, deschedule_interval_seconds=30)
+        config['cpu_utilization_query'] = config['cpu_utilization_query'].replace('[2m]', '[30s]')
     config_path = root / f'{method}-controller.yaml'
     with config_path.open('x') as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
@@ -247,16 +251,18 @@ def _method_configs(root, method, slo_ms, max_replicas):
     if method == 'baseline':
         hpa = yaml.safe_load((ROOT / 'experiments/hpa-baseline.yaml').read_text())
         hpa['spec'].update(minReplicas=config['min_replicas'], maxReplicas=max_replicas)
+        if debug:
+            hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = 30
         hpa_path = root / 'baseline-hpa.yaml'
         with hpa_path.open('x') as stream:
             yaml.safe_dump(hpa, stream, sort_keys=False)
     return config, config_path, hpa_path
 
 
-def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas):
+def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False):
     output = root / method
     output.mkdir()
-    config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas)
+    config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug)
     processes = []
     remote_started = False
     completed = False
@@ -346,6 +352,10 @@ def main(argv=None):
     parser.add_argument('--slo-ms', type=float, help='controller p90 target and reporting threshold in milliseconds (default: config.yaml)')
     parser.add_argument('--max-replicas', type=int,
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
+    parser.add_argument('--debug', action='store_true',
+                        help='90s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
+    parser.add_argument('--phase-duration', type=float,
+                        help='traffic seconds per phase (minimum 60; default: campaign config, or 90 with --debug)')
     args = parser.parse_args(argv)
     if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
         parser.error('--tc-ms must be finite and at least 0.001 ms')
@@ -353,9 +363,15 @@ def main(argv=None):
         parser.error('--slo-ms must be finite and positive')
     if args.max_replicas is not None and args.max_replicas < 1:
         parser.error('--max-replicas must be a positive integer')
+    if args.phase_duration is not None and (not math.isfinite(args.phase_duration) or args.phase_duration < 60):
+        parser.error('--phase-duration must be finite and at least 60 seconds')
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
+    if args.debug:
+        settings['phase_duration'] = 90
+    if args.phase_duration is not None:
+        settings['phase_duration'] = args.phase_duration
     controller_config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
     max_replicas = args.max_replicas if args.max_replicas is not None else controller_config['max_replicas']
@@ -373,13 +389,19 @@ def main(argv=None):
         command(remote(settings, ['test', '!', '-e', f'results/{args.campaign}']))
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
-                                       'max_replicas': max_replicas}, stream)
+                                       'max_replicas': max_replicas, 'debug': args.debug}, stream)
         phases = parse_schedule(settings['schedule'])
         minutes = len(phases) * settings['phase_duration'] / 60
         print(f'Campaign: {len(phases)} phases per method, {settings["phase_duration"]:g}s each; '
               f'{minutes:g} minutes traffic per method ({2 * minutes:g} minutes total), '
               'plus UE switching, setup and transfer. Objective: all-attempt p90 '
               f'<= {slo_ms:g} ms. Shared replica ceiling: {max_replicas}.', flush=True)
+        if args.debug:
+            print('DEBUG profile: 15s collector window retained; controller interval 5s, '
+                  'cooldown 15s, scale-down stabilization 30s, descheduler 30s, '
+                  'node CPU window 30s; HPA scale-down stabilization 30s. '
+                  'Cluster scrape and metrics-server/HPA sync intervals are unchanged. '
+                  'Short phases do not guarantee convergence.', flush=True)
         ns = kube('get', 'namespace', NAMESPACE, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
         if not ns.stdout.strip():
             kube('create', 'namespace', NAMESPACE)
@@ -394,7 +416,7 @@ def main(argv=None):
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset()
-                run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas)
+                run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug)
             command([sys.executable, '-m', 'experiments.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:

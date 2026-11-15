@@ -152,7 +152,8 @@ def test_replica_cap_is_identical_in_saved_baseline_hpa_and_proposed_config(tmp_
     assert baseline['max_replicas'] == proposed['max_replicas'] == saved['max_replicas'] == hpa['spec']['maxReplicas'] == cap
     assert baseline['min_replicas'] == proposed['min_replicas'] == hpa['spec']['minReplicas']
     assert no_hpa is None
-    assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert hpa['spec']['metrics'][0]['resource']['target'] == {
+        'type': 'AverageValue', 'averageValue': '1000m'}
 
 
 @pytest.mark.parametrize('cap', [0, -1, 1.5, True])
@@ -160,6 +161,32 @@ def test_invalid_cap_does_not_write_method_configs(tmp_path, cap):
     with pytest.raises(ValueError, match='max replicas'):
         campaign._method_configs(tmp_path, 'baseline', 500, cap)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp_path):
+    baseline, _, path = campaign._method_configs(tmp_path, 'baseline', 300, 30, debug=True)
+    proposed, config_path, _ = campaign._method_configs(tmp_path, 'proposed', 300, 30, debug=True)
+    saved = yaml.safe_load(config_path.read_text())
+    hpa = yaml.safe_load(path.read_text())
+    for config in (baseline, proposed, saved):
+        assert config['interval_seconds'] == 5
+        assert config['cooldown_seconds'] == 15
+        assert config['scale_down_seconds'] == 30
+        assert config['deschedule_interval_seconds'] == 30
+        assert '[30s]' in config['cpu_utilization_query']
+        assert config['slo_seconds'] == .3
+        assert config['max_replicas'] == 30
+        assert config['mobility_query'].endswith('/ 15')
+    assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 30
+    assert hpa['spec']['metrics'][0]['resource']['target']['averageValue'] == '1000m'
+
+
+@pytest.mark.parametrize('duration', ['0', '59', 'nan', 'inf'])
+def test_cli_rejects_short_or_invalid_phases_before_preflight(monkeypatch, duration):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('preflight ran'))
+    with pytest.raises(SystemExit) as error:
+        campaign.main(['debug_test', '--debug', '--phase-duration', duration])
+    assert error.value.code == 2
 
 
 @pytest.mark.parametrize('cap', ['0', '-1', '1.5'])

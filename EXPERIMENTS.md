@@ -21,6 +21,30 @@ Traffic control is **off by default**. To enable a 10 ms one-way inter-node dela
 bash experiments/run.sh run_2 --tc-ms 10 --slo-ms 750
 ```
 
+For faster debugging, use a separate campaign name and `--debug`:
+
+```bash
+bash experiments/run.sh debug_01 --debug --tc-ms 10 --slo-ms 300 --max-replicas 30
+```
+
+The debug profile retains all 19 phases, using 90 seconds each: 28.5 minutes per method or 57 minutes per pair, plus UE reattachment, startup and transfer. `--phase-duration 60` reduces paired traffic to 38 minutes; the CLI requires at least 60 seconds. A duration override alone does not change controller timers. Normal runs retain the configured 300-second phases and original controller timers.
+
+| Timing | Normal | Debug |
+|---|---:|---:|
+| Controller reconciliation | 10 s | 5 s |
+| Controller cooldown | 120 s | 15 s |
+| Proposed scale-down stabilization | 180 s | 30 s |
+| Descheduler check | 120 s | 30 s |
+| Node CPU rate window | 120 s | 30 s |
+| HPA scale-down stabilization | 180 s | 30 s |
+| Collector p90/site-count window | 15 s | unchanged |
+| UE telemetry scrape | 5 s | unchanged |
+| Node metrics scrape / evaluation | 1 s | unchanged |
+
+The scrape values above reflect the inspected testbed configuration; the profile does not reconfigure shared Prometheus or the collector. The p90 is exported directly by the collector, rather than computed by a Prometheus recording rule. After switching phases, allow roughly 15 seconds for old observations to leave its window, up to 5 seconds for the next telemetry scrape, and up to 5 seconds for a debug reconciliation. These are indicative sampling delays, not a response deadline; Pod readiness, CPU metrics collection, processing and UE reattachment add time. HPA sync and metrics-server collection remain cluster settings and are not accelerated by this flag. Removal-first relocation can still take tens of seconds. Short phases show transitions and need not reach steady state or complete scale-down. Debug runs change the policies' timing and must be labeled separately from evaluation runs.
+
+The effective phase duration and debug flag are saved in `campaign.yaml`; generated controller and HPA manifests retain the exact policy settings. Traffic shaping, request timeouts, UE cleanup deadlines and Pod readiness checks are unchanged.
+
 Omit `--tc-ms` for no added delay. Omit `--slo-ms` to use `slo_seconds` from `config.yaml` (currently 500 ms). Both methods use the same settings, saved in the campaign's `campaign.yaml`.
 
 To compare placement under a shared replica budget, pass `--max-replicas`:
@@ -109,7 +133,7 @@ The tool inserts only new subscribers; do not reprovision the existing pool. Wri
 
 The application remains in namespace **services**. The runner deletes only the named `mec-placement-face-detection` Deployment/Service and `mec-placement-face-detection-baseline` HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
 
-The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 2 CPU / 2 GiB per-pod limits, shared replica ceiling (`--max-replicas`, default 100) and starting replica count of one. The HPA's 80% CPU target is based on the 500m request (400m per pod), not the CPU limit. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
+The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 2 CPU / 2 GiB per-pod limits, shared replica ceiling (`--max-replicas`, default 100) and starting replica count of one. The HPA uses an absolute average CPU target of 1000m per pod (`AverageValue`), equivalent to 200% of the 500m request and half the 2-CPU limit. This replaces the previous 80%-of-request target (400m); treat runs with different HPA targets as separate baseline configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
 
 For both methods, each UE group sends to its own gNB's NodePort, using `site_node_ips` from `experiments/campaign.yaml`. The runner checks these against Kubernetes node InternalIPs. The Service uses `externalTrafficPolicy: Cluster`, `internalTrafficPolicy: Cluster`, no `trafficDistribution` preference, and `sessionAffinity: None`. Verify that the live kube-proxy uses iptables mode: the Service settings alone do not select the proxy mode. In iptables mode, each new connection randomly selects a ready endpoint across the cluster. A node with k of R ready Pods therefore receives approximately k/R of new connections, including core. This is probabilistic balancing, not strict round robin or load-based spillover; reused connections stay on their selected backend. The runner rejects locality preferences and client affinity before starting UE traffic. Routing from each UE through its UPF to its configured NodePort must be verified on the live network; preflight does not prove those paths.
 
