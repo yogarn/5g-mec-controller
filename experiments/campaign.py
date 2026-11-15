@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import uuid
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -147,7 +148,41 @@ def prerequisites(settings):
         docs = [d for d in yaml.safe_load_all((ROOT / manifest).read_text()) if d]
         if any(d['metadata'].get('namespace') != NAMESPACE for d in docs):
             raise ValueError(f'{manifest} must use the {NAMESPACE} namespace')
-    print('Prerequisites passed. App stays in services; collector stays in placement.', flush=True)
+    connectivity_probe(settings)
+    print('Prerequisites passed, including UE inference paths and reattachment on all three gNBs.', flush=True)
+
+
+def connectivity_probe(settings):
+    """Check a temporary app/NodePort without touching campaign or shared workloads."""
+    probe_id = 'mec-preflight-' + uuid.uuid4().hex[:12]
+    documents = [d for d in yaml.safe_load_all((ROOT / 'apps/face-detection/manifest.yaml').read_text()) if d]
+    for document in documents:
+        document['metadata']['namespace'] = probe_id
+    created = False
+    remote_started = False
+    try:
+        kube('create', 'namespace', probe_id)
+        created = True
+        print(f'[CHECK] Temporary connectivity workload: {probe_id}', flush=True)
+        kube('create', '-f', '-', input=yaml.safe_dump_all(documents), text=True)
+        kube('-n', probe_id, 'rollout', 'status', 'deployment/' + APP, '--timeout=180s')
+        service = get('service', APP, probe_id)
+        check_service_routing(service)
+        port = service['spec']['ports'][0]['nodePort']
+        payload = remote_settings(settings) | {'probe_id': probe_id, 'site_urls': {
+            site: f'http://{ip}:{port}/detect' for site, ip in settings['site_node_ips'].items()}}
+        remote_started = True
+        command(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'probe']),
+                input=json.dumps(payload), text=True)
+    finally:
+        try:
+            if remote_started:
+                command(remote(settings, ['sudo', '-n', '.venv/bin/python', '-m', 'experiments.campaign_ue',
+                                          'stop', '--campaign', probe_id, '--method', 'baseline']))
+        finally:
+            if created:
+                kube('delete', 'namespace', probe_id, '--wait=true', '--timeout=180s')
+    print(f'[OK] Connectivity probe complete; UE diagnostics: results/{probe_id}/ on UE host', flush=True)
 
 
 def reset():
@@ -356,7 +391,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
-    parser.add_argument('--check', action='store_true', help='read-only dependency and connectivity checks')
+    parser.add_argument('--check', action='store_true', help='dependency checks plus temporary workload and UE connectivity probes')
     parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
     parser.add_argument('--slo-ms', type=float, help='controller p90 target and reporting threshold in milliseconds (default: config.yaml)')
     parser.add_argument('--max-replicas', type=int,
@@ -405,6 +440,9 @@ def main(argv=None):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
     with open('/tmp/mec-experiment-campaign.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        def interrupted(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, interrupted)
         prerequisites(settings)
         if args.check:
             return
@@ -433,9 +471,6 @@ def main(argv=None):
         ns = kube('get', 'namespace', NAMESPACE, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
         if not ns.stdout.strip():
             kube('create', 'namespace', NAMESPACE)
-        def interrupted(signum, frame):
-            raise KeyboardInterrupt
-        signal.signal(signal.SIGTERM, interrupted)
         delay = TrafficDelay(args.tc_ms) if args.tc_ms is not None else None
         try:
             if delay is not None:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time setup: bash experiments/run.sh setup
-# Read-only checks: bash experiments/run.sh check
+# Prerequisites plus temporary application and UE connectivity probes: bash experiments/run.sh check
 # Whole campaign: bash experiments/run.sh run_2
 set -euo pipefail
 cd "$(dirname "$0")/.."

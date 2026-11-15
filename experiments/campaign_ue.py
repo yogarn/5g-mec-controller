@@ -104,9 +104,27 @@ def run(settings):
         path.unlink(missing_ok=True)
 
 
+def probe(settings):
+    from experiments.connectivity import probe as connectivity_probe
+    campaign = settings['probe_id']
+    root = Path('results') / campaign
+    root.mkdir(parents=True, exist_ok=False)
+    path = marker(campaign, 'baseline')
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    with path.open('x') as stream:
+        json.dump({'pid': os.getpid(), 'identity': identity(os.getpid())}, stream)
+    try:
+        connectivity_probe(settings, root)
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['check', 'run', 'stop'])
+    parser.add_argument('action', choices=['check', 'probe', 'run', 'stop'])
     parser.add_argument('--campaign')
     parser.add_argument('--method', choices=['baseline', 'proposed'])
     args = parser.parse_args()
@@ -116,6 +134,8 @@ def main():
     settings = json.load(sys.stdin)
     if args.action == 'check':
         check(settings)
+    elif args.action == 'probe':
+        probe(settings)
     else:
         raise SystemExit(run(settings))
 

@@ -103,7 +103,7 @@ bash experiments/run.sh setup
 
 This installs project requirements and Matplotlib on core, project requirements on the UE host, and checks noninteractive SSH/sudo access. It does **not** deploy or restart shared infrastructure. Core must be able to SSH to the configured UE host without a password, and that account must be authorized to use `sudo -n` for the UE runner. Configure that access before running setup; the script does not change sudoers or copy credentials.
 
-You can check readiness at any time **without starting a campaign or modifying Kubernetes resources**:
+Check readiness before running a campaign. This now includes an **active connectivity probe**:
 
 ```bash
 bash experiments/run.sh check
@@ -190,3 +190,7 @@ bash experiments/run.sh debug_resource_01 --debug --slo-ms 500 --tc-ms 10 --max-
 `--resource-weights CPU MEMORY GPU VRAM` requires four finite nonnegative numbers summing to 1. These are weights *inside* the resource component. `--locality-weight L` selects the traffic-share contribution; the resource contribution is `1-L`. Both flags affect proposed placement/descheduling, not the baseline HPA or default scheduler. Enabling GPU/VRAM weights requires valid exporter telemetry. Effective weights are printed and saved in campaign metadata and generated controller configs. Weights cannot make an infeasible node eligible or guarantee equal Pod counts. Keep matched comparisons and change one scoring factor per experiment.
 
 Controller reconciliation is 5 seconds in both profiles, matching the inspected UE-telemetry scrape interval. Node metrics remain scraped every second. This is configured timing, not phase-lock synchronization: a controller check can still precede a scrape. The runner does not change the live Prometheus scrape configuration.
+
+`bash experiments/run.sh check` and automatic campaign preflight create an isolated temporary namespace with the same image-inference application and a cluster-wide NodePort. They register one reserved UE at each gNB, submit one image inference request per site, then repeat after tearing down and reattaching the three UEs. Both cycles must succeed before the campaign starts. This tests data-session setup and UE-to-NodePort/application connectivity, not physical attachment independently or all 24 subscriber configurations. It does not reproduce campaign load or apply the campaign's `tc` shaping. A passing probe cannot rule out a later intermittent storage or network failure.
+
+Probe traffic is not submitted to UE latency telemetry, and temporary sessions, routes, application and Service are cleaned up on completion/failure. UE logs and request records remain under `results/mec-preflight-<id>/` on the UE host; failure messages identify the expected UE address and registration/PDU setup log. Checks refuse to interfere with existing UE workloads and use the campaign lock. Probes add startup, registration and cleanup time; they are not read-only checks. Do not force-kill them during cleanup.

@@ -346,7 +346,9 @@ class OwnedUELifecycle:
                         found = observed
                         break
                     if time.monotonic() >= deadline:
-                        raise RuntimeError('owned UE registration timed out')
+                        raise RuntimeError(f'UE data-interface setup timed out: UE {i + 1}/{total}, '
+                                           f'expected IP {item["ip"]}; inspect {phase / f"ue-{i + 1}.log"} '
+                                           '(registration or PDU session establishment may have failed)')
                     time.sleep(.2)
                 time.sleep(.3)
             if set(found) != expected:
