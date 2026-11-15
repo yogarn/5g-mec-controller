@@ -424,15 +424,21 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 
 // ReconcileDescheduler evicts at most one bound Pod with positive delta via policy/v1 Eviction API.
 func (c *Controller) ReconcileDescheduler(ctx context.Context) (*policy.DescheduleCandidate, error) {
+	return c.reconcileDescheduler(ctx, true)
+}
+
+func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval bool) (*policy.DescheduleCandidate, error) {
 	if c.Settings.Mode != "mobility-aware" {
 		return nil, nil
 	}
 	now := c.Now()
-	c.mu.Lock()
-	tooSoon := c.hasDescheduled && now.Sub(c.lastDescheduleTime).Seconds() < c.Settings.DescheduleIntervalSeconds
-	c.mu.Unlock()
-	if tooSoon {
-		return nil, nil
+	if enforceInterval {
+		c.mu.Lock()
+		tooSoon := c.hasDescheduled && now.Sub(c.lastDescheduleTime).Seconds() < c.Settings.DescheduleIntervalSeconds
+		c.mu.Unlock()
+		if tooSoon {
+			return nil, nil
+		}
 	}
 
 	dep, err := c.Client.AppsV1().Deployments(c.Namespace).Get(ctx, c.Name, metav1.GetOptions{})
@@ -641,7 +647,7 @@ func (c *Controller) Run(ctx context.Context) error {
 				c.Logger.Printf("scheduler error: %v", err)
 			}
 		case <-deschedTicker.C:
-			if _, err := c.ReconcileDescheduler(ctx); err != nil {
+			if _, err := c.reconcileDescheduler(ctx, false); err != nil {
 				c.Logger.Printf("descheduler error: %v", err)
 			}
 		}

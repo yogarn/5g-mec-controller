@@ -441,3 +441,40 @@ func TestSchedulerAndDeschedulerIgnoreMissingAndOtherScheduler(t *testing.T) {
 		t.Fatalf("descheduler must ignore default-scheduler baseline deployment, cand=%+v err=%v", cand, err)
 	}
 }
+
+func TestDeschedulerTickerPathDoesNotDoubleGateJitter(t *testing.T) {
+	settings := testSettings()
+	settings.DescheduleIntervalSeconds = 30
+
+	dep := makeTestDeployment(1)
+	pod := makeTestPod("app-0", "uid-0", "a", settings.SchedulerName, true, "1", "1Gi")
+	client := fake.NewSimpleClientset(
+		makeTestNode("a", "4", "4Gi"),
+		makeTestNode("b", "4", "4Gi"),
+		dep,
+		pod,
+	)
+	prom := &fakeTelemetry{
+		cpu:     map[string]float64{"a": 0.2, "b": 0.2},
+		traffic: map[string]float64{"a": 0.0, "b": 10.0},
+	}
+
+	ctrl := NewController(settings, client, prom, "services", "pedestrian")
+	ctrl.Logger = log.New(&bytes.Buffer{}, "", 0)
+	now := time.Unix(1000, 0)
+	ctrl.Now = func() time.Time { return now }
+
+	ctx := context.Background()
+	if cand, err := ctrl.reconcileDescheduler(ctx, false); err != nil || cand == nil {
+		t.Fatalf("expected initial eviction, got cand=%+v err=%v", cand, err)
+	}
+
+	// Simulate ticker jitter arriving 100ms before 30s has elapsed since lastDescheduleTime.
+	now = now.Add(29900 * time.Millisecond)
+	if cand, err := ctrl.ReconcileDescheduler(ctx); err != nil || cand != nil {
+		t.Fatalf("direct ReconcileDescheduler should still enforce interval, got cand=%+v err=%v", cand, err)
+	}
+	if cand, err := ctrl.reconcileDescheduler(ctx, false); err != nil || cand == nil {
+		t.Fatalf("ticker path reconcileDescheduler(false) must not skip jittered 30s tick, got cand=%+v err=%v", cand, err)
+	}
+}
