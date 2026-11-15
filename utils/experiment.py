@@ -84,13 +84,12 @@ def run_fixed_rate_phase(
         def run_one(slot_index, scheduled_mono):
             nonlocal started, completed, successes, missed, in_flight
             try:
-                actual_start = monotonic_fn()
-                if (cancelled.is_set() or actual_start >= phase_end_mono
-                        or actual_start > scheduled_mono + lateness_tolerance):
-                    with ue_lock:
-                        missed += 1
-                    return
                 with ue_lock:
+                    actual_start = monotonic_fn()
+                    if (cancelled.is_set() or actual_start >= phase_end_mono
+                            or actual_start > scheduled_mono + lateness_tolerance):
+                        missed += 1
+                        return
                     started += 1
                 record = dispatch_fn(group, source, ue_index, image)
                 with ue_lock:

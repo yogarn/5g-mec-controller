@@ -559,20 +559,37 @@ def test_invalid_rps_or_concurrency_rejected_before_results(tmp_path, kwargs):
     assert not (tmp_path / 'run').exists()
 
 
-def test_fixed_rate_expired_queued_tasks_count_as_missed():
-    # Simulate pacer submitting 5 slots in a 1.0s phase while worker execution is delayed until t=2.0s.
-    pacer_clock = [0.0]
-    pacer_tid = None
+def test_fixed_rate_expired_queued_tasks_count_as_missed(monkeypatch):
+    # Ensure pacer submits all 5 tasks to the executor, then workers execute at t=2.0s (> 1.0s phase).
+    import concurrent.futures
+
+    clock = [0.0]
     dispatched = []
     emitted = []
+    submitted_count = 0
+    all_submitted = threading.Event()
+
+    class DelayedWorkerExecutor(concurrent.futures.ThreadPoolExecutor):
+        def submit(self, fn, *args, **kwargs):
+            nonlocal submitted_count
+            submitted_count += 1
+            if submitted_count == 5:
+                all_submitted.set()
+
+            def delayed():
+                all_submitted.wait(timeout=2)
+                clock[0] = 2.0
+                return fn(*args, **kwargs)
+
+            return super().submit(delayed)
+
+    monkeypatch.setattr(concurrent.futures, 'ThreadPoolExecutor', DelayedWorkerExecutor)
 
     def monotonic_fn():
-        if threading.get_ident() == pacer_tid:
-            return pacer_clock[0]
-        return 2.0
+        return clock[0]
 
     def wait_fn(dt):
-        pacer_clock[0] += dt
+        clock[0] += dt
         return False
 
     def dispatch_fn(group, source, ue_index, image):
@@ -580,72 +597,82 @@ def test_fixed_rate_expired_queued_tasks_count_as_missed():
         return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 1.0,
                 'start_time': 1.0, 'end_time': 1.001}
 
-    original = experiment.run_fixed_rate_phase
-    # Capture pacer thread id on first wait_fn/monotonic_fn call from inside worker thread.
-    def smart_monotonic():
-        nonlocal pacer_tid
-        # The first two calls in worker() are phase_start_mono (on outer thread? No, phase_start_mono is on caller thread!)
-        # Caller thread reads phase_start_mono once; worker thread calls wait_fn; req_pool threads never call wait_fn.
-        tid = threading.get_ident()
-        if tid == pacer_tid:
-            return pacer_clock[0]
-        return 2.0 if pacer_tid is not None else 0.0
-
-    def smart_wait(dt):
-        nonlocal pacer_tid
-        pacer_tid = threading.get_ident()
-        pacer_clock[0] += dt
-        return False
-
-    # Use a 0.2s wait before slot 0? Slot 0 is at 0.0 (pacer_tid not set yet -> returns 0.0).
-    # For slot 0, pacer_tid is set on first wait_fn (for slot 1 at 0.2), so instead set pacer_tid when worker starts:
-    # Actually let's use a Gate so worker threads don't run until pacer finishes (pacer_clock[0] == 1.0),
-    # and once pacer_clock[0] >= 1.0, monotonic_fn returns 2.0 for ALL threads!
-    pacer_done = threading.Event()
-    pacer_clock = [0.0]
-
-    def gated_monotonic():
-        return 2.0 if pacer_done.is_set() else pacer_clock[0]
-
-    def gated_wait(dt):
-        pacer_clock[0] += dt
-        if pacer_clock[0] >= 0.99:
-            pacer_done.set()
-        return False
-
-    # Note: req_pool workers for slots 0..3 might run before slot 4 finishes; block dispatch check until pacer_done?
-    # Even simpler: run with a single-threaded executor or make worker threads read 2.0 whenever not in wait_fn?
-    # Better: use threading.local: pacer thread has tls.is_pacer = True (set in wait_fn; and slot 0 has offset > 0 so wait_fn runs BEFORE slot 0!).
-    # With 2 UEs, UE 1 has offset=0.1s so wait_fn runs before slot 0! Let's test UE 1 (or single UE with offset wait).
-    # Actually: if we wrap ThreadPoolExecutor? No, even simpler: in gated_monotonic, if caller thread sets a thread id for main,
-    # and wait_fn sets pacer_tid, and for slot 0 we let 2 UEs run and check UE 1 (offset 0.1s -> wait_fn runs first!).
-    pacer_tids = set()
-    main_tid = threading.get_ident()
-
-    def exact_monotonic():
-        tid = threading.get_ident()
-        if tid == main_tid or tid in pacer_tids:
-            return pacer_clock[0]
-        return 2.0
-
-    def exact_wait(dt):
-        pacer_tids.add(threading.get_ident())
-        pacer_clock[0] += dt
-        return False
-
-    per_ue = original(
-        'phase_01', [('gnb-1', '10.0.0.1', 0), ('gnb-2', '10.0.0.2', 1)], 1.0, 5.0, 8,
-        dispatch_fn, emitted.append, lambda _g: 'http://x/detect', _fake_images(), [0, 0],
-        monotonic_fn=exact_monotonic, wait_fn=exact_wait,
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 8,
+        dispatch_fn, emitted.append, lambda _g: 'http://x/detect', _fake_images(), [0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
-    # UE 1 (index 1, offset=0.1s) entered exact_wait before slot 0, so all 5 of its queued tasks saw 2.0s >= 1.0s!
-    ue1 = per_ue[1]
-    assert ue1['scheduled'] == 5
-    assert ue1['started'] == 0
-    assert ue1['completed'] == 0
-    assert ue1['missed'] == 5
-    assert ue1['request_coverage'] == 0.0
-    assert all(r['ue_index'] != 1 for r in emitted)
+    assert submitted_count == 5
+    assert per_ue[0]['scheduled'] == 5
+    assert per_ue[0]['started'] == 0
+    assert per_ue[0]['completed'] == 0
+    assert per_ue[0]['missed'] == 5
+    assert per_ue[0]['request_coverage'] == 0.0
+    assert dispatched == []
+    assert emitted == []
+
+
+def test_fixed_rate_slow_emit_does_not_bypass_worker_deadline():
+    # Slot 0 completes and blocks in emit() holding ue_lock until t=0.45s (> 0.30s phase_duration)
+    # while slot 1 (0.20s) is waiting to start; slot 1 must recheck deadline after acquiring ue_lock.
+    clock = [0.0]
+    clock_lock = threading.Lock()
+    slot0_in_emit = threading.Event()
+    slot1_submitted = threading.Event()
+    release_emit = threading.Event()
+    dispatched_at = []
+    emitted = []
+
+    def monotonic_fn():
+        with clock_lock:
+            return clock[0]
+
+    def wait_fn(dt):
+        if round(monotonic_fn(), 6) == 0.0:
+            # Let slot 0 finish and enter emit() (holding ue_lock) before advancing to slot 1 (0.20s).
+            slot0_in_emit.wait(timeout=2)
+        with clock_lock:
+            clock[0] += dt
+            cur = clock[0]
+        if round(cur, 6) >= 0.20:
+            slot1_submitted.set()
+        return False
+
+    def dispatch_fn(group, source, ue_index, image):
+        dispatched_at.append(round(monotonic_fn(), 6))
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 1.0,
+                'start_time': 1.0, 'end_time': 1.001}
+
+    def slow_emit(record):
+        slot0_in_emit.set()
+        # Wait until slot 1 has been submitted at t=0.20s, then advance clock past phase_end (0.30s) to 0.45s.
+        slot1_submitted.wait(timeout=2)
+        release_emit.wait(timeout=2)
+        emitted.append(record)
+
+    def advance_and_release():
+        slot1_submitted.wait(timeout=2)
+        # Give slot 1 worker a moment to block on ue_lock before advancing clock to 0.45s.
+        time.sleep(0.02)
+        with clock_lock:
+            clock[0] = 0.45
+        release_emit.set()
+
+    t = threading.Thread(target=advance_and_release, daemon=True)
+    t.start()
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.30, 5.0, 4,
+        dispatch_fn, slow_emit, lambda _g: 'http://x/detect', _fake_images(), [0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
+    )
+    t.join(timeout=2)
+    assert dispatched_at == [0.0]
+    assert per_ue[0]['scheduled'] == 2
+    assert per_ue[0]['started'] == 1
+    assert per_ue[0]['completed'] == 1
+    assert per_ue[0]['missed'] == 1
+    assert per_ue[0]['request_coverage'] == 0.5
+    assert len(emitted) == 1
 
 
 def test_fixed_rate_delayed_slot_039_skipped_without_compressed_follow_up():
