@@ -129,8 +129,10 @@ def test_interrupted_wait_stops_workers_and_closes_ues(tmp_path, monkeypatch, er
     assert calls == ['127.0.0.3']
     assert len(workers) == 1
     assert workers[0].done()
-    assert workers[0].result() == {
-        'group': 'gnb-1', 'source_address': '127.0.0.3', 'attempts': 1, 'successes': 1}
+    result = workers[0].result()
+    assert {k: result[k] for k in ('group', 'source_address', 'attempts', 'successes', 'scheduled', 'started', 'completed', 'failures', 'missed')} == {
+        'group': 'gnb-1', 'source_address': '127.0.0.3', 'attempts': 1, 'successes': 1,
+        'scheduled': 1, 'started': 1, 'completed': 1, 'failures': 0, 'missed': 0}
     lifecycle = FakeUEs.instances[-1]
     assert lifecycle.closed
     assert lifecycle.calls == [(1, 1, 0, 0)]
@@ -189,7 +191,8 @@ def test_directory_images_assigned_by_subscriber_order_across_phases(tmp_path, m
     args = argparse.Namespace(url='http://127.0.0.1/detect', image=str(images),
                               ue_config='ue.yaml', nr_ue='/bin/nr-ue',
                               phase_schedule='3:1:1:1,3:0:1:2',
-                              phase_duration=0.01, timeout=1, output_dir=str(tmp_path / 'run'), armed=True)
+                              phase_duration=0.02, rps_per_ue=100.0, timeout=1,
+                              output_dir=str(tmp_path / 'run'), armed=True)
     monkeypatch.setattr(experiment, 'OwnedUELifecycle', OrderedUEs)
     monkeypatch.setattr(experiment, 'attempt', fake_attempt)
     experiment.run(args)
@@ -240,7 +243,7 @@ def test_site_urls_route_each_group_and_record_destination(tmp_path, monkeypatch
 
     args = argparse.Namespace(url=None, site_urls=site_urls, image=str(image),
                               ue_config='ue.yaml', nr_ue='/bin/nr-ue',
-                              phase_schedule='3:1:1:1', phase_duration=0.02, timeout=1,
+                              phase_schedule='3:1:1:1', phase_duration=0.25, timeout=1,
                               output_dir=str(tmp_path / 'run'), armed=True)
     monkeypatch.setattr(experiment, 'OwnedUELifecycle', FakeUEs)
     monkeypatch.setattr(experiment, 'attempt', fake_attempt)
@@ -288,3 +291,258 @@ def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
     assert '--url' not in captured
     assert captured[captured.index('--telemetry-url') + 1] == settings['telemetry_url']
     assert captured[captured.index('--telemetry-token-file') + 1] == settings['token']
+
+
+def _fake_images(count=1):
+    return [{'filename': f'img{i}.jpg', 'sha256': '0' * 64, 'bytes': 1, 'body': b'x', 'headers': {}} for i in range(count)]
+
+
+def test_fixed_rate_pacing_independent_of_response_duration():
+    clock = [0.0]
+    clock_lock = threading.Lock()
+    release = threading.Event()
+    dispatched = []
+
+    def monotonic_fn():
+        with clock_lock:
+            return clock[0]
+
+    def wait_fn(dt):
+        with clock_lock:
+            clock[0] += dt
+        return False
+
+    def dispatch_fn(group, source, ue_index, image):
+        with clock_lock:
+            dispatched.append(clock[0])
+        release.wait(timeout=2)
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 350.0,
+                'start_time': 1.0, 'end_time': 1.35}
+
+    emitted = []
+    def emit(rec):
+        emitted.append(rec)
+
+    # Release in-flight requests right after the pacer finishes scheduling at t=0.6
+    def releaser():
+        while len(dispatched) < 3:
+            time.sleep(0.002)
+        release.set()
+
+    t = threading.Thread(target=releaser, daemon=True)
+    t.start()
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.6, 5.0, 4,
+        dispatch_fn, emit, lambda _g: 'http://x/detect', _fake_images(), [0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
+    )
+    t.join(timeout=2)
+    assert len(dispatched) == 3
+    assert [round(x, 6) for x in dispatched] == [0.0, 0.2, 0.4]
+    assert per_ue[0]['scheduled'] == 3
+    assert per_ue[0]['started'] == 3
+    assert per_ue[0]['completed'] == 3
+    assert per_ue[0]['missed'] == 0
+    assert len([r for r in emitted if r['event'] == 'request']) == 3
+
+
+def test_fixed_rate_bounded_concurrency_and_missed_slots_without_catchup():
+    clock = [0.0]
+    clock_lock = threading.Lock()
+    gate = threading.Event()
+    reached_08 = threading.Event()
+    active = 0
+    peak_active = 0
+    dispatched_offsets = []
+
+    def monotonic_fn():
+        with clock_lock:
+            return clock[0]
+
+    def wait_fn(dt):
+        with clock_lock:
+            clock[0] += dt
+            cur = clock[0]
+        if cur >= 0.79:
+            reached_08.set()
+            gate.wait(timeout=2)
+        return False
+
+    def dispatch_fn(group, source, ue_index, image):
+        nonlocal active, peak_active
+        with clock_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+            dispatched_offsets.append(round(clock[0], 6))
+        gate.wait(timeout=2)
+        with clock_lock:
+            active -= 1
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 100.0,
+                'start_time': 1.0, 'end_time': 1.1}
+
+    def release_later():
+        reached_08.wait(timeout=2)
+        # Wait until the 2 in-flight slots finish releasing? Wait: gate unblocks both 0.0 and 0.2,
+        # and then 0.8 dispatches once in_flight drops below 2.
+        while True:
+            with clock_lock:
+                if active == 2:
+                    break
+            time.sleep(0.001)
+        gate.set()
+
+    t = threading.Thread(target=release_later, daemon=True)
+    t.start()
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 2,
+        dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
+    )
+    t.join(timeout=2)
+    assert peak_active == 2
+    # Slots: 0.0 (started), 0.2 (started), 0.4 (missed), 0.6 (missed), 0.8 (started after unblock, no catch-up burst)
+    assert per_ue[0]['scheduled'] == 5
+    assert per_ue[0]['started'] == 3
+    assert per_ue[0]['completed'] == 3
+    assert per_ue[0]['missed'] == 2
+    assert dispatched_offsets[0] == 0.0 and dispatched_offsets[1] == 0.2
+    assert dispatched_offsets[2] == 0.8
+
+
+def test_fixed_rate_scheduling_lag_skips_without_catchup_burst():
+    # Jump clock forward from 0.0 -> 0.55 on first wait so slots 0.0, 0.2 are missed, 0.4 is late?
+    # At t=0.0 slot 0 dispatches; then wait_fn jumps to t=0.65 -> slots 0.2 and 0.4 are missed, slot 0.6 dispatches once.
+    clock = [0.0]
+    jumps = iter([0.65, 0.2, 0.2])
+    dispatched = []
+
+    def monotonic_fn():
+        return clock[0]
+
+    def wait_fn(dt):
+        clock[0] += next(jumps, dt)
+        return False
+
+    def dispatch_fn(group, source, ue_index, image):
+        dispatched.append(round(clock[0], 6))
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 1.0,
+                'start_time': 1.0, 'end_time': 1.001}
+
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 4,
+        dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
+    )
+    assert per_ue[0]['scheduled'] == 5
+    assert per_ue[0]['missed'] == 2
+    assert per_ue[0]['started'] == 3
+    assert len(dispatched) == 3
+
+
+def test_fixed_rate_staggered_starts_across_ues():
+    emitted = []
+    emit_lock = threading.Lock()
+    tls = threading.local()
+
+    def monotonic_fn():
+        return getattr(tls, 't', 0.0)
+
+    def wait_fn(dt):
+        tls.t = getattr(tls, 't', 0.0) + dt
+        return False
+
+    def dispatch_fn(group, source, ue_index, image):
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 1.0,
+                'start_time': 1.0, 'end_time': 1.001}
+
+    def emit(rec):
+        with emit_lock:
+            emitted.append(rec)
+
+    selected = [('gnb-1', '10.0.0.1', 0), ('gnb-2', '10.0.0.2', 1), ('gnb-3', '10.0.0.3', 2)]
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', selected, 0.4, 5.0, 4,
+        dispatch_fn, emit, lambda _g: 'http://x/detect', _fake_images(), [0, 0, 0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
+    )
+    by_ue = {idx: sorted(round(r['scheduled_offset_s'], 6) for r in emitted if r['ue_index'] == idx) for idx in (0, 1, 2)}
+    assert by_ue[0] == [0.0, 0.2]
+    assert by_ue[1] == [round(1 / 15, 6), round(1 / 15 + 0.2, 6)]
+    assert by_ue[2] == [round(2 / 15, 6), round(2 / 15 + 0.2, 6)]
+    assert sum(u['scheduled'] for u in per_ue) == 6
+
+
+def test_fixed_rate_phase_end_drains_in_flight_before_returning():
+    clock = [0.0]
+    dispatched = threading.Event()
+    in_flight_done = threading.Event()
+    emitted = []
+
+    def monotonic_fn():
+        return clock[0]
+
+    def wait_fn(dt):
+        clock[0] += dt
+        return False
+
+    def dispatch_fn(group, source, ue_index, image):
+        dispatched.set()
+        in_flight_done.wait(timeout=2)
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 50.0,
+                'start_time': 1.0, 'end_time': 1.05}
+
+    def release_after_phase_end():
+        dispatched.wait(timeout=2)
+        in_flight_done.set()
+
+    t = threading.Thread(target=release_after_phase_end, daemon=True)
+    t.start()
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.2, 5.0, 2,
+        dispatch_fn, emitted.append, lambda _g: 'http://x/detect', _fake_images(), [0],
+        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
+    )
+    t.join(timeout=2)
+    assert in_flight_done.is_set()
+    assert per_ue[0]['completed'] == 1
+    assert len(emitted) == 1 and emitted[0]['phase'] == 'phase_01'
+
+
+def test_fixed_rate_cancellation_stops_without_waiting_for_phase_end():
+    cancelled = threading.Event()
+    dispatched = 0
+
+    def dispatch_fn(group, source, ue_index, image):
+        nonlocal dispatched
+        dispatched += 1
+        cancelled.set()
+        return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 1.0,
+                'start_time': 1.0, 'end_time': 1.001}
+
+    start = time.monotonic()
+    per_ue = experiment.run_fixed_rate_phase(
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 30.0, 5.0, 2,
+        dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
+        cancelled=cancelled,
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0
+    assert dispatched == 1
+    assert per_ue[0]['completed'] == 1
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'rps_per_ue': 0},
+    {'rps_per_ue': -5},
+    {'rps_per_ue': float('nan')},
+    {'max_in_flight_per_ue': 0},
+    {'max_in_flight_per_ue': True},
+])
+def test_invalid_rps_or_concurrency_rejected_before_results(tmp_path, kwargs):
+    args = argparse.Namespace(url='http://127.0.0.1:30000/detect', site_urls=None,
+                              image=str(tmp_path), ue_config='ue.yaml', nr_ue='/bin/nr-ue',
+                              phase_schedule='1:1:0:0', phase_duration=1, timeout=1,
+                              output_dir=str(tmp_path / 'run'), armed=True, **kwargs)
+    with pytest.raises(ValueError):
+        experiment.run(args)
+    assert not (tmp_path / 'run').exists()

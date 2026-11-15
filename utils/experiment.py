@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +17,9 @@ from benchmark.client import attempt, parse_schedule
 from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, telemetry_config
 from utils import defaults
 from utils.ue_lifecycle import OwnedUELifecycle
+
+DEFAULT_RPS_PER_UE = 5.0
+DEFAULT_MAX_IN_FLIGHT_PER_UE = 8
 
 
 def validate_url(value):
@@ -39,6 +43,137 @@ def validate_site_urls(site_urls):
     return {group: validate_url(url) for group, url in site_urls.items()}
 
 
+def run_fixed_rate_phase(
+    phase_name,
+    selected,
+    phase_duration,
+    rps_per_ue,
+    max_in_flight_per_ue,
+    dispatch_fn,
+    emit,
+    target_url_for,
+    images,
+    assignments,
+    *,
+    cancelled=None,
+    monotonic_fn=time.monotonic,
+    wait_fn=None,
+):
+    """Run one phase with deterministic staggered fixed-rate arrivals per UE."""
+    if cancelled is None:
+        cancelled = threading.Event()
+    if wait_fn is None:
+        wait_fn = cancelled.wait
+    period = 1.0 / rps_per_ue
+    num_ues = len(selected)
+    phase_start_mono = monotonic_fn()
+    phase_end_mono = phase_start_mono + phase_duration
+
+    def worker(pos, group, source, ue_index):
+        image_index = assignments[ue_index]
+        image = images[image_index]
+        target_url = target_url_for(group)
+        offset = (pos / num_ues) * period
+        inflight_lock = threading.Lock()
+        ue_lock = threading.Lock()
+        in_flight = 0
+        scheduled = started = completed = successes = missed = 0
+        futures = []
+
+        def run_one(slot_index, scheduled_mono, dispatch_mono):
+            nonlocal completed, successes, in_flight
+            try:
+                record = dispatch_fn(group, source, ue_index, image)
+                with ue_lock:
+                    completed += 1
+                    successes += int(record['success'])
+                    emit({
+                        'event': 'request',
+                        'phase': phase_name,
+                        'group': group,
+                        'source_address': source,
+                        'url': target_url,
+                        'method': 'POST',
+                        'ue_index': ue_index,
+                        'image_index': image_index,
+                        'image_filename': image['filename'],
+                        'slot': slot_index,
+                        'scheduled_offset_s': scheduled_mono - phase_start_mono,
+                        'dispatch_offset_s': dispatch_mono - phase_start_mono,
+                        'attempt': completed,
+                        **record,
+                    })
+            finally:
+                with inflight_lock:
+                    in_flight -= 1
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_per_ue) as req_pool:
+            slot_index = 0
+            slot_time = phase_start_mono + offset
+            while slot_time < phase_end_mono and not cancelled.is_set():
+                now = monotonic_fn()
+                if now < slot_time:
+                    if wait_fn(slot_time - now):
+                        break
+                    now = monotonic_fn()
+                    if cancelled.is_set():
+                        break
+                if now >= phase_end_mono:
+                    while slot_time < phase_end_mono:
+                        scheduled += 1
+                        missed += 1
+                        slot_index += 1
+                        slot_time = phase_start_mono + offset + slot_index * period
+                    break
+                if now >= slot_time + period:
+                    while slot_time < phase_end_mono and now >= slot_time + period:
+                        scheduled += 1
+                        missed += 1
+                        slot_index += 1
+                        slot_time = phase_start_mono + offset + slot_index * period
+                    continue
+                scheduled += 1
+                with inflight_lock:
+                    can_dispatch = in_flight < max_in_flight_per_ue
+                    if can_dispatch:
+                        in_flight += 1
+                if not can_dispatch:
+                    missed += 1
+                else:
+                    started += 1
+                    futures.append(req_pool.submit(run_one, slot_index, slot_time, now))
+                slot_index += 1
+                slot_time = phase_start_mono + offset + slot_index * period
+
+            for fut in futures:
+                fut.result()
+
+        return {
+            'group': group,
+            'source_address': source,
+            'scheduled': scheduled,
+            'started': started,
+            'completed': completed,
+            'attempts': completed,
+            'successes': successes,
+            'failures': completed - successes,
+            'missed': missed,
+            'actual_start_rate': started / phase_duration,
+            'request_coverage': completed / scheduled if scheduled else None,
+        }
+
+    with ThreadPoolExecutor(max_workers=num_ues) as executor:
+        try:
+            futures = [
+                executor.submit(worker, pos, group, source, ue_index)
+                for pos, (group, source, ue_index) in enumerate(selected)
+            ]
+            return [future.result() for future in futures]
+        except BaseException:
+            cancelled.set()
+            raise
+
+
 def run(args):
     phases = parse_schedule(args.phase_schedule)
     if any(phase['workload_ue'] > 50 for phase in phases):
@@ -47,6 +182,12 @@ def run(args):
         raise ValueError('pass --armed to create and replace UE sessions')
     if not all(math.isfinite(x) and x > 0 for x in (args.phase_duration, args.timeout)):
         raise ValueError('phase duration and timeout must be finite and positive')
+    rps_per_ue = getattr(args, 'rps_per_ue', DEFAULT_RPS_PER_UE)
+    if isinstance(rps_per_ue, bool) or not isinstance(rps_per_ue, (int, float)) or not math.isfinite(rps_per_ue) or rps_per_ue <= 0:
+        raise ValueError('rps_per_ue must be a finite positive number')
+    max_in_flight_per_ue = getattr(args, 'max_in_flight_per_ue', DEFAULT_MAX_IN_FLIGHT_PER_UE)
+    if type(max_in_flight_per_ue) is not int or max_in_flight_per_ue < 1:
+        raise ValueError('max_in_flight_per_ue must be a positive integer')
     telemetry = telemetry_config(getattr(args, 'telemetry_url', None), getattr(args, 'telemetry_token_file', None))
     site_urls = getattr(args, 'site_urls', None)
     if site_urls is not None:
@@ -77,9 +218,11 @@ def run(args):
     out = Path(args.output_dir)
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     metadata = {'url': args.url, 'site_urls': site_urls, 'schedule': phases, 'phase_duration_s': args.phase_duration,
-                'timeout_s': args.timeout, 'ue_config': str(Path(args.ue_config).resolve()),
+                'timeout_s': args.timeout, 'rps_per_ue': float(rps_per_ue),
+                'max_in_flight_per_ue': max_in_flight_per_ue,
+                'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
-                'workload': 'closed-loop', 'switching': 'stop-and-reattach; not handover'}
+                'workload': 'open-loop-fixed-rate', 'switching': 'stop-and-reattach; not handover'}
     metadata['images'] = [{key: image[key] for key in ('filename', 'sha256', 'bytes')} for image in images]
     metadata['image_assignments'] = [
         {'ue_index': index, 'image_index': image_index, 'filename': images[image_index]['filename']}
@@ -114,47 +257,48 @@ def run(args):
                                 (group, ue) for group, ues in site_groups for ue in ues)]
                 publisher = TelemetryPublisher(telemetry, [source for _, source, _ in selected]) if telemetry else None
                 start = time.time()
-                deadline = time.monotonic() + args.phase_duration
-                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {args.phase_duration:g}s", flush=True)
+                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {args.phase_duration:g}s at {float(rps_per_ue):g} RPS/UE (max_in_flight={max_in_flight_per_ue})", flush=True)
                 emit({'event': 'phase_start', **phase, 'start_time': start,
-                      'duration_s': args.phase_duration, 'ues': [
+                      'duration_s': args.phase_duration, 'rps_per_ue': float(rps_per_ue),
+                      'max_in_flight_per_ue': max_in_flight_per_ue, 'ues': [
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}
                           for group, ues in site_groups for ue in ues]})
 
                 cancelled = threading.Event()
-                def worker(group, source, ue_index):
-                    image = images[assignments[ue_index]]
-                    count = successes = 0
-                    while not cancelled.is_set() and time.monotonic() < deadline:
-                        record = request_with_telemetry(attempt, publisher, urls[group], 'POST', image['body'], image['headers'], source, args.timeout)
-                        count += 1
-                        successes += record['success']
-                        emit({'event': 'request', 'phase': phase['phase'], 'group': group,
-                              'source_address': source, 'url': site_urls[group] if site_urls is not None else args.url, 'method': 'POST',
-                              'ue_index': ue_index, 'image_index': assignments[ue_index],
-                              'image_filename': image['filename'],
-                              'attempt': count, **record})
-                    return {'group': group, 'source_address': source,
-                            'attempts': count, 'successes': successes}
+                def dispatch(group, source, ue_index, image):
+                    return request_with_telemetry(attempt, publisher, urls[group], 'POST', image['body'], image['headers'], source, args.timeout)
 
                 try:
-                    with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-                        try:
-                            futures = [executor.submit(worker, group, source, index) for group, source, index in selected]
-                            per_ue = [future.result() for future in futures]
-                        except BaseException:
-                            cancelled.set()
-                            raise
+                    per_ue = run_fixed_rate_phase(
+                        phase['phase'],
+                        selected,
+                        args.phase_duration,
+                        float(rps_per_ue),
+                        max_in_flight_per_ue,
+                        dispatch,
+                        emit,
+                        lambda group: site_urls[group] if site_urls is not None else args.url,
+                        images,
+                        assignments,
+                        cancelled=cancelled,
+                    )
                 finally:
                     if publisher:
                         publisher.close()
+                scheduled = sum(ue['scheduled'] for ue in per_ue)
+                started = sum(ue['started'] for ue in per_ue)
+                completed = sum(ue['completed'] for ue in per_ue)
+                successes = sum(ue['successes'] for ue in per_ue)
+                missed = sum(ue['missed'] for ue in per_ue)
                 emit({'event': 'phase_end', **phase, 'start_time': start,
                       'generation_duration_s': args.phase_duration, 'end_time': time.time(),
-                      'attempts': sum(ue['attempts'] for ue in per_ue),
-                      'successes': sum(ue['successes'] for ue in per_ue), 'per_ue': per_ue})
-                attempts = sum(ue['attempts'] for ue in per_ue)
-                successes = sum(ue['successes'] for ue in per_ue)
-                print(f"[--] {phase['phase']}: {attempts} requests, {successes} successful, {attempts - successes} failed", flush=True)
+                      'rps_per_ue': float(rps_per_ue), 'max_in_flight_per_ue': max_in_flight_per_ue,
+                      'scheduled': scheduled, 'started': started, 'completed': completed,
+                      'attempts': completed, 'successes': successes, 'failures': completed - successes,
+                      'missed': missed, 'actual_start_rate': started / args.phase_duration,
+                      'request_coverage': completed / scheduled if scheduled else None,
+                      'per_ue': per_ue})
+                print(f"[--] {phase['phase']}: scheduled={scheduled}, started={started}, completed={completed}, {successes} successful, {completed - successes} failed, missed={missed}", flush=True)
         finally:
             lifecycle.close()
     print(f"Results: {out / 'requests.jsonl'}")
@@ -170,6 +314,8 @@ def main(argv=None):
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
     parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb1:gnb2:gnb3 counts, comma separated')
     parser.add_argument('--phase-duration', type=float, default=defaults.PHASE_DURATION, help='Request-generation seconds per phase')
+    parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE, help='Target arrival rate per active UE in requests/second')
+    parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE, help='Maximum concurrent in-flight requests per UE')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
     parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')
     parser.add_argument('--telemetry-url', help='Collector HTTP(S) /observations URL')
