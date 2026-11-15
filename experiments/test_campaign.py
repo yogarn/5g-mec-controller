@@ -559,3 +559,35 @@ def test_mobility_rejects_invalid_timing_and_runtime_before_cluster_access(flags
     with pytest.raises(SystemExit) as exc:
         campaign.main(['test_mobility', *flags])
     assert exc.value.code == 2
+
+
+def test_fixed_mobility_plan_clamps_both_deployments_and_hpas_and_enables_tc(tmp_path):
+    output = tmp_path / 'fixed-plan'
+    campaign.main(['--scenario', 'mobility9', '--fixed-replicas', '6',
+                   '--tc-ms', '10', '--plan-only', str(output)])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    assert plan['fixed_replicas'] == 6
+    for method, scheduler in [('baseline', 'default-scheduler'), ('proposed', 'mec-placement-scheduler')]:
+        docs = list(yaml.safe_load_all((output / f'{method}-workload.yaml').read_text()))
+        dep = next(d for d in docs if d and d['kind'] == 'Deployment')
+        assert dep['spec']['replicas'] == 6
+        assert dep['spec']['template']['spec']['schedulerName'] == scheduler
+        assert dep['spec']['template']['metadata']['annotations']['cni.projectcalico.org/ipv4pools'] == '["mec-campaign-reserved"]'
+        hpa = yaml.safe_load((output / f'{method}-hpa.yaml').read_text())
+        assert hpa['spec']['minReplicas'] == hpa['spec']['maxReplicas'] == 6
+        cfg = yaml.safe_load((output / f'{method}-controller.yaml').read_text())
+        assert cfg['min_replicas'] == cfg['max_replicas'] == 6
+    assert plan['campaign_settings']['phase_duration'] == 60
+
+
+@pytest.mark.parametrize('flags', [
+    ['--scenario', 'mobility9', '--fixed-replicas', '0'],
+    ['--scenario', 'mobility9', '--fixed-replicas', '-2'],
+    ['--fixed-replicas', '6'],
+    ['--scenario', 'mobility9', '--fixed-replicas', '6', '--max-replicas', '10'],
+])
+def test_fixed_mobility_rejects_invalid_or_conflicting_options(flags, monkeypatch):
+    monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
+    with pytest.raises(SystemExit) as exc:
+        campaign.main(['fixed_test', *flags])
+    assert exc.value.code == 2

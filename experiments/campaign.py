@@ -433,13 +433,17 @@ def verify_incluster_components(autoscaler, placement_engine):
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None):
     """Persist the exact matched replica budget and manifests used by a method."""
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
     if autoscaler not in AUTOSCALERS:
         raise ValueError(f'autoscaler must be one of {AUTOSCALERS}')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
+    if fixed_replicas is not None:
+        if type(fixed_replicas) is not int or fixed_replicas < 1:
+            raise ValueError('fixed replicas must be a positive integer')
+        config['min_replicas'] = max_replicas = fixed_replicas
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
         raise ValueError('max replicas must be an integer at least min_replicas')
     if resource_weights is not None:
@@ -457,6 +461,8 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     scheduler_name = ('default-scheduler' if method == 'baseline'
                       else config.get('scheduler_name', 'mec-placement-scheduler'))
     deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
+    if fixed_replicas is not None:
+        deployments[0]['spec']['replicas'] = fixed_replicas
     method_manifest = root / f'{method}-workload.yaml'
     with method_manifest.open('x') as stream:
         yaml.safe_dump_all(documents, stream, sort_keys=False)
@@ -501,14 +507,14 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
 
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
                resource_weights=None, locality_weight=None, comparison='full',
-               autoscaler='controller', placement_engine='python', deschedule_interval=None):
+               autoscaler='controller', placement_engine='python', deschedule_interval=None, fixed_replicas=None):
     if placement_engine not in PLACEMENT_ENGINES:
         raise ValueError(f'placement_engine must be one of {PLACEMENT_ENGINES}')
     output = root / method
     output.mkdir()
     config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
                                                   resource_weights, locality_weight, selected_workload(settings),
-                                                  comparison, autoscaler, deschedule_interval)
+                                                  comparison, autoscaler, deschedule_interval, fixed_replicas)
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -642,6 +648,8 @@ def main(argv=None):
     parser.add_argument('--check', action='store_true', help='dependency checks plus temporary workload and UE connectivity probes')
     parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
     parser.add_argument('--slo-ms', type=float, help='controller p90 target and reporting threshold in milliseconds (default: config.yaml)')
+    parser.add_argument('--fixed-replicas', type=int,
+                        help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
     parser.add_argument('--max-replicas', type=int,
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
     parser.add_argument('--debug', action='store_true',
@@ -654,6 +662,13 @@ def main(argv=None):
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     args = parser.parse_args(argv)
+    if args.fixed_replicas is not None:
+        if args.fixed_replicas < 1:
+            parser.error('--fixed-replicas must be a positive integer')
+        if args.scenario != 'mobility9':
+            parser.error('--fixed-replicas requires --scenario mobility9')
+        if args.max_replicas is not None:
+            parser.error('use --fixed-replicas without --max-replicas')
     args.comparison = args.comparison or ('placement' if args.scenario else 'full')
     if args.scenario:
         if args.debug:
@@ -704,7 +719,9 @@ def main(argv=None):
         parser.error('--locality-weight must be finite and between 0 and 1')
     slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
     max_replicas = args.max_replicas if args.max_replicas is not None else controller_config['max_replicas']
-    if max_replicas < controller_config['min_replicas']:
+    if args.fixed_replicas is not None:
+        max_replicas = args.fixed_replicas
+    if args.fixed_replicas is None and max_replicas < controller_config['min_replicas']:
         parser.error('--max-replicas must be at least min_replicas from config.yaml')
     if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
@@ -714,9 +731,10 @@ def main(argv=None):
         _campaign_manifest(output, args.tc_ms is not None, workload)
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
-                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval)
+                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas)
         (output / 'plan.yaml').write_text(yaml.safe_dump({
             'workload': workload, 'comparison': args.comparison,
+            'fixed_replicas': args.fixed_replicas,
             'scenario': args.scenario, 'deschedule_interval_seconds': args.deschedule_interval,
             'autoscaler': args.autoscaler,
             'placement_engine': args.placement_engine,
@@ -744,6 +762,7 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | {'tc_ms': args.tc_ms, 'slo_ms': slo_ms,
+                                       'fixed_replicas': args.fixed_replicas,
                                        'scenario': args.scenario,
                                        'deschedule_interval_seconds': args.deschedule_interval,
                                        'max_replicas': max_replicas, 'debug': args.debug, 'workload': workload,
@@ -764,7 +783,10 @@ def main(argv=None):
         if args.scenario:
             print('Mobility scenario: fixed nine UEs; hotspot order gNB-1 -> gNB-2 -> gNB-3 -> gNB-2 -> gNB-1. '
                   f'Descheduler checks every {args.deschedule_interval:g}s; evictions require settled Pods and positive score improvement. '
-                  'UE moves use stop-and-reattach, not handover. HPA remains active.', flush=True)
+                  'UE moves use stop-and-reattach, not handover.', flush=True)
+        if args.fixed_replicas is not None:
+            print(f'Fixed placement experiment: {args.fixed_replicas} replicas per method; '
+                  'initial Deployment and HPA min/max are equal. Eviction may temporarily reduce readiness.', flush=True)
         if args.debug:
             print('DEBUG profile: 15s collector window retained; controller interval 15s, '
                   'placement-only cooldown 15s, scale-down stabilization 30s, descheduler 30s, '
@@ -784,7 +806,7 @@ def main(argv=None):
                 reset(workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
                            resource_weights, locality_weight, args.comparison,
-                           args.autoscaler, args.placement_engine, args.deschedule_interval)
+                           args.autoscaler, args.placement_engine, args.deschedule_interval, args.fixed_replicas)
             command([sys.executable, '-m', 'utils.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:

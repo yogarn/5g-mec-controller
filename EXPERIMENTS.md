@@ -216,3 +216,13 @@ Preview locally without traffic or cluster access:
 ```bash
 bash experiments/run.sh --scenario mobility9 --plan-only /tmp/mobility9-plan
 ```
+
+For a placement comparison at a fixed replica budget with inter-node traffic shaping:
+
+```bash
+bash experiments/run.sh mobility9_fixed6_tc10_01 --scenario mobility9 --fixed-replicas 6 --tc-ms 10
+```
+
+`--fixed-replicas 6` sets both methods' initial Deployment replicas and HPA minimum/maximum to six. HPA cannot change this budget; an eviction can temporarily reduce the number of ready Pods while the ReplicaSet creates a replacement. The scenario retains nine UEs, 60-second phases, 30-second descheduler checks and the 100 ms reporting objective. Do not combine `--fixed-replicas` with `--max-replicas`.
+
+`--tc-ms 10` adds 10 ms one-way delay on the selected inter-node workload interfaces in both directions (about 20 ms added RTT per shaped round trip). Same-node traffic is not delayed by this rule. Both methods use the reserved workload pool, and campaign cleanup removes its shaping filters. Use a fresh result name for each run; remove `--tc-ms` for a separate unshaped comparison.
