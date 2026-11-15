@@ -27,7 +27,7 @@ For faster debugging, use a separate campaign name and `--debug`:
 bash experiments/run.sh debug_01 --debug --tc-ms 10 --slo-ms 300 --max-replicas 30
 ```
 
-The debug profile retains all 19 phases, using 60 seconds each: 19 minutes per method or 38 minutes per pair, plus UE reattachment, startup and transfer. `--phase-duration` can increase the phase duration; the CLI requires at least 60 seconds. A duration override alone does not change controller timers. Normal runs retain the configured 300-second phases and original controller timers.
+The debug profile retains the configured 13 phases at 60 seconds each: 13 minutes per method or 26 minutes per pair, plus UE reattachment, startup and transfer. `--phase-duration` can increase the phase duration; the CLI requires at least 60 seconds. A duration override alone does not change controller timers. Normal runs use the configured 60-second phases and standard HPA and descheduler timers.
 
 | Timing | Normal | Debug |
 |---|---:|---:|
@@ -126,8 +126,8 @@ Reuse this infrastructure. Do not restart or reapply the shared monitoring or 5G
 For **first-time subscriber provisioning only**, create the private inventory using the schema in [README.md](README.md#provisioning-ue-subscribers). Each subscriber needs three configurations sharing the same SUPI/authentication values, with site-specific DNN, gNB address and static IP. On a trusted host with MongoDB access:
 
 ```bash
-python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --verbose
-python3 -m experiments.provision_ues --inventory /secure/ue-inventory.yaml --apply
+python3 -m utils.provision_ues --inventory /secure/ue-inventory.yaml --verbose
+python3 -m utils.provision_ues --inventory /secure/ue-inventory.yaml --apply
 ```
 
 The tool inserts only new subscribers; do not reprovision the existing pool. Writes are not transactional: inspect partial inserts before retrying. Subscriber secrets and telemetry tokens stay outside Git. Provisioning does not configure DNNs, UPFs or gNBs; independently verify registration, assigned static IPs and anchors when provisioning or changing the network.
@@ -148,37 +148,35 @@ The controller computes `ceil(current replicas × all-attempt p90 / target)`, wi
 
 The objective is **all-attempt p90 <=500 ms** by default, not a p95 objective. Per-attempt violation rates and p95 remain supplementary diagnostics.
 
-Each phase generates traffic for **300 seconds**. The 19 phases traverse the original ascending schedule and then reverse it, with the peak included once. Traffic takes **95 minutes per method**, or **190 minutes per paired campaign**, plus UE switching, setup, and transfer. A 300-second phase cannot guarantee a completed 300-second scale-down stabilization after detection and readiness delays. Evaluate transition behavior separately; extend the common phase duration before evaluation if completed scale-down is an endpoint. The placement-only cooldown remains 120 seconds. The wrapper prints each phase number, ramp direction, UE split, and traffic-start/completion messages, with a progress reminder every 30 seconds. The schedule is `total:gnb1:gnb2:gnb3`:
+Each phase generates traffic for **60 seconds**. The 13-phase schedule covers balanced and gNB-3 hotspot demand at 3, 9, 15, and 24 UEs, followed by recovery. Traffic takes **13 minutes per method**, or **26 minutes per paired campaign**, plus UE switching, setup, and transfer.
+
+The 300-second HPA scale-down stabilization spans multiple phases. Interpret this campaign as a transient workload experiment; extend phase durations if settled scale-down is an endpoint. The schedule is `total:gnb1:gnb2:gnb3`:
 
 ```text
 3:1:1:1
 9:3:3:3
-9:1:2:6
 9:1:1:7
 15:5:5:5
-15:1:4:10
 15:1:1:13
 24:8:8:8
-24:1:7:16
 24:1:1:22
-24:1:7:16
 24:8:8:8
 15:1:1:13
-15:1:4:10
 15:5:5:5
 9:1:1:7
-9:1:2:6
 9:3:3:3
 3:1:1:1
 ```
+
+The original 19-phase schedule is preserved in `experiments/campaign-19-phase.yaml` for explicit coverage runs with `--config`. For the pedestrian experiment, pass `--slo-ms 100` so the controller, summaries and plots share the candidate deadline.
 
 UE switching is stop-and-reattach, **not handover**. This is closed-loop traffic, not a fixed offered request rate. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, telemetry drops and mapping coverage; a fast failure can lower all-attempt p90. The response-time plots use **successful requests only**; SLO attainment uses all attempts. Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.
 
 Locality is relative request-attempt demand: `site attempts / total attempts`. Its 40% score contribution is unchanged by assigning another replica until observed demand changes; resource headroom is recomputed after each proposed addition. This is a site-demand preference, not residual demand per replica. The CPU-only resource score uses 50% CPU and 50% RAM, with GPU and VRAM weights zero.
 
-Descheduling uses `delta = best feasible target score after adding the Pod - current node score`, and acts only when the largest delta is positive. Node-name order breaks ties. This adapts the maximum-score-improvement selection described by Marchese and Tomarchio in [Enhancing the Kubernetes Platform with a Load-Aware Orchestration Strategy](https://doi.org/10.1007/s42979-025-03712-z); our resource/locality score and Deployment-based removal/replacement mechanism differ from their scheduler/descheduler implementation. Replicas of this homogeneous service on the same node have equal scores. The original default-scheduled Pod is retained unless another node offers a positive delta; it is not recreated merely to normalize ownership. If original replicas span multiple nodes, only the pinned groups are eligible for descheduling, because Deployment scale-down cannot select a particular original Pod. After removal, an unavailable destination is retried without clearing the durable replacement obligation.
+The Go descheduler evaluates positive score improvements using a post-removal resource snapshot. It skips eviction if the freed source node would win replacement scheduling, waits for settled Pods, and evicts at most one Pod per interval through the Eviction API. The ReplicaSet creates its replacement and the Go scheduler scores current conditions before binding it. PodDisruptionBudget rejection defers eviction.
 
-Scale-up applies every node Deployment target in a durable batch during the same reconciliation, creating new groups directly at their target counts. API requests are issued sequentially in that pass, without waiting for Pod readiness between nodes. Partial batches resume without repeating completed increases; a fresh scaling decision still waits for ready, settled Pods. Neither scale-up nor scale-down has a fixed post-action `cooldown_seconds` delay (matching HPA's absence of a fixed post-action scaling cooldown and `scaleUp.stabilizationWindowSeconds: 0`), while `cooldown_seconds` (120 s normal, 15 s debug) still applies when `desired == replicas` (placement-only/descheduling). Scale-down stabilization durations match (300 s normal, 30 s debug), though the algorithms differ: proposed requires sustained lower targets and applies the latest target, whereas HPA uses a rolling maximum over the stabilization window. Decision logs report latency, desired/ready/pending counts, batch targets and wait reasons. Descheduling still relocates one replica at a time.
+Both methods use native HPA for replica management. In the full-system comparison, baseline uses CPU HPA and proposed uses latency HPA; in the placement comparison, both use the same latency HPA. Normal scale-down stabilization is 300 seconds (30 seconds with `--debug`). There are no per-node child Deployments or Python controller processes in the default path.
 
 Placement scoring can be configured per campaign without editing `config.yaml`:
 
