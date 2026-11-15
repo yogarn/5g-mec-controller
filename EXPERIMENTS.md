@@ -170,7 +170,7 @@ The 300-second HPA scale-down stabilization spans multiple phases. Interpret thi
 
 The original 19-phase schedule is preserved in `experiments/campaign-19-phase.yaml` for explicit coverage runs with `--config`. For the pedestrian experiment, pass `--slo-ms 100` so the controller, summaries and plots share the candidate deadline.
 
-UE switching is stop-and-reattach, **not handover**. This is closed-loop traffic, not a fixed offered request rate. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, telemetry drops and mapping coverage; a fast failure can lower all-attempt p90. The response-time plots use **successful requests only**; SLO attainment uses all attempts. Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.
+UE switching is stop-and-reattach, **not handover**. Traffic uses **fixed arrival-rate (open-loop) pacing** (`5` RPS/UE by default via `--rps-per-ue`, bounded by `--max-in-flight-per-ue`, default `8`) rather than closed-loop pacing; `5` RPS/UE (`15` RPS at 3 UEs, `45` at 9, `75` at 15, `120` at 24) is an **initial rate requiring calibration, not proven capacity**. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, missed starts, request coverage, telemetry drops and mapping coverage; a fast failure or omitted request can otherwise make latency look better. The response-time plots use **successful requests only**; SLO attainment uses all attempts and is reported alongside request coverage (`completed / scheduled`). Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.
 
 Locality is relative request-attempt demand: `site attempts / total attempts`. Its 40% score contribution is unchanged by assigning another replica until observed demand changes; resource headroom is recomputed after each proposed addition. This is a site-demand preference, not residual demand per replica. The CPU-only resource score uses 50% CPU and 50% RAM, with GPU and VRAM weights zero.
 
@@ -226,3 +226,25 @@ bash experiments/run.sh mobility9_fixed6_tc10_01 --scenario mobility9 --fixed-re
 `--fixed-replicas 6` sets both methods' initial Deployment replicas and HPA minimum/maximum to six. HPA cannot change this budget; an eviction can temporarily reduce the number of ready Pods while the ReplicaSet creates a replacement. The scenario retains nine UEs, 60-second phases, 30-second descheduler checks and the 100 ms reporting objective. Do not combine `--fixed-replicas` with `--max-replicas`.
 
 `--tc-ms 10` adds 10 ms one-way delay on the selected inter-node workload interfaces in both directions (about 20 ms added RTT per shaped round trip). Same-node traffic is not delayed by this rule. Both methods use the reserved workload pool, and campaign cleanup removes its shaping filters. Use a fresh result name for each run; remove `--tc-ms` for a separate unshaped comparison.
+
+## Fixed arrival-rate load generation & calibration
+
+All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, `--fixed-replicas`, and `utils/fixed_replica_harness.py`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and bounded in-flight concurrency (`--max-in-flight-per-ue`, default `8`). If concurrency is saturated or the pacer lags past a slot boundary, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. At phase end, new scheduling stops and all in-flight requests drain to completion before UEs reattach.
+
+Treat the default `--rps-per-ue 5` as an **initial rate requiring calibration, not proven capacity** (`3` UEs = `15` RPS, `9` UEs = `45` RPS, `15` UEs = `75` RPS, `24` UEs = `120` RPS). Calibrate single-replica and multi-replica capacity before full comparisons:
+
+```bash
+# Fixed-replica calibration run (adjust --rps-per-ue / --max-in-flight-per-ue as needed):
+.venv/bin/python -m utils.fixed_replica_harness \
+  --campaign-dir results/cal_fixed1 --stage cal --block 1 --run-id r1_5rps \
+  --replicas 1 --node gnb-2 --schedule 6:0:6:0 --rps-per-ue 5 --max-in-flight-per-ue 8
+
+# Standard scaling campaign at explicit rate:
+bash experiments/run.sh run_5rps_01 --comparison full --slo-ms 100 --rps-per-ue 5 --max-in-flight-per-ue 8
+
+# Nine-UE mobility comparison (or fixed-replica mobility9) at the same rate:
+bash experiments/run.sh mobility9_5rps_01 --scenario mobility9 --rps-per-ue 5 --max-in-flight-per-ue 8
+bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-replicas 6 --rps-per-ue 5 --max-in-flight-per-ue 8
+```
+
+`utils/summarize.py` writes `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` across `summary.csv` (by phase), `summary-sites.csv` (by phase and gNB site), and `summary-ues.csv` (by phase and UE). `utils/plot_autoscaler.py` plots request coverage alongside SLO violations in `slo-violations.{png,pdf}`.

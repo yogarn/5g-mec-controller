@@ -129,3 +129,23 @@ Refactored the controller and experiment harness to follow Kubernetes separation
    - **Comparison B (Full system vs CPU HPA, do not attribute solely to placement):**
      `python -m experiments.campaign <name-b> --comparison full`
 6. **Constraints to preserve:** Do not edit LaTeX files or historical `results/` data unless explicitly asked.
+
+---
+
+## 6. Fixed Arrival-Rate Load Generation (Ready for Codex Audit)
+
+1. **Implementation choices:**
+   - **Monotonic pacer (`utils/experiment.py` `run_fixed_rate_phase`):** Schedules request starts every `1 / rps_per_ue` seconds (`--rps-per-ue`, default `5.0`) using `time.monotonic()`, staggered deterministically per active UE by `(pos / num_ues) * period` across `selected` so all sites share the same rate without synchronized bursts.
+   - **Bounded concurrency & no catch-up bursts:** Each UE uses a bounded `concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_per_ue)` (`--max-in-flight-per-ue`, default `8`) and an `in_flight` counter. When `in_flight >= max_in_flight_per_ue` or `now >= slot_time + period` (or `now >= phase_end_mono`), the slot is recorded as `missed` and skipped without catch-up bursts.
+   - **Phase-end drain & ordering:** New slot scheduling stops at `phase_end_mono` (or `cancelled.set()`), all in-flight futures drain before `TelemetryPublisher.close()`, `phase_end`, and UE reattachment, and `attempt` numbers are assigned sequentially under `ue_lock` on emission so `requests.jsonl` stays strictly ordered even when overlapping requests complete out of order.
+   - **Propagation & metadata (`experiments/campaign.py`, `experiments/campaign_ue.py`, `utils/fixed_replica_harness.py`, `experiments/run.sh`):** `--rps-per-ue` and `--max-in-flight-per-ue` propagate through `plan.yaml`, `campaign.yaml`, `remote_settings`, `campaign_ue.py`, `run.json`, and `effective-config.json` for standard scaling, `mobility9`, `--fixed-replicas`, and `fixed_replica_harness.py`.
+   - **Coverage & site reporting (`utils/summarize.py`, `utils/plot_autoscaler.py`):** `summarize.py` reports `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` per phase (`summary.csv`), per site (`summary-sites.csv`), and per UE (`summary-ues.csv`), keeping `missed` separate from HTTP `failures` and maintaining backward compatibility with legacy closed-loop JSONL. `plot_autoscaler.py` adds `load_coverage` and a request-coverage subplot beneath SLO violations in `slo-violations.{png,pdf}`.
+2. **Tests verified locally:**
+   - `utils/test_experiment.py`: fake-clock tests for pacing independent of response duration, bounded concurrency + missed slots without catch-up bursts, scheduling lag skip without catch-up, deterministic staggered UE offsets, phase-end draining, immediate cancellation, and invalid rate/concurrency rejection.
+   - `experiments/test_campaign.py`: propagation across standard and `mobility9` (`--fixed-replicas`) plans and `campaign_ue.py` forwarding.
+   - `utils/test_summarize.py`: phase/site/UE arrival-rate counters, missed vs HTTP failure separation, and `summary-sites.{csv,json}` generation.
+   - `utils/test_plot_autoscaler.py`: `load_coverage` test added and `py_compile` verified (`matplotlib` is not installed in the local system Python environment).
+3. **Limitations:**
+   - `5` RPS/UE is an initial uncalibrated rate (`120` RPS at 24 UEs) and requires calibration on the live cluster before drawing capacity conclusions.
+   - `benchmark/client.py` standalone CLI was left unchanged because all campaign and harness paths dispatch through `utils/experiment.py`.
+   - Local `placement/internal/controller/controller.go` and `controller_test.go` have an earlier uncommitted descheduler-ticker jitter fix outside these commits; do not sync/deploy until audited.
