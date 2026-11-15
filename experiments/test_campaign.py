@@ -179,7 +179,7 @@ def test_replica_cap_is_identical_in_saved_baseline_hpa_and_proposed_config(tmp_
     assert baseline['min_replicas'] == proposed['min_replicas'] == hpa['spec']['minReplicas']
     assert no_hpa is None
     assert hpa['spec']['metrics'][0]['resource']['target'] == {
-        'type': 'AverageValue', 'averageValue': '1000m'}
+        'type': 'Utilization', 'averageUtilization': 60}
 
 
 @pytest.mark.parametrize('cap', [0, -1, 1.5, True])
@@ -206,7 +206,7 @@ def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp
         assert config['mobility_query'].endswith('/ 15')
     assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
     assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 30
-    assert hpa['spec']['metrics'][0]['resource']['target']['averageValue'] == '1000m'
+    assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
 
 
 def test_normal_hpa_and_proposed_share_15s_interval_and_300s_stabilization(tmp_path):
