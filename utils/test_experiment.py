@@ -712,3 +712,72 @@ def test_fixed_rate_delayed_slot_039_skipped_without_compressed_follow_up():
     offsets = sorted(round(r['dispatch_offset_s'], 6) for r in emitted)
     assert offsets == [0.0, 0.4, 0.6, 0.8]
     assert all(b - a >= 0.19 for a, b in zip(offsets, offsets[1:]))
+
+
+def test_phase_durations_records_actual_final_hold_without_extra_phases(tmp_path, monkeypatch):
+    image = tmp_path / 'input.jpg'
+    image.write_bytes(b'image')
+    calls = []
+
+    def fake_attempt(url, method, body, headers, source, timeout):
+        return {'success': True}
+
+    def fake_run_phase(phase_name, selected, phase_duration, rps_per_ue, max_in_flight_per_ue,
+                       dispatch_fn, emit, url_for_group, images, assignments, cancelled=None):
+        calls.append((phase_name, phase_duration))
+        scheduled = int(round(phase_duration * rps_per_ue))
+        return [{
+            'group': group,
+            'source_address': source,
+            'ue_index': ue_index,
+            'scheduled': scheduled,
+            'started': scheduled,
+            'completed': scheduled,
+            'attempts': scheduled,
+            'successes': scheduled,
+            'failures': 0,
+            'missed': 0,
+            'actual_start_rate': scheduled / phase_duration,
+            'request_coverage': 1.0,
+        } for group, source, ue_index in selected]
+
+    args = argparse.Namespace(
+        url='http://127.0.0.1/detect', image=str(image),
+        ue_config='ue.yaml', nr_ue='/bin/nr-ue',
+        phase_schedule='3:1:1:1,3:1:1:1', phase_duration=60.0,
+        phase_durations='60,420', rps_per_ue=5.0, max_in_flight_per_ue=8,
+        timeout=1, output_dir=str(tmp_path / 'run'), armed=True,
+    )
+    monkeypatch.setattr(experiment, 'OwnedUELifecycle', FakeUEs)
+    monkeypatch.setattr(experiment, 'attempt', fake_attempt)
+    monkeypatch.setattr(experiment, 'run_fixed_rate_phase', fake_run_phase)
+    experiment.run(args)
+
+    assert calls == [('phase_01', 60.0), ('phase_02', 420.0)]
+    metadata = json.loads((tmp_path / 'run' / 'run.json').read_text())
+    assert metadata['phase_durations_s'] == [60.0, 420.0]
+    records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]
+    starts = [r for r in records if r['event'] == 'phase_start']
+    ends = [r for r in records if r['event'] == 'phase_end']
+    assert [s['duration_s'] for s in starts] == [60.0, 420.0]
+    assert [e['generation_duration_s'] for e in ends] == [60.0, 420.0]
+    assert [e['scheduled'] for e in ends] == [900, 6300]
+    assert [e['actual_start_rate'] for e in ends] == [15.0, 15.0]
+
+
+@pytest.mark.parametrize('bad_durations', ['60', '60,0', '60,-5', '60,abc'])
+def test_invalid_phase_durations_rejected_before_output_or_ues(tmp_path, monkeypatch, bad_durations):
+    image = tmp_path / 'input.jpg'
+    image.write_bytes(b'image')
+    args = argparse.Namespace(
+        url='http://127.0.0.1/detect', image=str(image),
+        ue_config='ue.yaml', nr_ue='/bin/nr-ue',
+        phase_schedule='3:1:1:1,3:1:1:1', phase_duration=60.0,
+        phase_durations=bad_durations, timeout=1,
+        output_dir=str(tmp_path / 'run'), armed=True,
+    )
+    monkeypatch.setattr(experiment, 'OwnedUELifecycle',
+                        lambda *a: pytest.fail('UE lifecycle must not be created'))
+    with pytest.raises(ValueError):
+        experiment.run(args)
+    assert not (tmp_path / 'run').exists()

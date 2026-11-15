@@ -87,6 +87,8 @@ def run(settings):
             '--max-in-flight-per-ue', str(settings.get('max_in_flight_per_ue', 8)),
             '--telemetry-url', settings['telemetry_url'], '--telemetry-token-file', settings['token'],
             '--output-dir', str(output)]
+    if settings.get('phase_durations'):
+        args.extend(['--phase-durations', ','.join(str(d) for d in settings['phase_durations'])])
     path = marker(campaign, method)
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     def terminate(signum, frame):

@@ -160,6 +160,26 @@ def load_coverage(root, phases):
     return coverage
 
 
+def load_durations(root, phases):
+    """Return per-phase generation durations in seconds when recorded in summary.csv."""
+    durations = {}
+    for method in METHODS:
+        path = root / method / 'summary.csv'
+        rows, fields = read_rows(path, ('phase',))
+        if 'generation_duration_s' not in fields:
+            return None
+        summaries = phase_rows(rows, path)
+        if set(summaries) != set(phases):
+            raise ValueError(f'{path}: phases must match ramp-summary.csv')
+        durations[method] = [
+            number(summaries[phase]['generation_duration_s'], f'{path}: {phase} generation_duration_s')
+            for phase in phases
+        ]
+    if durations['baseline'] != durations['proposed']:
+        raise ValueError('baseline and proposed phase durations differ')
+    return durations['baseline']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_dir", type=Path, help="directory containing baseline/ and proposed/ CSV inputs")
@@ -171,14 +191,20 @@ def main():
         summaries, placements, resources, site_keys, phases, nodes = load(args.results_dir)
         violations = load_slo(args.results_dir, phases, args.slo_ms)
         coverage = load_coverage(args.results_dir, phases)
+        durations = load_durations(args.results_dir, phases)
     except ValueError as exc:
         parser.error(str(exc))
 
     site_names = ":".join(key.replace("_ues", "").upper() for key in site_keys)
-    labels = [f"{phase}\n{summaries['baseline'][phase]['workload_ue']} UE\n" +
-              ":".join(summaries["baseline"][phase][key] for key in site_keys) for phase in phases]
+    varying_durations = durations is not None and len(set(durations)) > 1
+    labels = [
+        f"{phase}\n{summaries['baseline'][phase]['workload_ue']} UE\n"
+        + ":".join(summaries["baseline"][phase][key] for key in site_keys)
+        + (f"\n{dur:g}s" if varying_durations else "")
+        for phase, dur in zip(phases, durations or [None] * len(phases))
+    ]
     x = list(range(len(phases)))
-    xlabel = f"Phase; total UE; {site_names} UE distribution"
+    xlabel = f"Phase; total UE; {site_names} UE distribution" + ("; duration" if varying_durations else "")
     width = max(9, 1.45 * len(phases))
     args.output_dir.mkdir(parents=True, exist_ok=True)
 

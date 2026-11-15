@@ -184,14 +184,35 @@ def run_fixed_rate_phase(
             raise
 
 
+def parse_phase_durations(text, count, default):
+    if text is None:
+        if not math.isfinite(default) or default <= 0:
+            raise ValueError('phase duration and timeout must be finite and positive')
+        return [float(default)] * count
+    parts = [part.strip() for part in str(text).split(',')]
+    if len(parts) != count:
+        raise ValueError(f'phase_durations count ({len(parts)}) must match phase schedule count ({count})')
+    durations = []
+    for part in parts:
+        try:
+            value = float(part)
+        except ValueError as exc:
+            raise ValueError(f'invalid phase duration: {part!r}') from exc
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError('phase durations must be finite and positive')
+        durations.append(value)
+    return durations
+
+
 def run(args):
     phases = parse_schedule(args.phase_schedule)
     if any(phase['workload_ue'] > 50 for phase in phases):
         raise ValueError('at most 50 UEs are supported')
     if not args.armed:
         raise ValueError('pass --armed to create and replace UE sessions')
-    if not all(math.isfinite(x) and x > 0 for x in (args.phase_duration, args.timeout)):
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise ValueError('phase duration and timeout must be finite and positive')
+    phase_durations = parse_phase_durations(getattr(args, 'phase_durations', None), len(phases), args.phase_duration)
     rps_per_ue = getattr(args, 'rps_per_ue', DEFAULT_RPS_PER_UE)
     if isinstance(rps_per_ue, bool) or not isinstance(rps_per_ue, (int, float)) or not math.isfinite(rps_per_ue) or rps_per_ue <= 0:
         raise ValueError('rps_per_ue must be a finite positive number')
@@ -227,7 +248,8 @@ def run(args):
     assignments = [i % len(images) for i in range(max(phase['workload_ue'] for phase in phases))]
     out = Path(args.output_dir)
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
-    metadata = {'url': args.url, 'site_urls': site_urls, 'schedule': phases, 'phase_duration_s': args.phase_duration,
+    metadata = {'url': args.url, 'site_urls': site_urls, 'schedule': phases,
+                'phase_duration_s': args.phase_duration, 'phase_durations_s': phase_durations,
                 'timeout_s': args.timeout, 'rps_per_ue': float(rps_per_ue),
                 'max_in_flight_per_ue': max_in_flight_per_ue,
                 'ue_config': str(Path(args.ue_config).resolve()),
@@ -250,7 +272,7 @@ def run(args):
         lifecycle = OwnedUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
         try:
             previous_total = None
-            for index, phase in enumerate(phases, 1):
+            for index, (phase, phase_duration) in enumerate(zip(phases, phase_durations), 1):
                 counts = tuple(phase[f'gnb{site}_ues'] for site in (1, 2, 3))
                 total = phase['workload_ue']
                 direction = ('initial' if previous_total is None else
@@ -267,9 +289,9 @@ def run(args):
                                 (group, ue) for group, ues in site_groups for ue in ues)]
                 publisher = TelemetryPublisher(telemetry, [source for _, source, _ in selected]) if telemetry else None
                 start = time.time()
-                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {args.phase_duration:g}s at {float(rps_per_ue):g} RPS/UE (max_in_flight={max_in_flight_per_ue})", flush=True)
+                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {phase_duration:g}s at {float(rps_per_ue):g} RPS/UE (max_in_flight={max_in_flight_per_ue})", flush=True)
                 emit({'event': 'phase_start', **phase, 'start_time': start,
-                      'duration_s': args.phase_duration, 'rps_per_ue': float(rps_per_ue),
+                      'duration_s': phase_duration, 'rps_per_ue': float(rps_per_ue),
                       'max_in_flight_per_ue': max_in_flight_per_ue, 'ues': [
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}
                           for group, ues in site_groups for ue in ues]})
@@ -282,7 +304,7 @@ def run(args):
                     per_ue = run_fixed_rate_phase(
                         phase['phase'],
                         selected,
-                        args.phase_duration,
+                        phase_duration,
                         float(rps_per_ue),
                         max_in_flight_per_ue,
                         dispatch,
@@ -301,11 +323,11 @@ def run(args):
                 successes = sum(ue['successes'] for ue in per_ue)
                 missed = sum(ue['missed'] for ue in per_ue)
                 emit({'event': 'phase_end', **phase, 'start_time': start,
-                      'generation_duration_s': args.phase_duration, 'end_time': time.time(),
+                      'generation_duration_s': phase_duration, 'end_time': time.time(),
                       'rps_per_ue': float(rps_per_ue), 'max_in_flight_per_ue': max_in_flight_per_ue,
                       'scheduled': scheduled, 'started': started, 'completed': completed,
                       'attempts': completed, 'successes': successes, 'failures': completed - successes,
-                      'missed': missed, 'actual_start_rate': started / args.phase_duration,
+                      'missed': missed, 'actual_start_rate': started / phase_duration,
                       'request_coverage': completed / scheduled if scheduled else None,
                       'per_ue': per_ue})
                 print(f"[--] {phase['phase']}: scheduled={scheduled}, started={started}, completed={completed}, {successes} successful, {completed - successes} failed, missed={missed}", flush=True)
@@ -324,6 +346,7 @@ def main(argv=None):
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')
     parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb1:gnb2:gnb3 counts, comma separated')
     parser.add_argument('--phase-duration', type=float, default=defaults.PHASE_DURATION, help='Request-generation seconds per phase')
+    parser.add_argument('--phase-durations', default=None, help='Comma-separated request-generation seconds per phase; overrides --phase-duration')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE, help='Target arrival rate per active UE in requests/second')
     parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE, help='Maximum concurrent in-flight requests per UE')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
