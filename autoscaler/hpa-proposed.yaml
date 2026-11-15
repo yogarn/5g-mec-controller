@@ -1,0 +1,31 @@
+# Proposed latency-driven HPA manifest (requires prometheus-adapter external.metrics.k8s.io).
+# Desired replicas = ceil(currentReplicas * (ue_p90_latency_seconds / slo_seconds)),
+# with 0s scale-up stabilization and 300s rolling-maximum scale-down stabilization.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mec-placement-pedestrian-detection-proposed
+  namespace: services
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mec-placement-pedestrian-detection
+  minReplicas: 1
+  maxReplicas: 100
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: ue_p90_latency_seconds
+          selector:
+            matchLabels:
+              job: ue-telemetry
+        target:
+          type: Value
+          value: 500m
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+    scaleDown:
+      stabilizationWindowSeconds: 300

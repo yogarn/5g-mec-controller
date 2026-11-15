@@ -510,6 +510,12 @@ data:
             target_label: node
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+
+      # Scrape UE Telemetry Collector in placement namespace
+      - job_name: 'ue-telemetry'
+        scrape_interval: 15s
+        static_configs:
+          - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
 ---
 apiVersion: apps/v1
 kind: Deployment
