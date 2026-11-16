@@ -470,6 +470,42 @@ def test_throttling_aggregate_ratio_with_reset_and_missing_data(tmp_path):
     # 50s elapsed, 30s idle -> 0.40 CPU utilization.
     assert float(row['node_cpu_max_utilization']) == pytest.approx(0.4)
     assert json.loads(row['node_cpu_utilization'])['gnb-3'] == pytest.approx(0.4)
+    assert row['throttling_completeness_status'] == 'complete'
+    assert row['throttling_coverage_ratio'] == '1.0000'
+
+    # Partial throttling coverage: 2 running pods, only 1 has throttling counters.
+    metrics_two = tmp_path / 'metrics_two.jsonl'
+    metrics_two.write_text(
+        json.dumps({'sample_time': 130.0, 'pods': [
+            {'name': 'mec-placement-face-detection-a', 'phase': 'Running'},
+            {'name': 'mec-placement-face-detection-b', 'phase': 'Running'},
+        ]}) + '\n'
+    )
+    prom_partial = tmp_path / 'resources-partial.json'
+    prom_partial.write_text(json.dumps({
+        'pod_prefix': 'mec-placement-face-detection-',
+        'step_seconds': 5.0,
+        'results': {
+            'cpu_seconds_total': [],
+            'memory_working_set_bytes': [],
+            'cpu_cfs_throttled_periods_total': [
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-a', 'container': 'app', 'id': 'c1'},
+                 'values': [[105.0, '100'], [155.0, '100']]},
+            ],
+            'cpu_cfs_periods_total': [
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-a', 'container': 'app', 'id': 'c1'},
+                 'values': [[105.0, '200'], [155.0, '400']]},
+            ],
+            'scrape_up': [],
+        },
+    }))
+    out_partial = tmp_path / 'out_partial'
+    summarize_cadvisor(prom_partial, requests, summary, out_partial, metrics_jsonl_path=metrics_two)
+    row_p, = list(csv.DictReader((out_partial / 'resource-by-ramp.csv').open()))
+    assert float(row_p['throttled_period_ratio']) == pytest.approx(0.0)
+    assert row_p['throttling_completeness_status'] == 'partial'
+    assert row_p['throttling_coverage_ratio'] == '0.5000'
+    assert 'partial_throttling_coverage' in row_p['missing_reasons']
 
     # Missing throttling series must be blank (''), never '0'.
     prom_missing = tmp_path / 'resources-missing.json'

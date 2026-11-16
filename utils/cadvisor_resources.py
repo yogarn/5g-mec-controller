@@ -269,8 +269,8 @@ def summarize_cadvisor(
 
     cpu_series, _, cpu_container_of, cpu_dups = _dedupe_series(results.get('cpu_seconds_total', []), pod_prefix)
     mem_series, _, mem_container_of, mem_dups = _dedupe_series(results.get('memory_working_set_bytes', []), pod_prefix)
-    thr_periods_series, _, _, _ = _dedupe_series(results.get('cpu_cfs_throttled_periods_total', []), pod_prefix)
-    periods_series, _, _, _ = _dedupe_series(results.get('cpu_cfs_periods_total', []), pod_prefix)
+    thr_periods_series, _, thr_container_of, _ = _dedupe_series(results.get('cpu_cfs_throttled_periods_total', []), pod_prefix)
+    periods_series, _, periods_container_of, _ = _dedupe_series(results.get('cpu_cfs_periods_total', []), pod_prefix)
     thr_seconds_series, _, _, _ = _dedupe_series(results.get('cpu_cfs_throttled_seconds_total', []), pod_prefix)
     node_idle_series = results.get('node_cpu_idle_seconds_total', [])
     scrape_up_series = results.get('scrape_up', [])
@@ -280,6 +280,7 @@ def summarize_cadvisor(
         'phase', 'resource_source', 'rate_window_seconds', 'freshness_seconds', 'scrape_interval_seconds',
         'cpu_millicores', 'memory_mib',
         'throttled_period_ratio', 'cfs_throttled_periods', 'cfs_periods', 'cfs_throttled_seconds',
+        'throttling_completeness_status', 'throttling_coverage_ratio',
         'node_cpu_max_utilization', 'node_cpu_utilization',
         'complete_samples',
         'memory_complete_samples', 'cpu_complete_samples',
@@ -321,6 +322,7 @@ def summarize_cadvisor(
             cpu_missing = 0
             insufficient_rate = 0
             missing_lifecycle = 0
+            expected_thr_pods = set()
             reasons = set()
             if query_errors:
                 reasons.add('prometheus_query_error')
@@ -346,6 +348,7 @@ def summarize_cadvisor(
                     continue
                 if not running_pods:
                     continue
+                expected_thr_pods.update(running_pods)
 
                 # Select the current container instance per (pod, container) before validating
                 # samples so a restarted container never falls back to the old instance's rate.
@@ -441,6 +444,7 @@ def summarize_cadvisor(
             thr_p_sum = 0.0
             per_sum = 0.0
             matched_thr_instances = 0
+            observed_thr_pods = set()
             for ckey in sorted(set(thr_periods_series) & set(periods_series)):
                 tp_delta = _counter_delta_in_phase(thr_periods_series[ckey], start, end)
                 p_delta = _counter_delta_in_phase(periods_series[ckey], start, end)
@@ -449,14 +453,36 @@ def summarize_cadvisor(
                 thr_p_sum += tp_delta
                 per_sum += p_delta
                 matched_thr_instances += 1
+                observed_thr_pods.add(thr_container_of[ckey][0])
+            if not expected_thr_pods:
+                for ckey, samples in cpu_series.items():
+                    if any(start <= ts <= end for ts, _ in samples):
+                        expected_thr_pods.add(cpu_container_of[ckey][0])
+                for ckey, samples in mem_series.items():
+                    if any(start <= ts <= end for ts, _ in samples):
+                        expected_thr_pods.add(mem_container_of[ckey][0])
             if matched_thr_instances > 0 and per_sum > 0:
                 thr_ratio_str = f'{thr_p_sum / per_sum:.6f}'
                 thr_p_str = f'{thr_p_sum:g}'
                 per_str = f'{per_sum:g}'
+                if expected_thr_pods:
+                    covered = len(observed_thr_pods & expected_thr_pods)
+                    thr_cov_str = f'{covered / len(expected_thr_pods):.4f}'
+                    if expected_thr_pods <= observed_thr_pods:
+                        thr_status = 'complete'
+                    else:
+                        thr_status = 'partial'
+                        reasons.add('partial_throttling_coverage')
+                else:
+                    thr_status = 'partial'
+                    thr_cov_str = ''
+                    reasons.add('unverified_throttling_coverage')
             else:
                 thr_ratio_str = ''
                 thr_p_str = ''
                 per_str = ''
+                thr_status = 'missing'
+                thr_cov_str = '0.0000' if expected_thr_pods else ''
                 if not thr_periods_series or not periods_series:
                     reasons.add('missing_throttling_series')
                 else:
@@ -484,6 +510,8 @@ def summarize_cadvisor(
                 'cfs_throttled_periods': thr_p_str,
                 'cfs_periods': per_str,
                 'cfs_throttled_seconds': thr_sec_str,
+                'throttling_completeness_status': thr_status,
+                'throttling_coverage_ratio': thr_cov_str,
                 'node_cpu_max_utilization': node_cpu_max_str,
                 'node_cpu_utilization': node_cpu_json_str,
                 'complete_samples': overall_complete,
