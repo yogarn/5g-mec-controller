@@ -412,3 +412,81 @@ def test_sample_pods_only_skips_metrics_server_without_delay(tmp_path, monkeypat
     assert observation['pods'] == [{'name': pod_name, 'node': 'gnb-3', 'phase': 'Running', 'ready': True}]
     assert observation['metrics'] == {}
     assert 'metrics_error' not in observation
+
+
+def test_sample_records_container_restarts_and_termination_reasons(tmp_path, monkeypatch):
+    output = tmp_path / 'metrics.jsonl'
+    monkeypatch.setattr('sys.argv', ['monitor_resources.py', 'sample', str(output), '--pods-only'])
+    handlers = {}
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(monitor_resources.time, 'sleep',
+                        lambda seconds: handlers[monitor_resources.signal.SIGTERM](None, None))
+    pod_name = monitor_resources.PREFIX + 'restarted'
+
+    def check_output(command, *, text, timeout):
+        return json.dumps({'items': [{
+            'metadata': {'name': pod_name},
+            'spec': {'nodeName': 'gnb-3'},
+            'status': {
+                'phase': 'Running',
+                'conditions': [{'type': 'Ready', 'status': 'True'}],
+                'containerStatuses': [{
+                    'name': 'pedestrian-detection',
+                    'restartCount': 2,
+                    'lastState': {'terminated': {'reason': 'Error', 'exitCode': 137, 'finishedAt': '2026-11-16T06:00:00Z'}},
+                    'state': {'running': {'startedAt': '2026-11-16T06:00:05Z'}},
+                }],
+            },
+        }]})
+
+    monkeypatch.setattr(monitor_resources.subprocess, 'check_output', check_output)
+    monitor_resources.main()
+
+    observation, = [json.loads(line) for line in output.read_text().splitlines()]
+    assert observation['container_statuses'][pod_name]['restarts'] == 2
+    assert observation['container_statuses'][pod_name]['termination_reasons'] == [{
+        'container': 'pedestrian-detection',
+        'reason': 'Error',
+        'exit_code': 137,
+        'finished_at': '2026-11-16T06:00:00Z',
+    }]
+
+
+def test_sample_hpa_records_status_and_continues_on_kubectl_error(tmp_path, monkeypatch):
+    import subprocess
+    output = tmp_path / 'hpa-status.jsonl'
+    monkeypatch.setattr('sys.argv', ['monitor_resources.py', 'hpa-sample', str(output), '--hpa', 'my-hpa'])
+    handlers = {}
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    calls = {'n': 0}
+
+    def fake_sleep(_seconds):
+        if calls['n'] >= 2:
+            handlers[monitor_resources.signal.SIGTERM](None, None)
+
+    def fake_check_output(command, *, text, timeout):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise subprocess.CalledProcessError(1, command, 'apiserver timeout')
+        return json.dumps({
+            'metadata': {'name': 'my-hpa'},
+            'spec': {'minReplicas': 1, 'maxReplicas': 24, 'metrics': [{'type': 'External'}]},
+            'status': {
+                'currentReplicas': 5,
+                'desiredReplicas': 10,
+                'lastScaleTime': '2026-11-16T06:00:00Z',
+                'currentMetrics': [{'type': 'External', 'external': {'current': {'value': '250m'}}}],
+                'conditions': [{'type': 'ScalingActive', 'status': 'True', 'reason': 'ValidMetricFound'}],
+            },
+        })
+
+    monkeypatch.setattr(monitor_resources.time, 'sleep', fake_sleep)
+    monkeypatch.setattr(monitor_resources.subprocess, 'check_output', fake_check_output)
+    monitor_resources.main()
+
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 2
+    assert 'error' in rows[0]
+    assert rows[1]['current_replicas'] == 5
+    assert rows[1]['desired_replicas'] == 10
+    assert rows[1]['last_scale_time'] == '2026-11-16T06:00:00Z'

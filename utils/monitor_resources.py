@@ -50,8 +50,8 @@ def parse_window_seconds(value):
     return total
 
 
-def kubectl(namespace, *args):
-    return json.loads(subprocess.check_output(['kubectl', '-n', namespace, *args], text=True, timeout=10))
+def kubectl(namespace, *args, timeout=10):
+    return json.loads(subprocess.check_output(['kubectl', '-n', namespace, *args], text=True, timeout=timeout))
 
 
 def timestamp(value):
@@ -79,6 +79,7 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
             try:
                 pods = kubectl(namespace, 'get', 'pods', '-l', 'app=' + app, '-o', 'json')['items']
                 rows = []
+                container_statuses = {}
                 for pod in pods:
                     metadata, status = pod['metadata'], pod.get('status', {})
                     if metadata.get('deletionTimestamp') or status.get('phase') in ('Succeeded', 'Failed'):
@@ -86,7 +87,30 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
                     rows.append({'name': metadata['name'], 'node': pod.get('spec', {}).get('nodeName') or '<pending>',
                                  'phase': status.get('phase'),
                                  'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', []))})
+                    cs_list = status.get('containerStatuses') or []
+                    if cs_list:
+                        term_reasons = []
+                        wait_reasons = []
+                        for cs in cs_list:
+                            term = (cs.get('lastState') or {}).get('terminated')
+                            if term:
+                                term_reasons.append({
+                                    'container': cs.get('name'),
+                                    'reason': term.get('reason'),
+                                    'exit_code': term.get('exitCode'),
+                                    'finished_at': term.get('finishedAt'),
+                                })
+                            wait = (cs.get('state') or {}).get('waiting')
+                            if wait and wait.get('reason'):
+                                wait_reasons.append({'container': cs.get('name'), 'reason': wait.get('reason')})
+                        container_statuses[metadata['name']] = {
+                            'restarts': sum(cs.get('restartCount', 0) for cs in cs_list),
+                            'termination_reasons': term_reasons,
+                            'waiting_reasons': wait_reasons,
+                        }
                 observation = {'sample_time': time.time(), 'pods': rows, 'metrics': {}}
+                if container_statuses:
+                    observation['container_statuses'] = container_statuses
                 if not pods_only:
                     try:
                         measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
@@ -101,6 +125,51 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
                 stream.write(json.dumps({'sample_time': time.time(), 'error': str(exc)}) + '\n')
                 stream.flush()
             time.sleep(5)
+
+
+def sample_hpa(output, namespace, hpa_name, interval=5.0):
+    """Poll HPA status independently so failures never block Pod lifecycle sampling."""
+    stop = False
+
+    def request_stop(signum, frame):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    with Path(output).open('x', encoding='utf-8') as stream:
+        while not stop:
+            try:
+                hpa = kubectl(namespace, 'get', 'hpa', hpa_name, '-o', 'json', timeout=5)
+                spec = hpa.get('spec') or {}
+                status = hpa.get('status') or {}
+                record = {
+                    'sample_time': time.time(),
+                    'name': (hpa.get('metadata') or {}).get('name', hpa_name),
+                    'min_replicas': spec.get('minReplicas'),
+                    'max_replicas': spec.get('maxReplicas'),
+                    'current_replicas': status.get('currentReplicas'),
+                    'desired_replicas': status.get('desiredReplicas'),
+                    'last_scale_time': status.get('lastScaleTime'),
+                    'targets': spec.get('metrics') or [],
+                    'current_metrics': status.get('currentMetrics') or [],
+                    'conditions': [
+                        {
+                            'type': c.get('type'),
+                            'status': c.get('status'),
+                            'reason': c.get('reason'),
+                            'message': c.get('message'),
+                            'last_transition_time': c.get('lastTransitionTime'),
+                        }
+                        for c in (status.get('conditions') or [])
+                    ],
+                }
+                stream.write(json.dumps(record, separators=(',', ':')) + '\n')
+                stream.flush()
+            except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
+                stream.write(json.dumps({'sample_time': time.time(), 'error': str(exc)}) + '\n')
+                stream.flush()
+            time.sleep(interval)
 
 
 def summarize(raw, requests, summary_csv, output, write_resource_csv=True):
@@ -359,11 +428,17 @@ def main():
     p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
     p.add_argument('--app', default='mec-placement-face-detection', help='workload app label and Pod prefix')
     p.add_argument('--pods-only', action='store_true', help='record Pod lifecycle/placement only without querying Metrics Server')
+    p = sub.add_parser('hpa-sample'); p.add_argument('output')
+    p.add_argument('--namespace', default='services', help='HPA namespace (default: services)')
+    p.add_argument('--hpa', required=True, help='HPA resource name')
+    p.add_argument('--interval', type=float, default=5.0, help='poll interval in seconds')
     p = sub.add_parser('summarize'); p.add_argument('samples'); p.add_argument('requests'); p.add_argument('summary'); p.add_argument('output')
     p.add_argument('--skip-resource-csv', action='store_true', help='skip resource-by-ramp.csv when cAdvisor is the primary resource source')
     args = parser.parse_args()
     if args.action == 'sample':
         sample(args.output, args.namespace, args.app, pods_only=args.pods_only)
+    elif args.action == 'hpa-sample':
+        sample_hpa(args.output, args.namespace, args.hpa, interval=args.interval)
     else:
         summarize(args.samples, args.requests, args.summary, args.output, write_resource_csv=not args.skip_resource_csv)
 

@@ -700,109 +700,148 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     remote_started = False
     completed = False
     incluster_go = comparison != 'scaling' and placement_engine == 'go' and method == 'proposed'
-    method_start_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    with (output / 'controller.log').open('x') as control_log, (output / 'sampler.log').open('x') as sampler_log, (output / 'runner-ssh.log').open('x') as runner_log:
-        try:
-            if incluster_go:
-                cm = _render_incluster_placement_configmap(config, config['manifest'])
-                cm_path = output / 'placement-configmap.yaml'
-                with cm_path.open('x') as stream:
-                    yaml.safe_dump(cm, stream, sort_keys=False)
-                kube('apply', '-f', str(cm_path))
-                kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'restart', 'deployment/placement-controller')
-                kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'status', 'deployment/placement-controller', '--timeout=120s')
-                placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
-                if placement_dep.get('status', {}).get('readyReplicas') != 1:
-                    raise RuntimeError('placement/placement-controller is not ready before workload deployment')
-            if hpa_path is not None:
-                kube('apply', '-f', config['manifest'])
-                kube('apply', '-f', hpa_path)
-            if placement_engine == 'python' and (method == 'proposed' or (comparison == 'placement' and autoscaler == 'controller')):
-                cmd = [sys.executable, '-u', '-m', 'controller', '--config', str(config_path)]
-                if hpa_path is None:
-                    cmd.append('--deploy')
-                else:
-                    cmd.append('--placement-only')
-                processes.append(subprocess.Popen(cmd, stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
-                if hpa_path is None:
-                    deadline = time.monotonic() + 30
-                    while time.monotonic() < deadline:
-                        if processes[0].poll() is not None:
-                            raise RuntimeError('controller startup failed; see controller.log')
-                        check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
-                        if check.stdout.strip():
-                            break
-                        time.sleep(1)
+    method_start_dt = datetime.now(timezone.utc)
+    method_start_iso = method_start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    try:
+        with (output / 'controller.log').open('x') as control_log, (output / 'sampler.log').open('x') as sampler_log, (output / 'runner-ssh.log').open('x') as runner_log:
+            try:
+                if incluster_go:
+                    cm = _render_incluster_placement_configmap(config, config['manifest'])
+                    cm_path = output / 'placement-configmap.yaml'
+                    with cm_path.open('x') as stream:
+                        yaml.safe_dump(cm, stream, sort_keys=False)
+                    kube('apply', '-f', str(cm_path))
+                    kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'restart', 'deployment/placement-controller')
+                    kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'status', 'deployment/placement-controller', '--timeout=120s')
+                    placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
+                    if placement_dep.get('status', {}).get('readyReplicas') != 1:
+                        raise RuntimeError('placement/placement-controller is not ready before workload deployment')
+                if hpa_path is not None:
+                    kube('apply', '-f', config['manifest'])
+                    kube('apply', '-f', hpa_path)
+                if placement_engine == 'python' and (method == 'proposed' or (comparison == 'placement' and autoscaler == 'controller')):
+                    cmd = [sys.executable, '-u', '-m', 'controller', '--config', str(config_path)]
+                    if hpa_path is None:
+                        cmd.append('--deploy')
                     else:
-                        raise RuntimeError('controller did not deploy the workload')
-            kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
-            service = get('service', app)
-            check_service_routing(service)
-            port = service['spec']['ports'][0]['nodePort']
-            site_urls = {site: f'http://{address}:{port}/detect'
-                         for site, address in settings['site_node_ips'].items()}
-            if delay is not None:
-                delay.check()
-            command([sys.executable, '-m', 'utils.preflight', '--config', config_path])
-            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app, '--pods-only'], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
-            processes.append(sampler)
-            payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
-                       'schedule': settings['schedule'], 'duration': settings['phase_duration']}
-            if settings.get('phase_durations'):
-                payload['phase_durations'] = settings['phase_durations']
-            ue = subprocess.Popen(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'run']), stdin=subprocess.PIPE, stdout=runner_log, stderr=subprocess.STDOUT, text=True, start_new_session=True)
-            remote_started = True
-            ue.stdin.write(json.dumps(payload)); ue.stdin.close()
-            progress = RunnerProgress(output / 'runner-ssh.log', method)
-            verified = False
-            deadline = time.monotonic() + 90
-            while ue.poll() is None:
-                progress.poll()
+                        cmd.append('--placement-only')
+                    processes.append(subprocess.Popen(cmd, stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
+                    if hpa_path is None:
+                        deadline = time.monotonic() + 30
+                        while time.monotonic() < deadline:
+                            if processes[0].poll() is not None:
+                                raise RuntimeError('controller startup failed; see controller.log')
+                            check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
+                            if check.stdout.strip():
+                                break
+                            time.sleep(1)
+                        else:
+                            raise RuntimeError('controller did not deploy the workload')
+                kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
+                service = get('service', app)
+                check_service_routing(service)
+                port = service['spec']['ports'][0]['nodePort']
+                site_urls = {site: f'http://{address}:{port}/detect'
+                             for site, address in settings['site_node_ips'].items()}
                 if delay is not None:
                     delay.check()
-                if any(p.poll() is not None for p in processes):
-                    raise RuntimeError('controller or sampler exited during traffic; see logs')
+                command([sys.executable, '-m', 'utils.preflight', '--config', config_path])
+                sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app, '--pods-only'], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
+                processes.append(sampler)
+                if hpa_path is not None:
+                    hpa_sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'hpa-sample', str(output / 'hpa-status.jsonl'), '--namespace', NAMESPACE, '--hpa', f'{app}-{method}'], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
+                    processes.append(hpa_sampler)
+                payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
+                           'schedule': settings['schedule'], 'duration': settings['phase_duration']}
+                if settings.get('phase_durations'):
+                    payload['phase_durations'] = settings['phase_durations']
+                ue = subprocess.Popen(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'run']), stdin=subprocess.PIPE, stdout=runner_log, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                remote_started = True
+                ue.stdin.write(json.dumps(payload)); ue.stdin.close()
+                progress = RunnerProgress(output / 'runner-ssh.log', method)
+                verified = False
+                deadline = time.monotonic() + 90
+                while ue.poll() is None:
+                    progress.poll()
+                    if delay is not None:
+                        delay.check()
+                    if any(p.poll() is not None for p in processes):
+                        raise RuntimeError('controller or sampler exited during traffic; see logs')
+                    if not verified:
+                        prom_ok = active_telemetry(config['prometheus_url'])
+                        adapter_ok = True if autoscaler != 'hpa' else bool(_query_external_latency_metric(allow_not_found=True))
+                        verified = prom_ok and adapter_ok
+                        if verified:
+                            print(f'{method}: active UE latency telemetry verified', flush=True)
+                        elif time.monotonic() > deadline:
+                            raise RuntimeError('no valid active telemetry within 90 seconds')
+                    time.sleep(10)
+                progress.poll(final=True)
+                if ue.returncode != 0:
+                    raise RuntimeError(f'UE workload failed ({ue.returncode}); see runner-ssh.log')
                 if not verified:
-                    prom_ok = active_telemetry(config['prometheus_url'])
-                    adapter_ok = True if autoscaler != 'hpa' else bool(_query_external_latency_metric(allow_not_found=True))
-                    verified = prom_ok and adapter_ok
-                    if verified:
-                        print(f'{method}: active UE latency telemetry verified', flush=True)
-                    elif time.monotonic() > deadline:
-                        raise RuntimeError('no valid active telemetry within 90 seconds')
-                time.sleep(10)
-            progress.poll(final=True)
-            if ue.returncode != 0:
-                raise RuntimeError(f'UE workload failed ({ue.returncode}); see runner-ssh.log')
-            if not verified:
-                raise RuntimeError('UE workload ended without valid active telemetry')
-            if incluster_go:
-                placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
-                if placement_dep.get('status', {}).get('readyReplicas') != 1:
-                    raise RuntimeError('placement/placement-controller became unready during traffic')
-            completed = True
-        finally:
-            if incluster_go:
-                try:
-                    kube('-n', PLACEMENT_NAMESPACE, 'logs', 'deployment/placement-controller',
-                         f'--since-time={method_start_iso}', stdout=control_log)
-                except (OSError, subprocess.SubprocessError) as exc:
-                    control_log.write(f'failed to fetch in-cluster placement-controller logs: {exc}\n')
-            try:
-                if remote_started and not completed:
-                    command(remote(settings, ['sudo', '-n', '.venv/bin/python', '-m', 'experiments.campaign_ue', 'stop', '--campaign', campaign, '--method', method]))
-                    ue.wait(timeout=100)
+                    raise RuntimeError('UE workload ended without valid active telemetry')
+                if incluster_go:
+                    placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
+                    if placement_dep.get('status', {}).get('readyReplicas') != 1:
+                        raise RuntimeError('placement/placement-controller became unready during traffic')
+                completed = True
             finally:
-                errors = []
-                for process in reversed(processes):
+                if incluster_go:
                     try:
-                        stop_process(process)
+                        kube('-n', PLACEMENT_NAMESPACE, 'logs', 'deployment/placement-controller',
+                             f'--since-time={method_start_iso}', stdout=control_log)
                     except (OSError, subprocess.SubprocessError) as exc:
-                        errors.append(str(exc))
-                if errors:
-                    raise RuntimeError('Local process cleanup failed: ' + '; '.join(errors))
-    with (output / 'deployments-after.json').open('x') as stream:
-        kube('-n', NAMESPACE, 'get', 'deployments,pods,hpa', '-o', 'json', stdout=stream)
+                        control_log.write(f'failed to fetch in-cluster placement-controller logs: {exc}\n')
+                try:
+                    if remote_started and not completed:
+                        command(remote(settings, ['sudo', '-n', '.venv/bin/python', '-m', 'experiments.campaign_ue', 'stop', '--campaign', campaign, '--method', method]))
+                        ue.wait(timeout=100)
+                finally:
+                    errors = []
+                    for process in reversed(processes):
+                        try:
+                            stop_process(process)
+                        except (OSError, subprocess.SubprocessError) as exc:
+                            errors.append(str(exc))
+                    if errors:
+                        raise RuntimeError('Local process cleanup failed: ' + '; '.join(errors))
+    finally:
+        resource_uids = set()
+        try:
+            dep_raw = kube('-n', NAMESPACE, 'get', 'deployments,pods,hpa', '-o', 'json', capture_output=True, text=True).stdout
+            (output / 'deployments-after.json').write_text(dep_raw)
+            for item in json.loads(dep_raw).get('items', []):
+                meta = item.get('metadata') or {}
+                if (meta.get('name') or '').startswith(app) and meta.get('uid'):
+                    resource_uids.add(meta['uid'])
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        try:
+            raw_events = kube('-n', NAMESPACE, 'get', 'events', '-o', 'json', capture_output=True, text=True).stdout
+            all_events = json.loads(raw_events).get('items', [])
+            hpa_name = f'{app}-{method}'
+            other_hpa = f'{app}-{"proposed" if method == "baseline" else "baseline"}'
+            filtered = []
+            for ev in all_events:
+                inv = ev.get('involvedObject') or {}
+                name = inv.get('name') or ''
+                uid = inv.get('uid') or ''
+                ts_raw = ev.get('lastTimestamp') or ev.get('eventTime') or ev.get('firstTimestamp') or (ev.get('metadata') or {}).get('creationTimestamp')
+                if ts_raw:
+                    try:
+                        ev_dt = datetime.fromisoformat(ts_raw.replace('Z', '+00:00'))
+                        if ev_dt < method_start_dt:
+                            continue
+                    except ValueError:
+                        pass
+                if uid and uid in resource_uids:
+                    filtered.append(ev)
+                elif name == app or name == hpa_name or (name.startswith(app + '-') and name != other_hpa):
+                    filtered.append(ev)
+            (output / 'workload-events.json').write_text(json.dumps({'items': filtered}, indent=2) + '\n')
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            (output / 'workload-events.json').write_text(json.dumps({'error': str(exc)}) + '\n')
     transfer(settings, campaign, method, output)
     from utils.cadvisor_resources import (
         DEFAULT_FRESHNESS_S,

@@ -752,6 +752,8 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
             return types.SimpleNamespace(stdout='')
         if args[:4] == ('-n', 'services', 'get', 'deployments,pods,hpa'):
             return types.SimpleNamespace(stdout='{}')
+        if args[:4] == ('-n', 'services', 'get', 'events'):
+            raise subprocess.CalledProcessError(1, args, 'events unavailable')
         raise AssertionError(f'unexpected kube call: {args}')
 
     def fake_get(kind, name, namespace='services'):
@@ -819,6 +821,8 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
     assert not any('placement-controller' in ' '.join(map(str, c)) for c in kube_calls)
     assert not any('-m controller' in ' '.join(map(str, cmd)) for cmd in popen_cmds)
     assert any('utils.monitor_resources' in ' '.join(map(str, cmd)) and '--pods-only' in cmd for cmd in popen_cmds)
+    assert any('utils.monitor_resources' in ' '.join(map(str, cmd)) and 'hpa-sample' in cmd for cmd in popen_cmds)
+    assert (root / 'proposed' / 'workload-events.json').exists()
     assert written_payloads[0]['phase_durations'] == [60.0] * 6 + [420.0]
 
 
@@ -964,3 +968,70 @@ def test_check_node_capacity_handles_restartable_inits_overhead_pod_resources_an
 def test_pod_effective_requests_rejects_unsupported_configurations(spec):
     with pytest.raises(ValueError, match='unsupported'):
         campaign._pod_effective_requests(spec)
+
+
+def test_run_method_collects_filtered_events_even_on_failure(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    old_iso = (now - timedelta(minutes=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    new_iso = (now + timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def fake_kube(*args, **kwargs):
+        if args[0] == 'apply' or args[:3] == ('-n', 'services', 'rollout'):
+            return types.SimpleNamespace(stdout='')
+        if args[:4] == ('-n', 'services', 'get', 'deployments,pods,hpa'):
+            return types.SimpleNamespace(stdout=json.dumps({'items': [
+                {'metadata': {'name': 'mec-placement-face-detection-abc', 'uid': 'uid-cur-pod'}},
+            ]}))
+        if args[:4] == ('-n', 'services', 'get', 'events'):
+            return types.SimpleNamespace(stdout=json.dumps({'items': [
+                {'involvedObject': {'name': 'mec-placement-face-detection-old', 'uid': 'uid-old'}, 'lastTimestamp': old_iso},
+                {'involvedObject': {'name': 'mec-placement-face-detection-baseline', 'uid': 'uid-base-hpa'}, 'lastTimestamp': new_iso},
+                {'involvedObject': {'name': 'mec-placement-face-detection-abc', 'uid': 'uid-cur-pod'}, 'lastTimestamp': new_iso},
+                {'involvedObject': {'name': 'unrelated-pod', 'uid': 'uid-other'}, 'lastTimestamp': new_iso},
+            ]}))
+        raise AssertionError(f'unexpected kube call: {args}')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(campaign, 'get', lambda *a, **kw: {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}})
+    monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'active_telemetry', lambda *a, **kw: True)
+    monkeypatch.setattr(campaign, '_query_external_latency_metric', lambda allow_not_found=True: True)
+    monkeypatch.setattr(campaign, 'RunnerProgress', lambda *a, **kw: types.SimpleNamespace(poll=lambda final=False: None))
+    monkeypatch.setattr(campaign.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(campaign, 'stop_process', lambda p: None)
+
+    class FailingUEPopen:
+        def __init__(self, cmd, **kwargs):
+            self.is_ue = 'campaign_ue' in ' '.join(map(str, cmd))
+            self.ue_polls = 0
+            self.returncode = 1
+            self.stdin = types.SimpleNamespace(write=lambda data: None, close=lambda: None)
+
+        def poll(self):
+            if not self.is_ue:
+                return None
+            self.ue_polls += 1
+            return None if self.ue_polls == 1 else 1
+
+        def wait(self, timeout=None):
+            return 1
+
+    monkeypatch.setattr(campaign.subprocess, 'Popen', FailingUEPopen)
+    settings = {
+        'inventory': 'inv.yaml', 'nr_ue': '/bin/nr-ue', 'token': 'tok', 'image': 'img',
+        'telemetry_url': 'http://127.0.0.1/obs', 'site_node_ips': {'gnb-1': '10.0.0.1', 'gnb-2': '10.0.0.2', 'gnb-3': '10.0.0.3'},
+        'schedule': campaign.SCALER_BALANCED_SCHEDULE, 'phase_duration': 60,
+        'workload': 'face-detection', 'ue_host': 'ue', 'ue_project': '/ue',
+    }
+    root = tmp_path / 'run'
+    root.mkdir()
+    with pytest.raises(RuntimeError, match='UE workload failed'):
+        campaign.run_method(
+            settings, 'fail_01', root, 'proposed', None, 150, 24,
+            comparison='scaling', autoscaler='hpa', placement_engine='go',
+        )
+    events = json.loads((root / 'proposed' / 'workload-events.json').read_text())['items']
+    assert [ev['involvedObject']['uid'] for ev in events] == ['uid-cur-pod']
