@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from utils.plot_autoscaler import load_coverage, load_slo
+from utils.plot_autoscaler import load_coverage, load_resource_coverage, load_slo
 
 
 def write_summary(root, method, rows):
@@ -56,3 +56,35 @@ def test_load_coverage_computes_completed_over_scheduled(tmp_path):
     cov = load_coverage(tmp_path, ['one'])
     assert cov['baseline'] == [80.0]
     assert cov['proposed'] == [100.0]
+
+
+def test_load_resource_coverage_preserves_missing_and_partial_rounds(tmp_path):
+    fieldnames = [
+        'phase', 'cpu_millicores', 'memory_mib', 'complete_samples',
+        'partial_samples', 'rejected_samples', 'coverage_ratio', 'completeness_status',
+    ]
+    for method, rows in [
+        ('baseline', [
+            {'phase': 'p1', 'cpu_millicores': '200', 'memory_mib': '64', 'complete_samples': 3,
+             'partial_samples': 0, 'rejected_samples': 0, 'coverage_ratio': '1.0', 'completeness_status': 'complete'},
+            {'phase': 'p2', 'cpu_millicores': '', 'memory_mib': '', 'complete_samples': 0,
+             'partial_samples': 2, 'rejected_samples': 1, 'coverage_ratio': '0.0', 'completeness_status': 'incomplete_only'},
+        ]),
+        ('proposed', [
+            {'phase': 'p1', 'cpu_millicores': '250', 'memory_mib': '64', 'complete_samples': 1,
+             'partial_samples': 1, 'rejected_samples': 0, 'coverage_ratio': '0.5', 'completeness_status': 'partial'},
+            {'phase': 'p2', 'cpu_millicores': '', 'memory_mib': '', 'complete_samples': 0,
+             'partial_samples': 0, 'rejected_samples': 0, 'coverage_ratio': '0.0', 'completeness_status': 'missing'},
+        ]),
+    ]:
+        directory = tmp_path / method
+        directory.mkdir()
+        with (directory / 'resource-by-ramp.csv').open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    cov = load_resource_coverage(tmp_path, ['p1', 'p2'])
+    assert cov['baseline'][0] == {'complete': 3, 'rounds': 3, 'coverage_pct': 100.0, 'status': 'complete'}
+    assert cov['baseline'][1] == {'complete': 0, 'rounds': 3, 'coverage_pct': 0.0, 'status': 'incomplete_only'}
+    assert cov['proposed'][0] == {'complete': 1, 'rounds': 2, 'coverage_pct': 50.0, 'status': 'partial'}
+    assert cov['proposed'][1] == {'complete': 0, 'rounds': 0, 'coverage_pct': 0.0, 'status': 'missing'}

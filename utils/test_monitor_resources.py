@@ -117,3 +117,153 @@ def test_async_pod_metrics_across_observations_form_complete_sample(tmp_path):
     assert row['complete_samples'] == '1'
     assert float(row['cpu_millicores']) == 300.0
     assert float(row['memory_mib']) == 2.0
+
+
+def _write_single_phase(tmp_path, start=1700000000, duration=60):
+    events = [{'event': 'phase_start', 'phase': 'phase_01', 'start_time': start},
+              {'event': 'phase_end', 'phase': 'phase_01', 'end_time': start + duration}]
+    rows = [{'phase': 'phase_01', 'workload_ue': 2, 'gnb1_ues': 1, 'gnb2_ues': 1, 'gnb3_ues': 0,
+             'latency_p50_ms': 10, 'latency_p90_ms': 20, 'attempts': 2, 'successes': 2,
+             'failures': 0, 'start_time': start, 'end_time': start + duration}]
+    requests = tmp_path / 'requests.jsonl'
+    requests.write_text(''.join(json.dumps(e) + '\n' for e in events))
+    summary = tmp_path / 'summary.csv'
+    with summary.open('w', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0]); writer.writeheader(); writer.writerows(rows)
+    return requests, summary
+
+
+def test_sample_preserves_metrics_for_recently_terminated_workload_pods(tmp_path, monkeypatch):
+    output = tmp_path / 'metrics.jsonl'
+    monkeypatch.setattr('sys.argv', ['monitor_resources.py', 'sample', str(output)])
+    handlers = {}
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(monitor_resources.time, 'sleep',
+                        lambda seconds: handlers[monitor_resources.signal.SIGTERM](None, None))
+    pod_active = monitor_resources.PREFIX + 'active'
+    pod_term = monitor_resources.PREFIX + 'terminating'
+    m_active = {'metadata': {'name': pod_active}, 'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '32Mi'}}]}
+    m_term = {'metadata': {'name': pod_term}, 'containers': [{'name': 'app', 'usage': {'cpu': '200m', 'memory': '32Mi'}}]}
+    m_other = {'metadata': {'name': 'unrelated-pod'}, 'containers': [{'name': 'app', 'usage': {'cpu': '50m', 'memory': '16Mi'}}]}
+
+    def check_output(command, *, text, timeout):
+        if '--raw' in command:
+            return json.dumps({'items': [m_active, m_term, m_other]})
+        return json.dumps({'items': [
+            {'metadata': {'name': pod_active}, 'spec': {'nodeName': 'gnb1'},
+             'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
+            {'metadata': {'name': pod_term, 'deletionTimestamp': '2026-11-16T00:00:00Z'}, 'spec': {'nodeName': 'gnb-2'},
+             'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
+        ]})
+
+    monkeypatch.setattr(monitor_resources.subprocess, 'check_output', check_output)
+    monitor_resources.main()
+
+    observation, = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [p['name'] for p in observation['pods']] == [pod_active]
+    assert set(observation['metrics']) == {pod_active, pod_term}
+
+
+def test_replacement_churn_recovers_complete_round_and_flags_partial_rounds(tmp_path):
+    start = 1700000000
+    requests, summary = _write_single_phase(tmp_path, start=start, duration=60)
+    pod_a = {'name': 'app-a', 'node': 'gnb1', 'phase': 'Running', 'ready': True}
+    pod_b = {'name': 'app-b', 'node': 'gnb-2', 'phase': 'Running', 'ready': True}
+    pod_c = {'name': 'app-c', 'node': 'gnb-3', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    m = lambda offset, cpu: {'timestamp': ts(offset), 'window': '15s',
+                             'containers': [{'name': 'app', 'usage': {'cpu': cpu, 'memory': '1024Ki'}}]}
+    samples = [
+        {'sample_time': start + 15, 'pods': [pod_a, pod_b], 'metrics': {'app-a': m(15, '100m')}},
+        {'sample_time': start + 22, 'pods': [pod_a, pod_c], 'metrics': {'app-a': m(15, '100m'), 'app-b': m(18, '250m')}},
+        {'sample_time': start + 35, 'pods': [pod_a, pod_c], 'metrics': {'app-a': m(35, '400m')}},
+    ]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        row, = list(csv.DictReader(stream))
+    assert row['complete_samples'] == '1'
+    assert float(row['cpu_millicores']) == 350.0
+    assert float(row['memory_mib']) == 2.0
+    assert row['partial_samples'] == '1'
+    assert float(row['partial_cpu_millicores']) == 400.0
+    assert row['completeness_status'] == 'partial'
+    assert float(row['coverage_ratio']) == 0.5
+    assert row['missing_reasons'] == 'missing_pod_metrics'
+
+
+def test_skewed_pod_timestamps_never_combined_into_simultaneous_total(tmp_path):
+    start = 1700000000
+    requests, summary = _write_single_phase(tmp_path, start=start, duration=60)
+    pod_a = {'name': 'app-a', 'node': 'gnb1', 'phase': 'Running', 'ready': True}
+    pod_b = {'name': 'app-b', 'node': 'gnb-2', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    m = lambda offset, cpu: {'timestamp': ts(offset), 'window': '15s',
+                             'containers': [{'name': 'app', 'usage': {'cpu': cpu, 'memory': '1024Ki'}}]}
+    samples = [
+        {'sample_time': start + 10, 'pods': [pod_a, pod_b], 'metrics': {'app-a': m(10, '100m')}},
+        {'sample_time': start + 25, 'pods': [pod_a, pod_b], 'metrics': {'app-b': m(25, '200m')}},
+    ]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        row, = list(csv.DictReader(stream))
+    assert row['complete_samples'] == '0'
+    assert row['cpu_millicores'] == ''
+    assert row['memory_mib'] == ''
+    assert row['partial_samples'] == '2'
+    assert row['completeness_status'] == 'incomplete_only'
+    assert float(row['coverage_ratio']) == 0.0
+    assert row['missing_reasons'] == 'missing_pod_metrics'
+
+
+def test_mismatched_cpu_windows_rejected_and_zero_metrics_phase_is_missing(tmp_path):
+    start = 1700000000
+    events = [
+        {'event': 'phase_start', 'phase': 'phase_01', 'start_time': start},
+        {'event': 'phase_end', 'phase': 'phase_01', 'end_time': start + 60},
+        {'event': 'phase_start', 'phase': 'phase_02', 'start_time': start + 60},
+        {'event': 'phase_end', 'phase': 'phase_02', 'end_time': start + 120},
+    ]
+    rows = [
+        {'phase': 'phase_01', 'workload_ue': 2, 'gnb1_ues': 1, 'gnb2_ues': 1, 'gnb3_ues': 0,
+         'latency_p50_ms': 10, 'latency_p90_ms': 20, 'attempts': 2, 'successes': 2,
+         'failures': 0, 'start_time': start, 'end_time': start + 60},
+        {'phase': 'phase_02', 'workload_ue': 2, 'gnb1_ues': 1, 'gnb2_ues': 1, 'gnb3_ues': 0,
+         'latency_p50_ms': 10, 'latency_p90_ms': 20, 'attempts': 2, 'successes': 2,
+         'failures': 0, 'start_time': start + 60, 'end_time': start + 120},
+    ]
+    requests = tmp_path / 'requests.jsonl'
+    requests.write_text(''.join(json.dumps(e) + '\n' for e in events))
+    summary = tmp_path / 'summary.csv'
+    with summary.open('w', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0]); writer.writeheader(); writer.writerows(rows)
+
+    pod_a = {'name': 'app-a', 'node': 'gnb1', 'phase': 'Running', 'ready': True}
+    pod_b = {'name': 'app-b', 'node': 'gnb-2', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    samples = [
+        {'sample_time': start + 16, 'pods': [pod_a, pod_b], 'metrics': {
+            'app-a': {'timestamp': ts(15), 'window': '15s', 'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '1024Ki'}}]},
+            'app-b': {'timestamp': ts(16), 'window': '60s', 'containers': [{'name': 'app', 'usage': {'cpu': '200m', 'memory': '1024Ki'}}]},
+        }},
+        {'sample_time': start + 80, 'pods': [pod_a, pod_b], 'metrics': {}},
+    ]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        p1, p2 = list(csv.DictReader(stream))
+    assert p1['complete_samples'] == '0'
+    assert p1['rejected_samples'] == '1'
+    assert p1['cpu_millicores'] == ''
+    assert p1['completeness_status'] == 'incomplete_only'
+    assert p1['missing_reasons'] == 'mismatched_cpu_windows'
+
+    assert p2['complete_samples'] == '0'
+    assert p2['missing_samples'] == '1'
+    assert p2['cpu_millicores'] == ''
+    assert p2['completeness_status'] == 'missing'
+    assert p2['missing_reasons'] == 'no_metrics_in_phase'

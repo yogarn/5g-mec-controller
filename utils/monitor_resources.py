@@ -18,6 +18,36 @@ from pathlib import Path
 LABEL = 'app=mec-placement-face-detection'
 PREFIX = 'mec-placement-face-detection-'
 NODES = ('core-5g', 'gnb1', 'gnb-2', 'gnb-3', '<pending>')
+MAX_ROUND_SKEW_S = 10.0
+POD_LOOKUP_MAX_AGE_S = 8.0
+WINDOW_MISMATCH_TOLERANCE_S = 5.0
+
+
+def parse_window_seconds(value):
+    if value is None or not str(value).strip():
+        return None
+    text = str(value).strip()
+    total = 0.0
+    number = ''
+    index = 0
+    units = {'h': 3600.0, 'm': 60.0, 's': 1.0, 'ms': 1e-3}
+    while index < len(text):
+        ch = text[index]
+        if ch.isdigit() or ch == '.':
+            number += ch
+            index += 1
+            continue
+        if not number:
+            raise ValueError(f'invalid metric window: {value!r}')
+        unit = text[index:index + 2] if text[index:index + 2] == 'ms' else ch
+        if unit not in units:
+            raise ValueError(f'invalid metric window: {value!r}')
+        total += float(number) * units[unit]
+        number = ''
+        index += len(unit)
+    if number or total <= 0:
+        raise ValueError(f'invalid metric window: {value!r}')
+    return total
 
 
 def kubectl(namespace, *args):
@@ -59,7 +89,7 @@ def sample(output, namespace='services', app='mec-placement-face-detection'):
                                  'phase': status.get('phase'),
                                  'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', []))})
                 observation = {'sample_time': time.time(), 'pods': rows,
-                               'metrics': {p['name']: metrics[p['name']] for p in rows if p['name'] in metrics}}
+                               'metrics': metrics}
                 stream.write(json.dumps(observation, separators=(',', ':')) + '\n')
                 stream.flush()
             except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
@@ -83,9 +113,36 @@ def summarize(raw, requests, summary_csv, output):
 
     def running_at(when):
         index = bisect_right(sample_times, when) - 1
-        if index < 0 or when - sample_times[index] > 8:
+        if index < 0 or when - sample_times[index] > POD_LOOKUP_MAX_AGE_S:
             return None
         return frozenset(p['name'] for p in valid[index]['pods'] if p['phase'] == 'Running')
+
+    def classify_round(round_entries):
+        windows = [item[4] for item in round_entries if item[4] is not None]
+        if windows and max(windows) - min(windows) > WINDOW_MISMATCH_TOLERANCE_S:
+            return 'rejected', 'mismatched_cpu_windows'
+        min_t = round_entries[0][0]
+        max_t = round_entries[-1][0]
+        mid_t = 0.5 * (min_t + max_t)
+        round_pods = frozenset(item[1] for item in round_entries)
+        candidates = []
+        for probe_t in (mid_t, max_t, min_t):
+            cand = running_at(probe_t)
+            if cand is not None and cand not in candidates:
+                candidates.append(cand)
+        for obs in valid:
+            if min_t <= obs['sample_time'] <= max_t:
+                cand = frozenset(p['name'] for p in obs['pods'] if p['phase'] == 'Running')
+                if cand not in candidates:
+                    candidates.append(cand)
+        if not candidates:
+            return 'rejected', 'no_pod_inventory_near_metric'
+        if any(cand and round_pods == cand for cand in candidates):
+            return 'complete', None
+        ref = candidates[0]
+        if ref and round_pods < ref:
+            return 'partial', 'missing_pod_metrics'
+        return 'rejected', 'pod_set_churn_mismatch'
 
     nodes = sorted(set(NODES) | {p['node'] for s in valid for p in s['pods']})
     out = Path(output)
@@ -111,11 +168,17 @@ def summarize(raw, requests, summary_csv, output):
                                  'pod_names': ';'.join(p['name'] for p in pods), 'sample_time': last['sample_time'],
                                  'phase_end': end, 'sample_age_seconds': end - last['sample_time']})
     with (out / 'resource-by-ramp.csv').open('x', newline='') as stream:
-        fields = ['phase', 'cpu_millicores', 'memory_mib', 'complete_samples', 'first_metric_time', 'last_metric_time', 'description']
+        fields = [
+            'phase', 'cpu_millicores', 'memory_mib', 'complete_samples',
+            'partial_samples', 'rejected_samples', 'missing_samples', 'total_observations',
+            'coverage_ratio', 'partial_cpu_millicores', 'partial_memory_mib',
+            'completeness_status', 'missing_reasons',
+            'first_metric_time', 'last_metric_time', 'description',
+        ]
         writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
         for row in summary:
             phase = row['phase']; start = starts[phase]['start_time']; end = ends[phase]['end_time']
-            by_running = {}
+            deduped = {}
             for observation in valid:
                 if not start <= observation['sample_time'] <= end + 60:
                     continue
@@ -123,29 +186,81 @@ def summarize(raw, requests, summary_csv, output):
                     t = timestamp(entry['timestamp'])
                     if not start <= t <= end:
                         continue
-                    running = running_at(t)
-                    if not running or name not in running:
+                    key = (name, entry['timestamp'])
+                    if key in deduped:
                         continue
                     cpu = sum(quantity(c['usage']['cpu'], 'cpu') for c in entry['containers'])
                     memory = sum(quantity(c['usage']['memory'], 'memory') for c in entry['containers'])
-                    pod_samples = by_running.setdefault(running, {}).setdefault(name, {})
-                    pod_samples[entry['timestamp']] = (cpu, memory, t)
-            vals = []
-            for running, pod_samples in by_running.items():
-                if any(name not in pod_samples for name in running):
-                    continue
-                per_pod = [sorted(pod_samples[name].values(), key=lambda item: item[2]) for name in sorted(running)]
-                for round_entries in zip(*per_pod):
-                    times = [item[2] for item in round_entries]
-                    vals.append((sum(item[0] for item in round_entries),
-                                 sum(item[1] for item in round_entries),
-                                 min(times), max(times)))
-            writer.writerow({'phase': phase, 'cpu_millicores': sum(v[0] for v in vals) / len(vals) if vals else '',
-                             'memory_mib': sum(v[1] for v in vals) / len(vals) if vals else '',
-                             'complete_samples': len(vals), 'first_metric_time': min((v[2] for v in vals), default=''),
-                             'last_metric_time': max((v[3] for v in vals), default=''),
-                             'description': 'mean of complete Metrics Server pod samples; CPU windows may overlap phases'})
-            print(f'{phase}: resource samples={len(vals)}')
+                    window_s = parse_window_seconds(entry.get('window'))
+                    deduped[key] = (t, name, cpu, memory, window_s)
+
+            points = sorted(deduped.values(), key=lambda item: (item[0], item[1]))
+            rounds = []
+            current = []
+            for point in points:
+                if not current or (point[0] - current[0][0] <= MAX_ROUND_SKEW_S and point[1] not in {p[1] for p in current}):
+                    current.append(point)
+                else:
+                    rounds.append(current)
+                    current = [point]
+            if current:
+                rounds.append(current)
+
+            complete_vals = []
+            partial_vals = []
+            rejected_samples = 0
+            reasons = set()
+            for round_entries in rounds:
+                kind, reason = classify_round(round_entries)
+                if reason:
+                    reasons.add(reason)
+                total_cpu = sum(item[2] for item in round_entries)
+                total_mem = sum(item[3] for item in round_entries)
+                min_t = round_entries[0][0]
+                max_t = round_entries[-1][0]
+                if kind == 'complete':
+                    complete_vals.append((total_cpu, total_mem, min_t, max_t))
+                elif kind == 'partial':
+                    partial_vals.append((total_cpu, total_mem, min_t, max_t))
+                else:
+                    rejected_samples += 1
+
+            phase_obs = [s for s in valid if start <= s['sample_time'] <= end]
+            phase_errors = [s for s in samples if 'error' in s and start <= s['sample_time'] <= end]
+            total_rounds = len(rounds)
+            missing_samples = 0
+            if total_rounds == 0:
+                missing_samples = 1
+                reasons.add('sampler_errors' if (phase_errors and not phase_obs) else 'no_metrics_in_phase')
+            coverage_ratio = len(complete_vals) / total_rounds if total_rounds > 0 else 0.0
+            if complete_vals and not partial_vals and not rejected_samples:
+                status = 'complete'
+            elif complete_vals:
+                status = 'partial'
+            elif partial_vals or rejected_samples:
+                status = 'incomplete_only'
+            else:
+                status = 'missing'
+
+            writer.writerow({
+                'phase': phase,
+                'cpu_millicores': sum(v[0] for v in complete_vals) / len(complete_vals) if complete_vals else '',
+                'memory_mib': sum(v[1] for v in complete_vals) / len(complete_vals) if complete_vals else '',
+                'complete_samples': len(complete_vals),
+                'partial_samples': len(partial_vals),
+                'rejected_samples': rejected_samples,
+                'missing_samples': missing_samples,
+                'total_observations': len(phase_obs),
+                'coverage_ratio': f'{coverage_ratio:.4f}',
+                'partial_cpu_millicores': sum(v[0] for v in partial_vals) / len(partial_vals) if partial_vals else '',
+                'partial_memory_mib': sum(v[1] for v in partial_vals) / len(partial_vals) if partial_vals else '',
+                'completeness_status': status,
+                'missing_reasons': ';'.join(sorted(reasons)),
+                'first_metric_time': min((v[2] for v in complete_vals), default=''),
+                'last_metric_time': max((v[3] for v in complete_vals), default=''),
+                'description': 'mean of complete simultaneous Metrics Server pod samples (<=10s skew); CPU windows may overlap phases; incomplete/churned rounds excluded',
+            })
+            print(f'{phase}: resource samples={len(complete_vals)} (partial={len(partial_vals)}, rejected={rejected_samples}, status={status})')
 
 
 def main():
