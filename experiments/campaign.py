@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 from dataclasses import replace
+import random
 import re
 import shlex
 import signal
@@ -438,6 +439,66 @@ def _prepare_floor_adapter(root, floor_ms, unit='seconds'):
         raise
 
 
+def _local_git_provenance():
+    try:
+        rev = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip())
+        return {'revision': rev, 'dirty': dirty}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _workload_image_ref(workload):
+    docs = [d for d in yaml.safe_load_all(workload_manifest(workload).read_text()) if d]
+    dep = next((d for d in docs if d.get('kind') == 'Deployment'), None)
+    if not dep:
+        return None
+    containers = dep.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+    return containers[0].get('image') if containers else None
+
+
+def _collect_live_provenance(settings):
+    ue_git = None
+    try:
+        ue_rev_res = command(remote(settings, ['git', 'rev-parse', 'HEAD']), capture_output=True, text=True)
+        ue_status_res = command(remote(settings, ['git', 'status', '--porcelain']), capture_output=True, text=True)
+        ue_rev = (getattr(ue_rev_res, 'stdout', None) or '').strip()
+        if ue_rev:
+            ue_status = (getattr(ue_status_res, 'stdout', None) or '').strip()
+            ue_git = {'revision': ue_rev, 'dirty': bool(ue_status)}
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        ue_git = None
+
+    k8s_version = None
+    try:
+        ver_res = kube('version', '-o', 'json', capture_output=True, text=True)
+        ver_raw = getattr(ver_res, 'stdout', None) or ''
+        if ver_raw.strip():
+            k8s_version = (json.loads(ver_raw).get('serverVersion') or {}).get('gitVersion')
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        k8s_version = None
+
+    kube_proxy_mode = None
+    try:
+        cm_res = kube('-n', 'kube-system', 'get', 'configmap', 'kube-proxy',
+                      '--ignore-not-found', '-o', 'json', capture_output=True, text=True)
+        cm_raw = (getattr(cm_res, 'stdout', None) or '').strip()
+        if cm_raw:
+            cm_data = (json.loads(cm_raw).get('data') or {}).get('config.conf', '')
+            parsed = yaml.safe_load(cm_data) if cm_data else None
+            if isinstance(parsed, dict):
+                kube_proxy_mode = parsed.get('mode') or 'iptables'
+    except (OSError, subprocess.SubprocessError, ValueError, yaml.YAMLError, AttributeError):
+        kube_proxy_mode = None
+
+    return {
+        'core_git': _local_git_provenance(),
+        'ue_git': ue_git,
+        'kubernetes_server_version': k8s_version,
+        'kube_proxy_mode': kube_proxy_mode,
+    }
+
+
 def _decimal_to_number(value):
     return int(value) if value == value.to_integral_value() else float(value)
 
@@ -459,20 +520,32 @@ def _format_hpa_target(value_ms, unit='seconds'):
 
 
 def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds,
-                slo_ms=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0):
+                slo_ms=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0,
+                scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None):
     hpa = yaml.safe_load((ROOT / template_name).read_text())
     hpa['metadata']['name'] = hpa_name
     hpa['spec']['scaleTargetRef']['name'] = app_name
     hpa['spec'].update(minReplicas=min_replicas, maxReplicas=max_replicas)
-    hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = int(scale_down_seconds)
     if staircase:
         # Matched damping for both metrics, independent of latency signal choice.
+        stab = 60 if scale_down_stabilization_seconds is None else int(scale_down_stabilization_seconds)
+        pods = 1 if scale_down_pods is None else int(scale_down_pods)
+        period = 30 if scale_down_period_seconds is None else int(scale_down_period_seconds)
         hpa['spec']['behavior'] = {
             'scaleUp': {'stabilizationWindowSeconds': 0,
                         'policies': [{'type': 'Pods', 'value': 2, 'periodSeconds': 30}]},
-            'scaleDown': {'stabilizationWindowSeconds': 60, 'tolerance': 0.01,
-                          'policies': [{'type': 'Pods', 'value': 1, 'periodSeconds': 30}]},
+            'scaleDown': {'stabilizationWindowSeconds': stab, 'tolerance': 0.01,
+                          'policies': [{'type': 'Pods', 'value': pods, 'periodSeconds': period}]},
         }
+    else:
+        stab = int(scale_down_seconds) if scale_down_stabilization_seconds is None else int(scale_down_stabilization_seconds)
+        hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = stab
+        if scale_down_pods is not None or scale_down_period_seconds is not None:
+            pods = 1 if scale_down_pods is None else int(scale_down_pods)
+            period = 30 if scale_down_period_seconds is None else int(scale_down_period_seconds)
+            hpa['spec']['behavior']['scaleDown']['policies'] = [
+                {'type': 'Pods', 'value': pods, 'periodSeconds': period}
+            ]
     if slo_ms is not None:
         metric = hpa['spec']['metrics'][0]['external']
         internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(rt_target_factor))
@@ -707,7 +780,7 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None):
     """Persist the exact matched replica budget and manifests used by a method."""
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
@@ -808,6 +881,9 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
             'autoscaler/hpa-baseline.yaml', root / 'baseline-hpa.yaml',
             app_name + '-baseline', app_name,
             config['min_replicas'], max_replicas, config['scale_down_seconds'], staircase=staircase,
+            scale_down_stabilization_seconds=scale_down_stabilization_seconds,
+            scale_down_pods=scale_down_pods,
+            scale_down_period_seconds=scale_down_period_seconds,
         )
     elif autoscaler == 'hpa' and (method == 'proposed' or comparison == 'placement'):
         effective_factor = rt_target_factor if method == 'proposed' else 1.0
@@ -816,6 +892,9 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
             f'{app_name}-{method}', app_name,
             config['min_replicas'], max_replicas, config['scale_down_seconds'], slo_ms=slo_ms, staircase=staircase,
             latency_floor_ms=latency_floor_ms, rt_target_factor=effective_factor,
+            scale_down_stabilization_seconds=scale_down_stabilization_seconds,
+            scale_down_pods=scale_down_pods,
+            scale_down_period_seconds=scale_down_period_seconds,
         )
     return config, config_path, hpa_path
 
@@ -855,7 +934,10 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   staircase=settings.get('staircase', False),
                                                   latency_floor_ms=settings.get('latency_floor_ms', 0),
                                                   rt_target_factor=settings.get('rt_target_factor', 1.0),
-                                                  min_replicas=min_replicas if min_replicas is not None else settings.get('min_replicas'))
+                                                  min_replicas=min_replicas if min_replicas is not None else settings.get('min_replicas'),
+                                                  scale_down_stabilization_seconds=settings.get('scale_down_stabilization_seconds'),
+                                                  scale_down_pods=settings.get('scale_down_pods'),
+                                                  scale_down_period_seconds=settings.get('scale_down_period_seconds'))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -1067,6 +1149,15 @@ def main(argv=None):
                         help='shared baseline HPA and proposed minimum and initial replica count (default: 1 for scaling, config.yaml otherwise)')
     parser.add_argument('--max-replicas', type=int,
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
+    parser.add_argument('--scale-down-stabilization-seconds', type=int,
+                        help='shared HPA scale-down stabilization window in seconds (default: 60 for staircase, config.yaml otherwise)')
+    parser.add_argument('--scale-down-pods', type=int,
+                        help='shared HPA scale-down pods per period (default: 1 for staircase)')
+    parser.add_argument('--scale-down-period-seconds', type=int,
+                        help='shared HPA scale-down period in seconds (default: 30 for staircase)')
+    parser.add_argument('--method-order', choices=('baseline-first', 'proposed-first', 'random'),
+                        default='baseline-first',
+                        help='order in which baseline and proposed run (default: baseline-first)')
     parser.add_argument('--debug', action='store_true',
                         help='60s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
     duration_options = parser.add_mutually_exclusive_group()
@@ -1099,6 +1190,12 @@ def main(argv=None):
             parser.error('use --min-replicas without --fixed-replicas')
     if args.min_replicas is not None and args.min_replicas < 1:
         parser.error('--min-replicas must be a positive integer')
+    if args.scale_down_stabilization_seconds is not None and args.scale_down_stabilization_seconds < 0:
+        parser.error('--scale-down-stabilization-seconds must be nonnegative')
+    if args.scale_down_pods is not None and args.scale_down_pods < 1:
+        parser.error('--scale-down-pods must be a positive integer')
+    if args.scale_down_period_seconds is not None and args.scale_down_period_seconds < 1:
+        parser.error('--scale-down-period-seconds must be a positive integer')
     if args.scenario in SCALER_SCENARIOS and args.comparison not in (None, 'scaling'):
         parser.error('scaling scenarios require --comparison scaling')
     if args.comparison == 'scaling' and args.scenario not in (None, *SCALER_SCENARIOS):
@@ -1173,6 +1270,12 @@ def main(argv=None):
     settings['staircase'] = args.scenario == 'scaler-staircase'
     settings['latency_floor_ms'] = args.latency_floor_ms
     settings['rt_target_factor'] = float(args.rt_target_factor)
+    if args.scale_down_stabilization_seconds is not None:
+        settings['scale_down_stabilization_seconds'] = args.scale_down_stabilization_seconds
+    if args.scale_down_pods is not None:
+        settings['scale_down_pods'] = args.scale_down_pods
+    if args.scale_down_period_seconds is not None:
+        settings['scale_down_period_seconds'] = args.scale_down_period_seconds
     if args.workload is not None and args.workload != 'face-detection':
         # Separate config and an explicit SLO prevent accidental reuse of face calibration.
         if args.config == str(ROOT / 'experiments/campaign.yaml') or args.slo_ms is None:
@@ -1269,6 +1372,37 @@ def main(argv=None):
     else:
         scaling_formula = ('max(RT-floor, 0)/(internal_target-floor)' if args.latency_floor_ms
                            else 'RT/internal_target')
+    if args.method_order == 'proposed-first':
+        method_order = ['proposed', 'baseline']
+    elif args.method_order == 'random':
+        method_order = ['baseline', 'proposed'] if random.choice((True, False)) else ['proposed', 'baseline']
+    else:
+        method_order = ['baseline', 'proposed']
+    effective_scale_down = {
+        'stabilization_window_seconds': (
+            args.scale_down_stabilization_seconds
+            if args.scale_down_stabilization_seconds is not None
+            else (60 if settings['staircase'] else int(controller_config['scale_down_seconds']))
+        ),
+        'pods': (
+            args.scale_down_pods
+            if args.scale_down_pods is not None
+            else (1 if settings['staircase'] else None)
+        ),
+        'period_seconds': (
+            args.scale_down_period_seconds
+            if args.scale_down_period_seconds is not None
+            else (30 if settings['staircase'] else None)
+        ),
+    }
+    provenance = {
+        'core_git': _local_git_provenance(),
+        'ue_git': None,
+        'kubernetes_server_version': None,
+        'kube_proxy_mode': None,
+        'workload_image': _workload_image_ref(workload),
+        'method_order': method_order,
+    }
     shared_metadata = {
         'workload': workload,
         'comparison': args.comparison,
@@ -1291,6 +1425,10 @@ def main(argv=None):
         'long_run': args.long_run,
         'phase_durations_s': phase_durations,
         'hpa_behavior_profile': 'bounded-staircase' if settings['staircase'] else 'original',
+        'hpa_scale_down': effective_scale_down,
+        'method_order_requested': args.method_order,
+        'method_order': method_order,
+        'provenance': provenance,
         'latency_floor_ms': args.latency_floor_ms,
         'latency_floor_source': 'fixed exploratory reference; not an automatically measured physical minimum' if args.latency_floor_ms else None,
         'latency_scaling_formula': scaling_formula,
@@ -1315,11 +1453,14 @@ def main(argv=None):
         output = args.plan_only.resolve()
         output.mkdir(parents=True, exist_ok=False)
         _campaign_manifest(output, args.tc_ms is not None, workload)
-        for method in ('baseline', 'proposed'):
+        for method in method_order:
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
                             staircase=settings['staircase'], latency_floor_ms=args.latency_floor_ms,
-                            rt_target_factor=args.rt_target_factor, min_replicas=args.min_replicas)
+                            rt_target_factor=args.rt_target_factor, min_replicas=args.min_replicas,
+                            scale_down_stabilization_seconds=args.scale_down_stabilization_seconds,
+                            scale_down_pods=args.scale_down_pods,
+                            scale_down_period_seconds=args.scale_down_period_seconds)
         if args.latency_floor_ms or metric_unit == 'milliseconds':
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
@@ -1346,6 +1487,7 @@ def main(argv=None):
         # Recheck after preflight in case another process reserved the name.
         check_result_name(settings, args.campaign)
         root.mkdir(parents=True, exist_ok=False)
+        shared_metadata['provenance'] = shared_metadata['provenance'] | _collect_live_provenance(settings)
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | shared_metadata | {
                 'min_replicas': min_replicas,
@@ -1406,7 +1548,7 @@ def main(argv=None):
                       f'Reporting SLO remains {slo_ms:g}ms.', flush=True)
                 if metric_unit == 'milliseconds':
                     _prepare_floor_adapter(root, 0, unit=metric_unit)
-            for method in ('baseline', 'proposed'):
+            for method in method_order:
                 print(f'=== {method.upper()} ===', flush=True)
                 reset(workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
