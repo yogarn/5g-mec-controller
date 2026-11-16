@@ -296,6 +296,16 @@ New experiment runs use **Prometheus/cAdvisor** as the primary source for `resou
   ```bash
   .venv/bin/python -m utils.cadvisor_resources summarize results/RUN/baseline/resources-prometheus.json results/RUN/baseline/requests.jsonl results/RUN/baseline/summary.csv results/RUN_reprocessed/baseline --metrics-jsonl results/RUN/baseline/metrics.jsonl --rate-window 45 --freshness 25
   ```
+- **One-line offline 10-second transient analysis for Phase 2 (writes to a new directory, never modifies original results):**
+  ```bash
+  .venv/bin/python -m utils.transient_analysis results/RUN results/RUN_transient --phase phase_02 --bin-seconds 10
+  ```
+- **Workload health-listener rebuild & deployment (required before testing the `/health` port `5001` starvation fix; existing deployed images do not contain it):**
+  ```bash
+  docker build --network=host -t localhost:30500/pedestrian-detection:health-5001 apps/pedestrian-detection
+  docker push localhost:30500/pedestrian-detection:health-5001
+  # Update image digest in apps/pedestrian-detection/manifest.yaml and apps/face-detection/manifest.yaml from docker image inspect
+  ```
 - **Live checks still required before live evaluation:** verify `nodes/proxy` `/metrics/cadvisor` access on all 4 nodes (`core-5g`, `gnb1`, `gnb-2`, `gnb-3`), confirm container-instance identity labels (`id`/`container_id`), verify `up{job="kubelet-cadvisor"} == 1` with no duplicate targets, and check 5s scrape CPU/memory overhead and 24h retention.
 - **Boundary effects:** CPU rates use a `45s` rate window (with `25s` freshness to accommodate 10–20s cAdvisor container timestamp spacing while keeping Prometheus scrape and Pod lifecycle polling at `5s`) per container instance (with counter-reset handling). A `45s` CPU rate window can cross the `60s` phase boundaries, and newly started containers require `>= 2` samples in the window before a rate exists. Resource summaries are averages of valid observations, not exact phase CPU consumption. If cAdvisor data is missing, `resource-by-ramp.csv` leaves totals blank rather than substituting Metrics Server.
 

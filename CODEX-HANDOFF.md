@@ -195,6 +195,25 @@ Refactored the controller and experiment harness to follow Kubernetes separation
    - Assumes K3s API server `nodes/proxy` routes `/api/v1/nodes/<node>/proxy/metrics/cadvisor` with ServiceAccount auth and exposes `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` with `container` and `id`/`container_id` labels.
    - `utils/test_plot_autoscaler.py` was only `py_compile`-checked locally (`matplotlib` is not installed in `/usr/bin/python3`).
 
+## 10. Scaler-Test Fixes (`scaler_balanced_rps5_tc10_150ms_01` Investigation)
+
+1. **Health-check starvation fix (`apps/pedestrian-detection/app.py`, `Dockerfile`, `manifest.yaml`, `apps/face-detection/manifest.yaml`):**
+   - **Design:** Kept Gunicorn `--workers 1 --threads 1` on port `5000` (1 model instance, 1 concurrent `/detect` inference serialized by `inference_lock`) and added a dedicated stdlib `ThreadingHTTPServer` health listener on port `5001` (`HEALTH_PORT=5001`) backed by thread-safe `HealthState`.
+   - **Failure behavior:** Returns `503` while starting (`startupProbe` / `readinessProbe` on `/ready`), `503` on `/health` and `/ready` if model init or inference throws a fatal error, and `503` on `/health` if a single inference hangs beyond `30s` (`HEALTH_INFERENCE_HANG_SECONDS`). Ordinary inference overload (`~50–150ms` per request) resets the watchdog on every call so `/health` responds in `<1ms` on port `5001` without sharing port `5000`'s queue.
+   - **Rebuild required:** Existing deployed images on `core` do **not** contain this fix; rebuild and push `apps/pedestrian-detection` and update the image digest in `manifest.yaml` before retesting.
+2. **Excessive scaling & failure to scale down (Investigation + Methodological Proposal for Review — NOT applied):**
+   - **Cluster check:** Verified `v1.35.4+k3s1` (`autoscaling/v2`, `HPAConfigurableTolerance` BETA enabled `1`).
+   - **Why tolerance alone fails:** At `RT = 140ms` vs `SLO = 150ms` (`r = 0.9333`), default `10%` tolerance suppresses scaling (`0.0667 < 0.10`), and even with `tolerance: 0`, `ceil(N * r) == N` whenever `N < 1 / (1 - r)` (`N <= 14` at `140ms`; `N <= 21` at `143ms`!). Together with `300s` `scaleDown` max stabilization and `~141ms` unloaded TC+inference floor (Phase 1 1-pod `142.7ms` vs Phase 7 20-pod `141.0ms`), `ceil(N * RT / SLO)` cannot scale down to `1–2` replicas.
+   - **Rapid scale-up (`1 -> 5 -> 10 -> 20`):** Phase 2 overload (`45 RPS` on 1 Pod) spikes the 15s rolling `p90` (`1051ms`), and default `scaleUp` doubling outpaces Pod startup/backlog drain across 15s HPA sync ticks.
+   - **Proposed methodological change for review (not implemented):** Replace raw `RT / SLO` in `prometheus-adapter` with floor-subtracted excess latency `ue_p90_excess_latency_seconds = max(0, ue_p90_latency_seconds - L_floor)` against `SLO - L_floor` (plus `scaleDown.tolerance: 0.01` and bounded `scaleUp.policies`), because only load-sensitive queueing delay scales inversely with replicas.
+3. **Evidence collection & 10s transient analysis (`utils/monitor_resources.py`, `experiments/campaign.py`, `utils/transient_analysis.py`):**
+   - Added `hpa-sample` (`hpa-status.jsonl` every 5s in its own process), `workload-events.json` (filtered to workload + HPA before `reset()`), and `container_statuses` (restart counts + termination/waiting reasons) in `metrics.jsonl` without blocking `--pods-only` lifecycle polling.
+   - Added `utils/transient_analysis.py` to bin any phase into 10s intervals (scheduled, started, missed, completed, failures, success p50/p90, all-attempt violations, scheduled attainment, Pod/readiness/restart counts, HPA status) into a new output directory.
+4. **Validation & limitations:**
+   - `python3 -m pytest -q --ignore=utils/test_plot_autoscaler.py --ignore=apps/pedestrian-detection/tests/test_app.py`: passed (`250 passed, 23 subtests passed`, including `utils/test_transient_analysis.py`, `utils/test_monitor_resources.py`, `experiments/test_campaign.py`).
+   - `py_compile` passed on `apps/pedestrian-detection/app.py`, `apps/pedestrian-detection/tests/test_app.py`, `utils/transient_analysis.py`, `utils/plot_autoscaler.py`, `utils/test_plot_autoscaler.py`.
+   - `apps/pedestrian-detection/tests/test_app.py` and `utils/test_plot_autoscaler.py` could not execute in `/usr/bin/python3` (lacks `flask` and `matplotlib`); run both in an environment with those packages installed before deploying.
+
 ## 10. Longer Mobility Convergence Run
 
 - Added `--long-run` for `--scenario mobility9`: seven 120s phases per method, 28 minutes of traffic per pair. Records `long_run` and effective phase durations in plan/campaign metadata; defaults remain 60s without the flag.
