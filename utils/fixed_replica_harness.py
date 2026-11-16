@@ -79,8 +79,8 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
     starts = [r for r in rows if r.get('event') == 'phase_start']
     ends = [r for r in rows if r.get('event') == 'phase_end']
     reqs = [r for r in rows if r.get('event') == 'request']
-    if not starts or not ends:
-        raise ValueError('missing phase_start or phase_end')
+    if not starts or not ends or len(starts) != len(ends):
+        raise ValueError('missing or mismatched phase_start / phase_end')
     t0 = starts[0]['start_time']
     t_measure_start = t0 + warmup_s
     t_end = ends[-1]['end_time']
@@ -96,7 +96,7 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
             'p90_ms': percentile(vals, 0.90),
         }
 
-    def stats(subset, dur_s, scheduled=None, started=None, missed=None):
+    def stats(subset, gen_dur_s, drain_dur_s=0.0, scheduled=None, started=None, missed=None):
         completed = len(subset)
         succ = [r for r in subset if r.get('success')]
         successful = len(succ)
@@ -114,11 +114,13 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
             'successful': successful,
             'failures': fail,
             'missed': missed,
+            'generation_duration_s': gen_dur_s,
+            'drain_duration_s': drain_dur_s,
             'error_rate': fail / completed if completed else 0.0,
-            'offered_rps': scheduled / dur_s if (scheduled is not None and dur_s > 0) else None,
-            'started_rps': started / dur_s if (started is not None and dur_s > 0) else None,
-            'completed_rps': completed / dur_s if dur_s > 0 else 0.0,
-            'rps': successful / dur_s if dur_s > 0 else 0.0,
+            'offered_rps': scheduled / gen_dur_s if (scheduled is not None and gen_dur_s > 0) else None,
+            'started_rps': started / gen_dur_s if (started is not None and gen_dur_s > 0) else None,
+            'completed_rps': completed / gen_dur_s if gen_dur_s > 0 else 0.0,
+            'rps': successful / gen_dur_s if gen_dur_s > 0 else 0.0,
             'slo_ms': float(slo_ms),
             'acc_slo': acc_slo,
             'viol_slo': 1.0 - acc_slo,
@@ -142,28 +144,74 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
             },
         }
 
+    ends_by_phase = {e['phase']: e for e in ends}
+    full_gen_dur = 0.0
+    full_drain_dur = 0.0
+    steady_gen_dur = 0.0
+    for st_rec in starts:
+        end_rec = ends_by_phase[st_rec['phase']]
+        elapsed_s = max(0.0, float(end_rec['end_time']) - float(st_rec['start_time']))
+        gen_s = float(end_rec.get('generation_duration_s', st_rec.get('duration_s', elapsed_s)))
+        drain_s = max(0.0, elapsed_s - gen_s)
+        full_gen_dur += gen_s
+        full_drain_dur += drain_s
+        lower = max(0.0, t_measure_start - float(st_rec['start_time']))
+        steady_gen_dur += max(0.0, gen_s - lower)
+
     if all(e.get('scheduled') is not None for e in ends):
         full_scheduled = sum(int(e['scheduled']) for e in ends)
         full_started = sum(int(e.get('started', e['scheduled'])) for e in ends)
-        full_missed = sum(int(e.get('missed', 0)) for e in ends)
+        full_missed = sum(int(e['missed']) for e in ends)
     else:
         full_scheduled = len(reqs)
         full_started = len(reqs)
         full_missed = 0
 
-    steady = [r for r in reqs if r['start_time'] >= t_measure_start]
-    steady_dur = max(1.0, t_end - t_measure_start)
-    full_dur = max(1.0, t_end - t0)
-    full_stats = stats(reqs, full_dur, scheduled=full_scheduled, started=full_started, missed=full_missed)
+    full_stats = stats(
+        reqs, max(1.0, full_gen_dur), drain_dur_s=full_drain_dur,
+        scheduled=full_scheduled, started=full_started, missed=full_missed,
+    )
+
+    if warmup_s <= 0:
+        steady = list(reqs)
+        steady_scheduled = full_scheduled
+        steady_started = full_started
+        steady_missed = full_missed
+    elif all('scheduled_offset_s' in r for r in reqs) and all(s.get('rps_per_ue') and s.get('ues') for s in starts):
+        steady = []
+        steady_scheduled = 0
+        for st_rec in starts:
+            phase = st_rec['phase']
+            end_rec = ends_by_phase[phase]
+            gen_s = float(end_rec.get('generation_duration_s', st_rec['duration_s']))
+            lower = max(0.0, t_measure_start - float(st_rec['start_time']))
+            if lower >= gen_s:
+                continue
+            period = 1.0 / float(st_rec['rps_per_ue'])
+            ues = st_rec['ues']
+            for pos in range(len(ues)):
+                offset = pos / len(ues) * period
+                first = max(0, math.ceil((lower - offset) / period - 1e-9))
+                stop = max(0, math.ceil((gen_s - offset) / period - 1e-9))
+                steady_scheduled += max(0, stop - first)
+            steady.extend(
+                r for r in reqs
+                if r.get('phase') == phase and lower <= float(r['scheduled_offset_s']) < gen_s
+            )
+        steady_started = len(steady) if full_started == len(reqs) else None
+        steady_missed = max(0, steady_scheduled - len(steady)) if full_started == len(reqs) else None
+    else:
+        steady = [r for r in reqs if r['start_time'] >= t_measure_start]
+        steady_scheduled = None
+        steady_started = None
+        steady_missed = None
+
     steady_stats = stats(
-        steady,
-        steady_dur,
-        scheduled=full_scheduled if warmup_s <= 0 else None,
-        started=full_started if warmup_s <= 0 else None,
-        missed=full_missed if warmup_s <= 0 else None,
+        steady, max(1.0, steady_gen_dur), drain_dur_s=full_drain_dur,
+        scheduled=steady_scheduled, started=steady_started, missed=steady_missed,
     )
     by_site = {
-        site: stats([r for r in steady if r.get('group') == site], steady_dur)
+        site: stats([r for r in steady if r.get('group') == site], max(1.0, steady_gen_dur), drain_dur_s=full_drain_dur)
         for site in sorted({r.get('group') for r in steady if r.get('group')})
     }
     return {
@@ -379,13 +427,13 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
 def append_ledger(csv_path, summary, valid=True, exclusion_reason='', next_decision=''):
     eff = summary['effective']
     st = summary['requests']['steady']
-    full = summary['requests']['full']
     rs = summary['resources']
     fields = [
         'stage', 'run_id', 'block', 'method', 'revision', 'config_path',
-        'start_time', 'end_time', 'scheduled', 'started', 'completed', 'successful', 'failures', 'missed',
+        'start_time', 'end_time', 'generation_duration_s', 'drain_duration_s',
+        'scheduled', 'started', 'completed', 'successful', 'failures', 'missed',
         'acc_slo', 'acc_500ms', 'acc_300ms', 'succ_p50_ms', 'succ_p90_ms', 'succ_p95_ms', 'all_p90_ms',
-        'rps', 'replicas', 'cpu_mean_m', 'mem_max_mi', 'backend_counts',
+        'offered_rps', 'rps', 'replicas', 'cpu_mean_m', 'mem_max_mi', 'backend_counts',
         'valid', 'exclusion_reason', 'next_decision',
     ]
     write_header = not csv_path.exists()
@@ -402,12 +450,14 @@ def append_ledger(csv_path, summary, valid=True, exclusion_reason='', next_decis
             'config_path': f"{eff['run_id']}/effective-config.json",
             'start_time': f"{summary['requests']['measure_start_time']:.3f}",
             'end_time': f"{summary['requests']['end_time']:.3f}",
-            'scheduled': full['scheduled'],
-            'started': full['started'],
+            'generation_duration_s': f"{st['generation_duration_s']:.3f}",
+            'drain_duration_s': f"{st['drain_duration_s']:.3f}",
+            'scheduled': '' if st['scheduled'] is None else st['scheduled'],
+            'started': '' if st['started'] is None else st['started'],
             'completed': st['completed'],
             'successful': st['successful'],
             'failures': st['failures'],
-            'missed': full['missed'],
+            'missed': '' if st['missed'] is None else st['missed'],
             'acc_slo': f"{st['acc_slo']:.4f}",
             'acc_500ms': f"{st['acc_500']:.4f}",
             'acc_300ms': f"{st['acc_300']:.4f}",
@@ -415,6 +465,7 @@ def append_ledger(csv_path, summary, valid=True, exclusion_reason='', next_decis
             'succ_p90_ms': f"{st['succ_p90_ms']:.2f}" if st['succ_p90_ms'] is not None else '',
             'succ_p95_ms': f"{st['succ_p95_ms']:.2f}" if st['succ_p95_ms'] is not None else '',
             'all_p90_ms': f"{st['all_p90_ms']:.2f}" if st['all_p90_ms'] is not None else '',
+            'offered_rps': f"{st['offered_rps']:.2f}" if st['offered_rps'] is not None else '',
             'rps': f"{st['rps']:.2f}",
             'replicas': eff['replicas'],
             'cpu_mean_m': f"{rs['cpu_mean_m']:.1f}" if rs['cpu_mean_m'] is not None else '',

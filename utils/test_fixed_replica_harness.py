@@ -267,3 +267,73 @@ def test_run_one_pedestrian_collects_summary_cadvisor_and_service_probes(tmp_pat
     assert summary['service_path_probes']['phase_01']['gnb-1']['median_ms'] == 12.0
     assert seen_prom_urls and seen_prom_urls[0]
     assert any('--probe-service-path' in ' '.join(map(str, c)) for c in seen_ue_cmds)
+
+
+def test_warmup_missed_slots_and_nonzero_drain_accounting(tmp_path):
+    import csv
+
+    req_path = tmp_path / 'requests.jsonl'
+    # 60 scheduled slots over 60s (1 rps_per_ue, 1 UE), plus 10s drain (end_time = 1070).
+    # Miss slot 5 (in warmup [0, 10)) and slot 25 (in post-warmup [10, 60)); fail slot 30.
+    rows = [
+        {'event': 'phase_start', 'phase': 'phase_01', 'start_time': 1000.0, 'duration_s': 60.0,
+         'rps_per_ue': 1.0, 'ues': [{'group': 'gnb-1', 'source_address': '10.1.0.1'}]},
+    ]
+    for slot in range(60):
+        if slot in (5, 25):
+            continue
+        rows.append({
+            'event': 'request', 'phase': 'phase_01', 'group': 'gnb-1', 'source_address': '10.1.0.1',
+            'slot': slot, 'scheduled_offset_s': float(slot),
+            'start_time': 1000.0 + slot, 'end_time': 1000.0 + slot + 0.1,
+            'duration_ms': 200.0 if slot == 30 else 50.0,
+            'success': slot != 30,
+        })
+    rows.append({
+        'event': 'phase_end', 'phase': 'phase_01', 'start_time': 1000.0, 'end_time': 1070.0,
+        'generation_duration_s': 60.0, 'scheduled': 60, 'started': 58, 'completed': 58,
+        'successes': 57, 'failures': 1, 'missed': 2,
+    })
+    req_path.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+
+    summary = harness.summarize_requests(req_path, warmup_s=10.0, slo_ms=150.0)
+    full = summary['full']
+    steady = summary['steady']
+
+    assert full['scheduled'] == 60
+    assert full['started'] == 58
+    assert full['completed'] == 58
+    assert full['missed'] == 2
+    assert full['generation_duration_s'] == 60.0
+    assert full['drain_duration_s'] == 10.0
+    assert full['offered_rps'] == pytest.approx(1.0)
+
+    # Post-warmup [10, 60): 50 scheduled, slot 25 missed -> 49 started/completed, slot 30 failed -> 48 successful.
+    assert steady['scheduled'] == 50
+    assert steady['started'] == 49
+    assert steady['completed'] == 49
+    assert steady['successful'] == 48
+    assert steady['failures'] == 1
+    assert steady['missed'] == 1
+    assert steady['generation_duration_s'] == 50.0
+    assert steady['drain_duration_s'] == 10.0
+    assert steady['offered_rps'] == pytest.approx(1.0)
+    assert steady['rps'] == pytest.approx(48 / 50.0)
+
+    ledger = tmp_path / 'runs.csv'
+    harness.append_ledger(ledger, {
+        'effective': {'stage': 'B2', 'run_id': 'r_drain', 'block': 1, 'replicas': 1, 'node': 'gnb-3', 'tc_ms': 10, 'revision': 'abc'},
+        'requests': summary,
+        'resources': {'cpu_mean_m': 250.0, 'mem_max_mi': 100.0},
+        'backend_counts': {'pod-1': 58},
+    })
+    row, = list(csv.DictReader(ledger.open()))
+    assert row['generation_duration_s'] == '50.000'
+    assert row['drain_duration_s'] == '10.000'
+    assert row['scheduled'] == '50'
+    assert row['started'] == '49'
+    assert row['completed'] == '49'
+    assert row['successful'] == '48'
+    assert row['failures'] == '1'
+    assert row['missed'] == '1'
+    assert row['offered_rps'] == '1.00'
