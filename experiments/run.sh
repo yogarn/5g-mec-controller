@@ -34,14 +34,14 @@ if [[ "${1:-}" == rebuild ]]; then
 fi
 if [[ "${1:-}" == ramp ]]; then
   shift
-  exec .venv/bin/python -u -m experiments.campaign --comparison scaling --scenario scaler-staircase --phase-duration 180 --final-hold --tc-ms 10 --slo-ms 150 --rps-per-ue 5 --max-in-flight-per-ue 8 "$@"
+  exec .venv/bin/python -u -m experiments.campaign --comparison scaling --scenario scaler-staircase --phase-duration 180 --final-hold --tc-ms 10 --slo-ms 150 --latency-floor-ms 130 --rps-per-ue 5 --max-in-flight-per-ue 8 "$@"
 fi
 if [[ "${1:-}" == check ]]; then
   shift
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | rebuild [--plan-only] | ramp NEW_CAMPAIGN_NAME [OPTIONS] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement|scaling] [--scenario mobility9|scaler-balanced|scaler-staircase] [--final-hold] [--long-run] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
+  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | rebuild [--plan-only] | ramp NEW_CAMPAIGN_NAME [OPTIONS] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement|scaling] [--scenario mobility9|scaler-balanced|scaler-staircase] [--final-hold] [--long-run] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--latency-floor-ms MILLISECONDS] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"

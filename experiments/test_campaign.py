@@ -755,7 +755,8 @@ def test_scaler_balanced_final_hold_and_overrides(tmp_path):
     assert yaml.safe_load((out / 'proposed-hpa.yaml').read_text())['spec']['maxReplicas'] == 12
 
 
-def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_path, monkeypatch):
+@pytest.mark.parametrize('floor_ms', [0, 130])
+def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_path, monkeypatch, floor_ms):
     kube_calls = []
 
     def fake_kube(*args, **kwargs):
@@ -795,7 +796,11 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'active_telemetry', lambda *a, **kw: True)
-    monkeypatch.setattr(campaign, '_query_external_latency_metric', lambda allow_not_found=True: True)
+    queried = []
+    def query_metric(allow_not_found=True, metric_name='ue_p90_latency_seconds'):
+        queried.append(metric_name)
+        return True
+    monkeypatch.setattr(campaign, '_query_external_latency_metric', query_metric)
     monkeypatch.setattr(campaign, 'RunnerProgress', lambda *a, **kw: types.SimpleNamespace(poll=lambda final=False: None))
 
     popen_cmds = []
@@ -832,12 +837,13 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
         'schedule': campaign.SCALER_BALANCED_SCHEDULE, 'phase_duration': 60,
         'phase_durations': [60.0] * 6 + [420.0], 'workload': 'face-detection',
         'ue_host': 'ue', 'ue_project': '/ue',
+        'staircase': bool(floor_ms), 'latency_floor_ms': floor_ms,
     }
     kube_calls.clear()
     root = tmp_path / 'run'
     root.mkdir()
     campaign.run_method(
-        settings, 'scaler_01', root, 'proposed', None, 100, 24,
+        settings, 'scaler_01', root, 'proposed', None, 150, 24,
         comparison='scaling', autoscaler='hpa', placement_engine='go',
     )
     assert not (root / 'proposed' / 'placement-configmap.yaml').exists()
@@ -847,6 +853,7 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
     assert any('utils.monitor_resources' in ' '.join(map(str, cmd)) and 'hpa-sample' in cmd for cmd in popen_cmds)
     assert (root / 'proposed' / 'workload-events.json').exists()
     assert written_payloads[0]['phase_durations'] == [60.0] * 6 + [420.0]
+    assert queried == [campaign._latency_metric_name(floor_ms)]
 
 
 def test_check_node_capacity_passes_and_fails_clearly(tmp_path, monkeypatch):

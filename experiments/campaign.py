@@ -364,14 +364,78 @@ def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=N
 
 
 
-def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds, slo_ms=None, staircase=False):
+def _latency_metric_name(floor_ms=0):
+    return f'ue_p90_excess_latency_{floor_ms}ms_seconds' if floor_ms else 'ue_p90_latency_seconds'
+
+
+def _floor_adapter_config(floor_ms, configmap=None):
+    """Append a floor-specific rule, preserving the raw metric and unrelated rules."""
+    if type(floor_ms) is not int or floor_ms <= 0:
+        raise ValueError('adapter floor must be a positive whole number of milliseconds')
+    if configmap is None:
+        docs = yaml.safe_load_all((ROOT / 'telemetry/05-prometheus-adapter.yaml').read_text())
+        configmap = next(d for d in docs if d and d.get('kind') == 'ConfigMap'
+                         and d['metadata']['name'] == 'prometheus-adapter-config')
+    # Persist only declarative fields, not live resource versions or managed fields.
+    result = {'apiVersion': 'v1', 'kind': 'ConfigMap',
+              'metadata': {'name': 'prometheus-adapter-config', 'namespace': PLACEMENT_NAMESPACE},
+              'data': dict(configmap['data'])}
+    config = yaml.safe_load(result['data']['config.yaml'])
+    name = _latency_metric_name(floor_ms)
+    rules = config.setdefault('externalRules', [])
+    rules[:] = [r for r in rules if r.get('name', {}).get('as') != name]
+    rules.append({
+        'seriesQuery': 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}',
+        'resources': {'namespaced': False},
+        'name': {'matches': '^ue_request_attempt_duration_p90_seconds$', 'as': name},
+        'metricsQuery': (
+            f'clamp_min(ue_request_attempt_duration_p90_seconds{{job="ue-telemetry"}} - {floor_ms / 1000:g}, 0) '
+            'and on() (ue_request_window_complete{job="ue-telemetry"} == 1)'),
+    })
+    result['data']['config.yaml'] = yaml.safe_dump(config, sort_keys=False)
+    return result
+
+
+def _prepare_floor_adapter(root, floor_ms):
+    """Install the selected rule before either method; no workload or traffic here."""
+    current = get('configmap', 'prometheus-adapter-config', PLACEMENT_NAMESPACE)
+    desired = _floor_adapter_config(floor_ms, current)
+    path = root / 'floor-adapter-configmap.yaml'
+    path.write_text(yaml.safe_dump(desired, sort_keys=False))
+    (root / 'adapter-before.json').write_text(json.dumps(current, indent=2))
+    current_cfg = yaml.safe_load(current['data']['config.yaml'])
+    desired_cfg = yaml.safe_load(desired['data']['config.yaml'])
+    changed = current_cfg != desired_cfg
+    if changed:
+        # Merge just this data key: preserve live metadata, binaryData and other keys.
+        patch = json.dumps({'metadata': {'resourceVersion': current['metadata']['resourceVersion']},
+                            'data': {'config.yaml': desired['data']['config.yaml']}})
+        kube('-n', PLACEMENT_NAMESPACE, 'patch', 'configmap', 'prometheus-adapter-config',
+             '--type=merge', '-p', patch)
+    try:
+        # Also reload when the rule already exists: a prior ConfigMap edit may
+        # not yet have reached a running adapter process.
+        kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'restart', 'deployment/prometheus-adapter')
+        kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'status', 'deployment/prometheus-adapter', '--timeout=120s')
+    except (OSError, subprocess.SubprocessError):
+        if changed:
+            # Restore the prior query config if the adapter cannot start. Abort
+            # the campaign even if the rollback succeeds; no traffic has begun.
+            kube('-n', PLACEMENT_NAMESPACE, 'patch', 'configmap', 'prometheus-adapter-config',
+                 '--type=merge', '-p', json.dumps({'data': {'config.yaml': current['data']['config.yaml']}}))
+            kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'restart', 'deployment/prometheus-adapter')
+            kube('-n', PLACEMENT_NAMESPACE, 'rollout', 'status', 'deployment/prometheus-adapter', '--timeout=120s')
+        raise
+
+
+def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds, slo_ms=None, staircase=False, latency_floor_ms=0):
     hpa = yaml.safe_load((ROOT / template_name).read_text())
     hpa['metadata']['name'] = hpa_name
     hpa['spec']['scaleTargetRef']['name'] = app_name
     hpa['spec'].update(minReplicas=min_replicas, maxReplicas=max_replicas)
     hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = int(scale_down_seconds)
     if staircase:
-        # Matched damping for both metrics; the proposed RT/SLO formula is unchanged.
+        # Matched damping for both metrics, independent of latency signal choice.
         hpa['spec']['behavior'] = {
             'scaleUp': {'stabilizationWindowSeconds': 0,
                         'policies': [{'type': 'Pods', 'value': 2, 'periodSeconds': 30}]},
@@ -379,7 +443,10 @@ def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, ma
                           'policies': [{'type': 'Pods', 'value': 1, 'periodSeconds': 30}]},
         }
     if slo_ms is not None:
-        hpa['spec']['metrics'][0]['external']['target']['value'] = f'{int(round(slo_ms))}m'
+        metric = hpa['spec']['metrics'][0]['external']
+        metric['metric']['name'] = _latency_metric_name(latency_floor_ms)
+        target_ms = slo_ms - latency_floor_ms if latency_floor_ms else int(round(slo_ms))
+        metric['target']['value'] = f'{target_ms:g}m'
     with output_path.open('x') as stream:
         yaml.safe_dump(hpa, stream, sort_keys=False)
     return output_path
@@ -407,9 +474,9 @@ def _render_incluster_placement_configmap(config, manifest_path):
     }
 
 
-def _query_external_latency_metric(allow_not_found=False):
-    """Query Kubernetes external metrics API for ue_p90_latency_seconds via prometheus-adapter."""
-    path = f'/apis/external.metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/ue_p90_latency_seconds?labelSelector=job%3Due-telemetry'
+def _query_external_latency_metric(allow_not_found=False, metric_name='ue_p90_latency_seconds'):
+    """Query the selected raw or floor-adjusted latency metric via prometheus-adapter."""
+    path = f'/apis/external.metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/{metric_name}?labelSelector=job%3Due-telemetry'
     try:
         raw = kube('get', '--raw', path, capture_output=True, text=True).stdout
     except subprocess.CalledProcessError as exc:
@@ -607,12 +674,15 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0):
     """Persist the exact matched replica budget and manifests used by a method."""
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
     if autoscaler not in AUTOSCALERS:
         raise ValueError(f'autoscaler must be one of {AUTOSCALERS}')
+    if latency_floor_ms and (not staircase or comparison != 'scaling' or autoscaler != 'hpa'
+                            or type(latency_floor_ms) is not int or not 0 < latency_floor_ms < slo_ms):
+        raise ValueError('latency floor requires staircase scaling with native HPA and 0 < floor < SLO')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if fixed_replicas is not None:
         if type(fixed_replicas) is not int or fixed_replicas < 1:
@@ -691,6 +761,7 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
             'autoscaler/hpa-proposed.yaml', root / f'{method}-hpa.yaml',
             f'{app_name}-{method}', app_name,
             config['min_replicas'], max_replicas, config['scale_down_seconds'], slo_ms=slo_ms, staircase=staircase,
+            latency_floor_ms=latency_floor_ms,
         )
     return config, config_path, hpa_path
 
@@ -705,7 +776,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
                                                   resource_weights, locality_weight, selected_workload(settings),
                                                   comparison, autoscaler, deschedule_interval, fixed_replicas,
-                                                  staircase=settings.get('staircase', False))
+                                                  staircase=settings.get('staircase', False),
+                                                  latency_floor_ms=settings.get('latency_floor_ms', 0))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -780,7 +852,13 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                         raise RuntimeError('controller or sampler exited during traffic; see logs')
                     if not verified:
                         prom_ok = active_telemetry(config['prometheus_url'])
-                        adapter_ok = True if autoscaler != 'hpa' else bool(_query_external_latency_metric(allow_not_found=True))
+                        if autoscaler != 'hpa':
+                            adapter_ok = True
+                        elif settings.get('latency_floor_ms') and method == 'proposed':
+                            adapter_ok = bool(_query_external_latency_metric(
+                                allow_not_found=True, metric_name=_latency_metric_name(settings['latency_floor_ms'])))
+                        else:
+                            adapter_ok = bool(_query_external_latency_metric(allow_not_found=True))
                         verified = prom_ok and adapter_ok
                         if verified:
                             print(f'{method}: active UE latency telemetry verified', flush=True)
@@ -898,6 +976,8 @@ def main(argv=None):
     parser.add_argument('--check', action='store_true', help='dependency checks plus temporary workload and UE connectivity probes')
     parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
     parser.add_argument('--slo-ms', type=float, help='controller p90 target and reporting threshold in milliseconds (default: config.yaml)')
+    parser.add_argument('--latency-floor-ms', type=int, default=0,
+                        help='staircase only: fixed reference latency in whole milliseconds; 0 keeps raw RT/SLO')
     parser.add_argument('--fixed-replicas', type=int,
                         help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
     parser.add_argument('--max-replicas', type=int,
@@ -971,6 +1051,10 @@ def main(argv=None):
         parser.error('--tc-ms must be finite and at least 0.001 ms')
     if args.slo_ms is not None and (not math.isfinite(args.slo_ms) or args.slo_ms <= 0):
         parser.error('--slo-ms must be finite and positive')
+    if args.latency_floor_ms < 0:
+        parser.error('--latency-floor-ms must be nonnegative')
+    if args.latency_floor_ms and args.scenario != 'scaler-staircase':
+        parser.error('--latency-floor-ms requires --scenario scaler-staircase')
     if args.max_replicas is not None and args.max_replicas < 1:
         parser.error('--max-replicas must be a positive integer')
     if args.phase_duration is not None and (not math.isfinite(args.phase_duration) or args.phase_duration < 60):
@@ -992,6 +1076,7 @@ def main(argv=None):
     workload = args.workload if args.workload is not None else selected_workload(settings)
     settings['workload'] = workload
     settings['staircase'] = args.scenario == 'scaler-staircase'
+    settings['latency_floor_ms'] = args.latency_floor_ms
     if args.workload is not None and args.workload != 'face-detection':
         # Separate config and an explicit SLO prevent accidental reuse of face calibration.
         if args.config == str(ROOT / 'experiments/campaign.yaml') or args.slo_ms is None:
@@ -1023,6 +1108,8 @@ def main(argv=None):
     if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
         parser.error('--locality-weight must be finite and between 0 and 1')
     slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
+    if args.latency_floor_ms >= slo_ms:
+        parser.error('--latency-floor-ms must be smaller than --slo-ms')
     default_max = SCALER_DEFAULT_MAX_REPLICAS if args.comparison == 'scaling' else controller_config['max_replicas']
     max_replicas = args.max_replicas if args.max_replicas is not None else default_max
     if args.fixed_replicas is not None:
@@ -1042,6 +1129,12 @@ def main(argv=None):
         {'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
          'proposed': {'type': 'latency_p90_ms' if args.autoscaler == 'hpa' else 'controller_latency_p90_ms', 'target': slo_ms}}
     )
+    if args.latency_floor_ms:
+        hpa_targets['proposed'] = {
+            'type': 'excess_latency_p90_ms', 'target': slo_ms - args.latency_floor_ms,
+            'floor_ms': args.latency_floor_ms, 'slo_ms': slo_ms,
+            'metric': _latency_metric_name(args.latency_floor_ms),
+        }
     shared_metadata = {
         'workload': workload,
         'comparison': args.comparison,
@@ -1057,7 +1150,9 @@ def main(argv=None):
         'long_run': args.long_run,
         'phase_durations_s': phase_durations,
         'hpa_behavior_profile': 'bounded-staircase' if settings['staircase'] else 'original',
-        'latency_scaling_formula': 'RT/SLO (unchanged; rounding can retain excess replicas)',
+        'latency_floor_ms': args.latency_floor_ms,
+        'latency_floor_source': 'fixed exploratory reference; not an automatically measured physical minimum' if args.latency_floor_ms else None,
+        'latency_scaling_formula': 'max(RT-floor, 0)/(SLO-floor)' if args.latency_floor_ms else 'RT/SLO (unchanged; rounding can retain excess replicas)',
         'analysis_windows': {'whole_phase': True, 'late_phase_seconds': 60, 'steady_state_assumed': False},
         'final_hold_seconds': hold_seconds,
         'node_restriction': SCALER_NODE if args.comparison == 'scaling' else None,
@@ -1082,7 +1177,10 @@ def main(argv=None):
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
-                            staircase=settings['staircase'])
+                            staircase=settings['staircase'], latency_floor_ms=args.latency_floor_ms)
+        if args.latency_floor_ms:
+            (output / 'floor-adapter-configmap.yaml').write_text(
+                yaml.safe_dump(_floor_adapter_config(args.latency_floor_ms), sort_keys=False))
         (output / 'plan.yaml').write_text(yaml.safe_dump(shared_metadata | {
             'calibrated': False,
             'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
@@ -1147,6 +1245,10 @@ def main(argv=None):
             if args.comparison == 'scaling':
                 reset(workload)
                 check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, workload_identity(workload))
+            if args.latency_floor_ms:
+                print(f'Exploratory floor-adjusted HPA: fixed reference {args.latency_floor_ms}ms, '
+                      f'excess target {slo_ms - args.latency_floor_ms:g}ms. Reporting SLO remains {slo_ms:g}ms.', flush=True)
+                _prepare_floor_adapter(root, args.latency_floor_ms)
             for method in ('baseline', 'proposed'):
                 print(f'=== {method.upper()} ===', flush=True)
                 reset(workload)
