@@ -100,7 +100,7 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
             except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
                 stream.write(json.dumps({'sample_time': time.time(), 'error': str(exc)}) + '\n')
                 stream.flush()
-            time.sleep(2)
+            time.sleep(5)
 
 
 def summarize(raw, requests, summary_csv, output, write_resource_csv=True):
