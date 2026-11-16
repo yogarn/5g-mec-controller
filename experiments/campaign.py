@@ -416,37 +416,110 @@ def _query_external_latency_metric(allow_not_found=False):
 
 def _parse_cpu_millicores(raw):
     text = str(raw).strip()
+    if not text:
+        raise ValueError('empty CPU quantity')
     if text.endswith('n'):
-        return float(text[:-1]) / 1e6
-    if text.endswith('u'):
-        return float(text[:-1]) / 1e3
-    if text.endswith('m'):
-        return float(text[:-1])
-    return float(text) * 1000.0
+        val = float(text[:-1]) / 1e6
+    elif text.endswith('u'):
+        val = float(text[:-1]) / 1e3
+    elif text.endswith('m'):
+        val = float(text[:-1])
+    else:
+        val = float(text) * 1000.0
+    if not math.isfinite(val) or val < 0:
+        raise ValueError(f'invalid CPU quantity: {raw!r}')
+    return val
 
 
 def _parse_memory_bytes(raw):
     text = str(raw).strip()
+    if not text:
+        raise ValueError('empty memory quantity')
     units = {
         'Ki': 1024, 'Mi': 1024 ** 2, 'Gi': 1024 ** 3, 'Ti': 1024 ** 4,
+        'Pi': 1024 ** 5, 'Ei': 1024 ** 6,
         'K': 1000, 'M': 1000 ** 2, 'G': 1000 ** 3, 'T': 1000 ** 4,
+        'P': 1000 ** 5, 'E': 1000 ** 6,
     }
-    for suffix, scale in units.items():
+    val = None
+    for suffix in sorted(units, key=len, reverse=True):
         if text.endswith(suffix):
-            return float(text[:-len(suffix)]) * scale
-    return float(text)
+            val = float(text[:-len(suffix)]) * units[suffix]
+            break
+    if val is None:
+        val = float(text)
+    if not math.isfinite(val) or val < 0:
+        raise ValueError(f'invalid memory quantity: {raw!r}')
+    return val
 
 
-def _pod_requests(containers):
-    cpu_m = 0.0
-    mem_b = 0.0
-    for container in containers:
-        req = (container.get('resources') or {}).get('requests') or {}
-        if 'cpu' in req:
-            cpu_m += _parse_cpu_millicores(req['cpu'])
-        if 'memory' in req:
-            mem_b += _parse_memory_bytes(req['memory'])
-    return cpu_m, mem_b
+def _container_requests(container):
+    resources = container.get('resources') or {}
+    if resources.get('claims'):
+        raise ValueError(f"unsupported container resource claims in {container.get('name', '<container>')}")
+    req = resources.get('requests') or {}
+    lim = resources.get('limits') or {}
+    cpu_raw = req.get('cpu', lim.get('cpu', 0))
+    mem_raw = req.get('memory', lim.get('memory', 0))
+    return _parse_cpu_millicores(cpu_raw), _parse_memory_bytes(mem_raw)
+
+
+def _pod_effective_requests(spec):
+    """Compute Kubernetes-effective Pod CPU (millicores) and memory (bytes) requests."""
+    if spec.get('resourceClaims'):
+        raise ValueError('unsupported Pod resourceClaims in capacity check')
+    regular_cpu = 0.0
+    regular_mem = 0.0
+    for container in spec.get('containers') or []:
+        c_cpu, c_mem = _container_requests(container)
+        regular_cpu += c_cpu
+        regular_mem += c_mem
+
+    restartable_cpu = 0.0
+    restartable_mem = 0.0
+    max_init_cpu = 0.0
+    max_init_mem = 0.0
+    for init_c in spec.get('initContainers') or []:
+        i_cpu, i_mem = _container_requests(init_c)
+        restart_policy = init_c.get('restartPolicy')
+        if restart_policy == 'Always':
+            restartable_cpu += i_cpu
+            restartable_mem += i_mem
+            max_init_cpu = max(max_init_cpu, restartable_cpu)
+            max_init_mem = max(max_init_mem, restartable_mem)
+        elif restart_policy is None:
+            max_init_cpu = max(max_init_cpu, restartable_cpu + i_cpu)
+            max_init_mem = max(max_init_mem, restartable_mem + i_mem)
+        else:
+            raise ValueError(f'unsupported initContainer restartPolicy: {restart_policy!r}')
+
+    effective_cpu = max(regular_cpu + restartable_cpu, max_init_cpu)
+    effective_mem = max(regular_mem + restartable_mem, max_init_mem)
+
+    pod_resources = spec.get('resources') or {}
+    if pod_resources:
+        if pod_resources.get('claims'):
+            raise ValueError('unsupported Pod-level resource claims in capacity check')
+        unsupported_keys = set(pod_resources) - {'requests', 'limits'}
+        if unsupported_keys:
+            raise ValueError(f'unsupported Pod-level resources keys: {sorted(unsupported_keys)}')
+        pod_req = pod_resources.get('requests') or {}
+        pod_lim = pod_resources.get('limits') or {}
+        if 'cpu' in pod_req or 'cpu' in pod_lim:
+            effective_cpu = max(effective_cpu, _parse_cpu_millicores(pod_req.get('cpu', pod_lim.get('cpu'))))
+        if 'memory' in pod_req or 'memory' in pod_lim:
+            effective_mem = max(effective_mem, _parse_memory_bytes(pod_req.get('memory', pod_lim.get('memory'))))
+
+    overhead = spec.get('overhead') or {}
+    unsupported_overhead = set(overhead) - {'cpu', 'memory'}
+    if unsupported_overhead:
+        raise ValueError(f'unsupported Pod overhead resources: {sorted(unsupported_overhead)}')
+    if 'cpu' in overhead:
+        effective_cpu += _parse_cpu_millicores(overhead['cpu'])
+    if 'memory' in overhead:
+        effective_mem += _parse_memory_bytes(overhead['memory'])
+
+    return effective_cpu, effective_mem
 
 
 def check_node_capacity(node_name, manifest_path, max_replicas, workload_app=None):
@@ -455,7 +528,7 @@ def check_node_capacity(node_name, manifest_path, max_replicas, workload_app=Non
     deployments = [d for d in docs if d.get('kind') == 'Deployment']
     if len(deployments) != 1:
         raise ValueError('application manifest requires exactly one Deployment')
-    per_pod_cpu, per_pod_mem = _pod_requests(deployments[0]['spec']['template']['spec'].get('containers', []))
+    per_pod_cpu, per_pod_mem = _pod_effective_requests(deployments[0]['spec']['template']['spec'])
     node = json.loads(kube('get', 'node', node_name, '-o', 'json', capture_output=True, text=True).stdout)
     alloc = node.get('status', {}).get('allocatable') or {}
     alloc_cpu = _parse_cpu_millicores(alloc.get('cpu', 0))
@@ -469,9 +542,14 @@ def check_node_capacity(node_name, manifest_path, max_replicas, workload_app=Non
         if phase in ('Succeeded', 'Failed'):
             continue
         meta = pod.get('metadata') or {}
-        if workload_app and meta.get('namespace') == NAMESPACE and (meta.get('labels') or {}).get('app') == workload_app:
+        if (
+            workload_app
+            and not meta.get('deletionTimestamp')
+            and meta.get('namespace') == NAMESPACE
+            and (meta.get('labels') or {}).get('app') == workload_app
+        ):
             continue
-        c_cpu, c_mem = _pod_requests((pod.get('spec') or {}).get('containers', []))
+        c_cpu, c_mem = _pod_effective_requests(pod.get('spec') or {})
         used_cpu += c_cpu
         used_mem += c_mem
     need_cpu = max_replicas * per_pod_cpu

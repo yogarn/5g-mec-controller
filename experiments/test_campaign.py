@@ -846,3 +846,90 @@ def test_scaler_balanced_rejects_incompatible_options_before_cluster_access(flag
     with pytest.raises(SystemExit) as exc:
         campaign.main(['scaler_invalid', *flags])
     assert exc.value.code == 2
+
+
+def test_check_node_capacity_counts_init_container_effective_request(tmp_path, monkeypatch):
+    manifest = tmp_path / 'workload.yaml'
+    manifest.write_text(yaml.safe_dump({
+        'apiVersion': 'apps/v1',
+        'kind': 'Deployment',
+        'spec': {'template': {'spec': {'containers': [{
+            'resources': {'requests': {'cpu': '500m', 'memory': '256Mi'}},
+        }]}}},
+    }))
+    node = {'status': {'allocatable': {'cpu': '2', 'memory': '4Gi'}}}
+    pods = {'items': [{
+        'metadata': {'namespace': 'system'},
+        'status': {'phase': 'Running'},
+        'spec': {
+            'containers': [{'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}}}],
+            'initContainers': [{'resources': {'requests': {'cpu': '2', 'memory': '128Mi'}}}],
+        },
+    }]}
+    monkeypatch.setattr(
+        campaign, 'kube',
+        lambda *args, **kw: types.SimpleNamespace(stdout=json.dumps(node if args[:2] == ('get', 'node') else pods)),
+    )
+    with pytest.raises(RuntimeError, match='node gnb-3 cannot fit 1 replicas'):
+        campaign.check_node_capacity('gnb-3', manifest, 1)
+
+
+def test_check_node_capacity_handles_restartable_inits_overhead_pod_resources_and_terminating_pods(tmp_path, monkeypatch):
+    # Template: 200m container + 300m restartable init + 100m overhead = 600m/pod.
+    manifest = tmp_path / 'workload.yaml'
+    manifest.write_text(yaml.safe_dump({
+        'apiVersion': 'apps/v1',
+        'kind': 'Deployment',
+        'spec': {'template': {'spec': {
+            'overhead': {'cpu': '100m', 'memory': '64Mi'},
+            'initContainers': [
+                {'restartPolicy': 'Always', 'resources': {'requests': {'cpu': '300m', 'memory': '128Mi'}}},
+                {'resources': {'requests': {'cpu': '150m', 'memory': '64Mi'}}},
+            ],
+            'containers': [{'resources': {'requests': {'cpu': '200m', 'memory': '128Mi'}}}],
+        }}},
+    }))
+    node = {'status': {'allocatable': {'cpu': '2', 'memory': '4Gi'}}}
+    # Active pods:
+    # - terminating workload pod with pod-level 1000m CPU + 100m overhead = 1100m (kept reserved)
+    # - succeeded pod with 4000m CPU (ignored as terminal)
+    pods = {'items': [
+        {
+            'metadata': {
+                'namespace': 'services',
+                'deletionTimestamp': '2026-11-16T00:00:00Z',
+                'labels': {'app': 'mec-placement-face-detection'},
+            },
+            'status': {'phase': 'Running'},
+            'spec': {
+                'resources': {'requests': {'cpu': '1000m', 'memory': '256Mi'}},
+                'overhead': {'cpu': '100m', 'memory': '32Mi'},
+                'containers': [{'resources': {'requests': {'cpu': '200m', 'memory': '128Mi'}}}],
+            },
+        },
+        {
+            'metadata': {'namespace': 'batch'},
+            'status': {'phase': 'Succeeded'},
+            'spec': {'containers': [{'resources': {'requests': {'cpu': '4', 'memory': '4Gi'}}}]},
+        },
+    ]}
+    monkeypatch.setattr(
+        campaign, 'kube',
+        lambda *args, **kw: types.SimpleNamespace(stdout=json.dumps(node if args[:2] == ('get', 'node') else pods)),
+    )
+    # Remaining CPU: 2000m - 1100m = 900m -> fits 1 replica (600m), fails 2 replicas (1200m).
+    campaign.check_node_capacity('gnb-3', manifest, 1, 'mec-placement-face-detection')
+    with pytest.raises(RuntimeError, match='node gnb-3 cannot fit 2 replicas'):
+        campaign.check_node_capacity('gnb-3', manifest, 2, 'mec-placement-face-detection')
+
+
+@pytest.mark.parametrize('spec', [
+    {'resourceClaims': [{'name': 'gpu'}], 'containers': [{'resources': {'requests': {'cpu': '100m'}}}]},
+    {'containers': [{'name': 'app', 'resources': {'claims': [{'name': 'gpu'}], 'requests': {'cpu': '100m'}}}]},
+    {'initContainers': [{'restartPolicy': 'OnFailure', 'resources': {'requests': {'cpu': '100m'}}}], 'containers': []},
+    {'overhead': {'ephemeral-storage': '1Gi'}, 'containers': [{'resources': {'requests': {'cpu': '100m'}}}]},
+    {'resources': {'claims': [{'name': 'gpu'}]}, 'containers': [{'resources': {'requests': {'cpu': '100m'}}}]},
+])
+def test_pod_effective_requests_rejects_unsupported_configurations(spec):
+    with pytest.raises(ValueError, match='unsupported'):
+        campaign._pod_effective_requests(spec)
