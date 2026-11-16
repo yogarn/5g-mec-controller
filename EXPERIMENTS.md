@@ -305,11 +305,11 @@ New experiment runs use **Prometheus/cAdvisor** as the primary source for `resou
   bash experiments/run.sh rebuild
   ```
   This builds a unique image tag, checks the loaded model and dedicated health/readiness endpoints in a local container, pushes it, and pins the published digest in both workload manifests. It shares the campaign lock and stops before updating manifests if build, smoke testing or digest validation fails. The campaign deploys the image. Preview with `bash experiments/run.sh rebuild --plan-only`.
-- **Short scaler ramp command (120s phases, final hold, TC 10ms, SLO 150ms, 5 RPS/UE, maximum 8 in flight):**
+- **Short scaler ramp command (60s phases, no extra final hold, TC 10ms, SLO 150ms, 5 RPS/UE, maximum 8 in flight):**
   ```bash
-  bash experiments/run.sh ramp scaler_02
+  bash experiments/run.sh ramp scaler_floor_short_01
   ```
-  Supply a fresh result name. Additional campaign options may follow the name. This retains the original native RT-ratio HPA method, including its scale-down limitations.
+  Supply a fresh result name. Additional campaign options may follow the name. This selects the floor-adjusted native latency HPA described below; append `--latency-floor-ms 0` for the raw RT-ratio variant.
 - **Live checks still required before live evaluation:** verify `nodes/proxy` `/metrics/cadvisor` access on all 4 nodes (`core-5g`, `gnb1`, `gnb-2`, `gnb-3`), confirm container-instance identity labels (`id`/`container_id`), verify `up{job="kubelet-cadvisor"} == 1` with no duplicate targets, and check 5s scrape CPU/memory overhead and 24h retention.
 - **Boundary effects:** CPU rates use a `45s` rate window (with `25s` freshness to accommodate 10–20s cAdvisor container timestamp spacing while keeping Prometheus scrape and Pod lifecycle polling at `5s`) per container instance (with counter-reset handling). A `45s` CPU rate window can cross the `60s` phase boundaries, and newly started containers require `>= 2` samples in the window before a rate exists. Resource summaries are averages of valid observations, not exact phase CPU consumption. If cAdvisor data is missing, `resource-by-ramp.csv` leaves totals blank rather than substituting Metrics Server.
 
@@ -327,18 +327,20 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 ## Gradual scaler staircase (new configuration)
 
 Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
-`--scenario scaler-staircase`, 180s phases, final hold, TC 10ms, SLO 150ms,
+`--scenario scaler-staircase`, 60s phases, no extra final hold, TC 10ms, SLO 150ms,
 5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
 Both methods use default-scheduler on gnb-3,
 replica bounds 1..24, requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.
 The rebuilt image digest from core is pinned in both manifests.
 
 UE steps are 3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3, equally divided
-between the three gNBs. Twelve phases last 180s; the final low-load phase lasts
-600s with `--final-hold` (46 minutes of traffic per method, 92 minutes per pair,
-plus setup and UE reattachment). Without final hold all thirteen last 180s.
-`--phase-duration` overrides the regular phases; final hold extends the last to
-at least 600s. The old `scaler-balanced` flag retains its seven-phase schedule
+between the three gNBs. All thirteen phases last 60s by default (13 minutes of
+traffic per method, 26 minutes per pair, plus setup, request drain and UE
+reattachment). This default also applies to direct staircase invocation.
+`--phase-duration` overrides the regular phases. Opt into `--final-hold` to extend
+the last phase to at least 600s; it is no longer part of the shortcut. To reproduce
+the older 46-minute-per-method timing, append `--phase-duration 180 --final-hold`.
+The old `scaler-balanced` flag retains its seven-phase schedule
 and original HPA behavior for reproducibility. Mobility is unchanged.
 
 The staircase gives both HPAs matched behavior: scale up by at most 2 Pods/30s,
@@ -360,7 +362,8 @@ by dispatch time; coverage is grouped by scheduled slot. Missing slot metadata
 leaves coverage unknown. Late-phase measurements are not automatically steady
 state. Check the retained pod/HPA timeline for convergence; do not average away
 or discard the transition costs. These request windows do not change cAdvisor
-resource-window semantics.
+resource-window semantics. With 60s phases, the final-60s request window covers
+the entire phase and gives no separate evidence of settling.
 
 Frozen results and `scaler_02` retain their original parameters. This is a new
 exploratory configuration following inspection of those runs; preserve both.
@@ -412,3 +415,51 @@ neither installs the rule nor restarts the adapter.
 
 Implementation references: [Prometheus clamp_min](https://prometheus.io/docs/prometheus/latest/querying/functions/#clamp_min)
 and [Prometheus Adapter configuration](https://github.com/kubernetes-sigs/prometheus-adapter/blob/master/docs/config.md).
+
+
+## Exploratory internal RT target factor (`--rt-target-factor`)
+
+`--rt-target-factor` (default `1.0`, finite `0 < factor <= 1`) separates the
+**reporting SLO** (`--slo-ms`) from the **internal RT scaling target**
+(`slo_ms * rt_target_factor`) used only by the proposed RT HPA:
+
+- **Raw mode (`--latency-floor-ms 0`):** proposed HPA scales on
+  `RT / internal_target` (for example, `150 * 0.95 = 142.5ms`).
+- **Floor mode (`--latency-floor-ms > 0`):** proposed HPA scales on
+  `max(RT - floor, 0) / (internal_target - floor)` (for example, with SLO
+  `150`, floor `130`, and factor `0.95`, internal target is `142.5ms` and excess
+  target is `12.5ms`). Configurations where `internal_target <= latency_floor_ms`
+  are rejected.
+- **Exact fractional targets in Kubernetes HPA:** Kubernetes HPA reads external
+  metric values and targets via `Quantity.MilliValue()`, which rounds fractional
+  milli-quantities (e.g. `142.5m` → `143m`, `12.5m` → `13m`). When the effective
+  target has fractional milliseconds, the campaign automatically exposes a
+  millisecond-unit adapter metric (`ue_p90_latency_milliseconds` or
+  `ue_p90_excess_latency_<floor>ms_milliseconds`, `* 1000`) and sets the HPA
+  target directly in milliseconds (`142.5` or `12.5`, so `MilliValue()` is
+  `142500` or `12500`). Whole-millisecond targets (e.g. `135m`, `5m`, `20m`)
+  retain the seconds-unit metrics.
+- **Unchanged evaluation and baseline:** request SLO classification, violation
+  plots, attainment summaries, baseline CPU target (`60%`), replica bounds, and
+  HPA behavior remain evaluated against `--slo-ms`. Legacy `--autoscaler
+  controller` and `--comparison placement` reject `rt_target_factor != 1.0`
+  (placement-only comparisons must share the same latency autoscaler).
+
+`--rt-target-factor` is an **experimental headroom parameter**, not a
+theoretically established constant. The `ramp` shortcut keeps the default
+`1.0` because unloaded p90 is roughly `140`–`142` ms; a `0.90` factor (`135` ms
+internal target) may be unattainable under this workload and requires
+experimental validation.
+
+Example `--plan-only` commands (no cluster access or traffic):
+
+```bash
+# Raw mode with 0.95 headroom factor (150ms reporting SLO -> 142.5ms internal target):
+.venv/bin/python -m experiments.campaign --comparison scaling --scenario scaler-staircase --slo-ms 150 --rt-target-factor 0.95 --plan-only /tmp/plan_raw_095
+
+# Floor mode with 0.95 headroom factor (150ms SLO, 130ms floor -> 142.5ms internal target, 12.5ms excess target):
+.venv/bin/python -m experiments.campaign --comparison scaling --scenario scaler-staircase --slo-ms 150 --latency-floor-ms 130 --rt-target-factor 0.95 --plan-only /tmp/plan_floor_095
+
+# Floor mode with 0.90 headroom factor via ramp preset forwarding (135ms internal target, 5ms excess target):
+bash experiments/run.sh ramp --rt-target-factor 0.90 --plan-only /tmp/plan_floor_090
+```
