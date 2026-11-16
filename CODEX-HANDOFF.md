@@ -231,3 +231,13 @@ Refactored the controller and experiment harness to follow Kubernetes separation
 - Both pedestrian and compatibility face manifests retain requests of 500m CPU / 256Mi memory and now use limits of 1 CPU / 512Mi memory. This is a separate experimental resource configuration from the frozen runs.
 - CPU baseline remains `averageUtilization: 60`, targeting 300m average CPU per pod. No limit-based HPA change was applied. An alternative 60%-of-limit target would be 600m with these limits and would change the baseline method.
 - Manifest changes do not alter running Pods; apply through a new campaign after syncing. No cluster deployment or traffic was started for this change.
+
+
+## 13. Gradual Scaler Staircase and Readable Latency Reporting
+
+- `ramp` now selects `scaler-staircase`: balanced UE steps 3/6/9/12/15/18/24/18/15/12/9/6/3, 180s regular phases and a 600s final low-load phase. Existing `scaler-balanced` and mobility behavior are retained.
+- Both staircase HPAs have matched +2 Pods/30s, -1 Pod/30s policies, 60s down stabilization and 0.01 down tolerance. Baseline remains CPU 60% of requests; proposed remains RT/SLO. Floor subtraction was explained to the user and is NOT implemented. Rounding-related retention is still a limitation; smooth convergence is not promised.
+- New plot outputs retain full-range latency, add marked 0–300ms zoom and final-60s views, and export coverage-aware whole/late phase CSVs. Late phase is not assumed to be steady state. Existing results are read only.
+- Preserved core's rebuilt pedestrian digest `478371df0a763f4f60b670f9eb800ca8da285667aa6b9b39b00b54c3a3dbae82` in both manifests together with the committed 1 CPU / 512Mi limits. Sync does not deploy workloads or launch experiments.
+- Offline replot of copied scaler_02: phase-2 final-60s p90 baseline 174.48ms vs proposed 134.88ms; both have 100% late-window request coverage. Whole-phase p90 remains 2498.41ms vs 4283.09ms, preserving the transient cost.
+- Validation: 264 regression tests + 23 subtests passed; 11 app/plot tests passed in the dependency-enabled environment. Offline staircase manifests and replot checked; both HPAs accepted by core with server dry-run. No live campaign launched.

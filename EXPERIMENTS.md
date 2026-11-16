@@ -322,3 +322,45 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 .venv/bin/python -m utils.fixed_replica_harness --campaign-dir results/diag_tc_off --stage diag --block 1 --run-id tc_off --replicas 6 --node gnb-2 --schedule 3:1:1:1 --rps-per-ue 1 --max-in-flight-per-ue 4
 .venv/bin/python -m utils.fixed_replica_harness --campaign-dir results/diag_tc_on  --stage diag --block 1 --run-id tc_on  --replicas 6 --node gnb-2 --schedule 3:1:1:1 --rps-per-ue 1 --max-in-flight-per-ue 4 --tc-ms 10
 ```
+
+
+## Gradual scaler staircase (new configuration)
+
+Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
+`--scenario scaler-staircase`, 180s phases, final hold, TC 10ms, SLO 150ms,
+5 RPS/UE and max 8 in flight/UE. Both methods use default-scheduler on gnb-3,
+replica bounds 1..24, requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.
+The rebuilt image digest from core is pinned in both manifests.
+
+UE steps are 3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3, equally divided
+between the three gNBs. Twelve phases last 180s; the final low-load phase lasts
+600s with `--final-hold` (46 minutes of traffic per method, 92 minutes per pair,
+plus setup and UE reattachment). Without final hold all thirteen last 180s.
+`--phase-duration` overrides the regular phases; final hold extends the last to
+at least 600s. The old `scaler-balanced` flag retains its seven-phase schedule
+and original HPA behavior for reproducibility. Mobility is unchanged.
+
+The staircase gives both HPAs matched behavior: scale up by at most 2 Pods/30s,
+scale down by at most 1 Pod/30s, scale-down stabilization 60s, and scale-down
+tolerance 0.01. This requires Kubernetes support for per-direction HPA tolerance
+(v1.35 cluster used here). CPU baseline still targets 60% of requests. Proposed
+still uses the raw RT/SLO ratio; no floor subtraction is implemented. These
+settings reduce abrupt replica changes but do not guarantee SLO attainment or
+full replica convergence: integer rounding can still retain excess replicas.
+A floor-adjusted method would need a separately justified floor and evaluation.
+Do not label this configuration as the unchanged default-HPA comparison.
+
+Plots preserve the full-range `response-time` figure. `response-time-zoom` adds
+a 0–300ms whole-phase panel and a final-60s panel, with all values above 300ms
+marked and labelled. `late-phase` also shows final-60s latency on an unrestricted
+axis and all-attempt violation percentages. `{method}-phase-windows.csv` records
+whole-phase and late-phase latency, failures, exact scheduled-slot coverage and
+scheduled SLO attainment when slot metadata exists. Request latency is grouped
+by dispatch time; coverage is grouped by scheduled slot. Missing slot metadata
+leaves coverage unknown. Late-phase measurements are not automatically steady
+state. Check the retained pod/HPA timeline for convergence; do not average away
+or discard the transition costs. These request windows do not change cAdvisor
+resource-window semantics.
+
+Frozen results and `scaler_02` retain their original parameters. This is a new
+exploratory configuration following inspection of those runs; preserve both.

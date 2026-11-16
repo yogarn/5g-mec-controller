@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-cadvisor-20261116-103311/candidate.json",
+    "sha256": "9f5420bb22ccc5f8547c31d5f33ca6a076593b0e3a24a666d46793bac793f8f9",
+    "bytes": 10046
+  },
+  "artifact": {
+    "path": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-cadvisor-20261116-103311/mec-cadvisor.html",
+    "sha256": "0763ebe749f7501cfe43baf6a288aa0f38740d1f640c1fc0876b54178288742e",
+    "bytes": 864440
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-cadvisor-20261116-103311/review-2/mec-cadvisor.finalize.json",
+    "summaryReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-cadvisor-20261116-103311/review-2/mec-cadvisor.finalize-summary.json",
+    "browserCheckReceipt": "/home/yogarn/projects/lab/5g-mec-placement-controller/.archify/architecture-mec-cadvisor-20261116-103311/review-2/mec-cadvisor.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-16T03:34:45.964Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2728,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "resolvedCrossovers": 2,
+      "routesOverSuggestedBends": 2
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [
+        {
+          "left": {
+            "from": "prom",
+            "to": "collector",
+            "label": "scrape UE metrics",
+            "collectionIndex": 3,
+            "artifactIndex": 4
+          },
+          "right": {
+            "from": "api",
+            "to": "pods",
+            "label": "reconcile pod state",
+            "collectionIndex": 12,
+            "artifactIndex": 13
+          },
+          "point": [
+            396,
+            266
+          ]
+        },
+        {
+          "left": {
+            "from": "adapter",
+            "to": "prom",
+            "label": "query RT",
+            "collectionIndex": 6,
+            "artifactIndex": 7
+          },
+          "right": {
+            "from": "api",
+            "to": "pods",
+            "label": "reconcile pod state",
+            "collectionIndex": 12,
+            "artifactIndex": 13
+          },
+          "point": [
+            396,
+            280
+          ]
+        }
+      ],
+      "detours": [
+        {
+          "relationship": {
+            "from": "api",
+            "to": "pods",
+            "label": "reconcile pod state",
+            "collectionIndex": 12,
+            "artifactIndex": 13
+          },
+          "bends": 3,
+          "stretch": 1.046
+        },
+        {
+          "relationship": {
+            "from": "reporter",
+            "to": "prom",
+            "label": "query raw history",
+            "collectionIndex": 14,
+            "artifactIndex": 15
+          },
+          "bends": 4,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "prom → collector crosses api → pods: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "adapter → prom crosses api → pods: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "api → pods needs 3 bends: move node api or pods so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "reporter → prom needs 4 bends: move node reporter or prom so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

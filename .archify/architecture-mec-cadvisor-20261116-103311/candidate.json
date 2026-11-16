@@ -1,0 +1,469 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "5G MEC architecture with cAdvisor monitoring",
+    "locale": "en",
+    "output": ".archify/architecture-mec-cadvisor-20261116-103311/mec-cadvisor.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/yogarn/5g-mec-controller.git",
+      "revision": "e4295e53da9e8c68ed1e0922baf333564a1dec99"
+    }
+  },
+  "components": [
+    {
+      "id": "ue",
+      "type": "external",
+      "label": "UE / UERANSIM runner",
+      "sublabel": "paced HTTP + RT observations",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "utils/experiment.py",
+          "line": 289,
+          "end_line": 301
+        }
+      ]
+    },
+    {
+      "id": "service",
+      "type": "backend",
+      "label": "Workload Service",
+      "sublabel": "NodePort / kube-proxy",
+      "pos": [
+        420,
+        40
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "apps/pedestrian-detection/manifest.yaml",
+          "line": 79,
+          "end_line": 95
+        }
+      ]
+    },
+    {
+      "id": "pods",
+      "type": "backend",
+      "label": "Pedestrian detection pods",
+      "sublabel": "core-5g / gnb1 / gnb-2 / gnb-3",
+      "pos": [
+        800,
+        40
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "apps/pedestrian-detection/manifest.yaml",
+          "line": 19,
+          "end_line": 56
+        }
+      ]
+    },
+    {
+      "id": "collector",
+      "type": "backend",
+      "label": "UE telemetry collector",
+      "sublabel": "response time + site mapping",
+      "pos": [
+        40,
+        240
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "collector/manifest.yaml",
+          "line": 7,
+          "end_line": 40
+        }
+      ]
+    },
+    {
+      "id": "prom",
+      "type": "database",
+      "label": "Prometheus",
+      "sublabel": "UE, host and container metrics",
+      "pos": [
+        420,
+        240
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "telemetry/03-prometheus.yaml",
+          "line": 514,
+          "end_line": 555
+        },
+        {
+          "path": "telemetry/03-prometheus.yaml",
+          "line": 426,
+          "end_line": 440
+        }
+      ]
+    },
+    {
+      "id": "cadvisor",
+      "type": "backend",
+      "label": "Kubelet / cAdvisor",
+      "sublabel": "per-node container CPU + RAM",
+      "pos": [
+        800,
+        240
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "telemetry/03-prometheus.yaml",
+          "line": 520,
+          "end_line": 555
+        }
+      ]
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "Prometheus Adapter",
+      "sublabel": "external latency metric API",
+      "pos": [
+        40,
+        440
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "telemetry/05-prometheus-adapter.yaml",
+          "line": 65,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "placement",
+      "type": "backend",
+      "label": "Go scheduler / descheduler",
+      "sublabel": "proposed: score, bind, evict",
+      "pos": [
+        420,
+        440
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "placement/internal/controller/controller.go",
+          "line": 162,
+          "end_line": 180
+        },
+        {
+          "path": "placement/internal/controller/controller.go",
+          "line": 397,
+          "end_line": 411
+        },
+        {
+          "path": "placement/internal/controller/controller.go",
+          "line": 547,
+          "end_line": 555
+        }
+      ]
+    },
+    {
+      "id": "exporter",
+      "type": "backend",
+      "label": "Node exporter",
+      "sublabel": "host resource signals",
+      "pos": [
+        800,
+        440
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "telemetry/01-node-exporter.yaml",
+          "line": 7,
+          "end_line": 35
+        }
+      ]
+    },
+    {
+      "id": "hpa",
+      "type": "backend",
+      "label": "Native Kubernetes HPA",
+      "sublabel": "CPU baseline / RT proposed",
+      "pos": [
+        40,
+        640
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "autoscaler/hpa-baseline.yaml",
+          "line": 7,
+          "end_line": 25
+        },
+        {
+          "path": "autoscaler/hpa-proposed.yaml",
+          "line": 9,
+          "end_line": 31
+        }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "cloud",
+      "label": "Kubernetes API",
+      "sublabel": "Deployment scale + pod state",
+      "pos": [
+        420,
+        640
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "placement/internal/controller/controller.go",
+          "line": 397,
+          "end_line": 411
+        },
+        {
+          "path": "placement/internal/controller/controller.go",
+          "line": 547,
+          "end_line": 555
+        },
+        {
+          "path": "autoscaler/hpa-proposed.yaml",
+          "line": 9,
+          "end_line": 26
+        }
+      ]
+    },
+    {
+      "id": "reporter",
+      "type": "backend",
+      "label": "Experiment monitoring",
+      "sublabel": "pod inventory + resource analysis",
+      "pos": [
+        800,
+        640
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "experiments/campaign.py",
+          "line": 740,
+          "end_line": 750
+        },
+        {
+          "path": "utils/cadvisor_resources.py",
+          "line": 65,
+          "end_line": 87
+        },
+        {
+          "path": "experiments/campaign.py",
+          "line": 804,
+          "end_line": 810
+        }
+      ]
+    },
+    {
+      "id": "metrics",
+      "type": "backend",
+      "label": "Metrics Server",
+      "sublabel": "CPU resource metrics API",
+      "pos": [
+        40,
+        840
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "autoscaler/hpa-baseline.yaml",
+          "line": 14,
+          "end_line": 20
+        }
+      ]
+    },
+    {
+      "id": "results",
+      "type": "database",
+      "label": "Experiment results",
+      "sublabel": "raw JSON / CSV / plots",
+      "pos": [
+        800,
+        840
+      ],
+      "size": [
+        208,
+        66
+      ],
+      "sources": [
+        {
+          "path": "utils/cadvisor_resources.py",
+          "line": 380,
+          "end_line": 395
+        },
+        {
+          "path": "utils/plot_autoscaler.py",
+          "line": 350,
+          "end_line": 361
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "to": "service",
+      "label": "HTTP /detect",
+      "variant": "emphasis",
+      "from": "ue"
+    },
+    {
+      "to": "pods",
+      "label": "ready pod routing",
+      "variant": "emphasis",
+      "from": "service"
+    },
+    {
+      "to": "collector",
+      "label": "POST observations",
+      "from": "ue"
+    },
+    {
+      "to": "collector",
+      "label": "scrape UE metrics",
+      "from": "prom"
+    },
+    {
+      "to": "cadvisor",
+      "label": "HTTPS scrape / 5s",
+      "from": "prom"
+    },
+    {
+      "to": "exporter",
+      "label": "scrape host metrics",
+      "from": "prom"
+    },
+    {
+      "to": "prom",
+      "label": "query RT",
+      "from": "adapter"
+    },
+    {
+      "to": "adapter",
+      "label": "external RT metric",
+      "from": "hpa"
+    },
+    {
+      "to": "metrics",
+      "label": "CPU resource metric",
+      "from": "hpa"
+    },
+    {
+      "to": "api",
+      "label": "scale Deployment",
+      "from": "hpa"
+    },
+    {
+      "to": "prom",
+      "label": "query load + locality",
+      "from": "placement"
+    },
+    {
+      "to": "api",
+      "label": "bind / evict",
+      "from": "placement"
+    },
+    {
+      "to": "pods",
+      "label": "reconcile pod state",
+      "from": "api"
+    },
+    {
+      "to": "api",
+      "label": "poll pod inventory",
+      "from": "reporter"
+    },
+    {
+      "to": "prom",
+      "label": "query raw history",
+      "from": "reporter"
+    },
+    {
+      "to": "results",
+      "label": "write reports",
+      "variant": "dashed",
+      "from": "reporter"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Container resource monitoring",
+      "items": [
+        "Kubelet exposes cAdvisor on each eligible node, including core. No application sidecars.",
+        "Prometheus scrapes /metrics/cadvisor every 5s through the authenticated Kubernetes API node proxy.",
+        "Reports use raw scrape timestamps, a 30s CPU rate window, memory working sets and independent coverage checks."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Control ownership",
+      "items": [
+        "Native HPA owns replica counts. The Go scheduler/descheduler owns proposed placement and eviction.",
+        "CPU baseline uses Metrics Server; latency HPA uses UE response time through Prometheus Adapter. cAdvisor is the experiment resource source.",
+        "Mobility with fixed replicas clamps HPA min=max=9; eviction may briefly reduce ready replicas."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Scope and lifecycle",
+      "items": [
+        "Logical overview: the 5G radio, UPF and transport path is collapsed into the UE-to-Service connection. NodePort may route to another node.",
+        "Campaign lifecycle sampling uses --pods-only, independent of Metrics Server. Reports join pod inventory with historical Prometheus measurements.",
+        "This is repository configuration, not evidence that the live scrape targets are healthy."
+      ]
+    }
+  ]
+}
