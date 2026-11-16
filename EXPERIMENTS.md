@@ -264,3 +264,21 @@ bash experiments/run.sh --comparison scaling --scenario scaler-balanced --final-
 # Live run (60s phases; add --final-hold for a 420s final 3:1:1:1 phase to observe 300s HPA scale-down):
 bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced --final-hold
 ```
+
+## Resource summaries & limitations (`utils/monitor_resources.py`)
+
+`utils/monitor_resources.py` samples workload Pod lists (`kubectl get pods`) and Kubernetes Metrics Server Pod metrics (`/apis/metrics.k8s.io/v1beta1/namespaces/<ns>/pods`) every 2 seconds, keeping metrics for all workload Pods (including recently terminated or terminating Pods) so churned measurements are not dropped before summarization.
+
+- **What CPU and memory numbers measure:** `cpu_millicores` is the sum of container CPU usage averages over each Pod's Metrics Server reporting window, and `memory_mib` is the sum of container memory working sets, averaged across **complete simultaneous rounds** in each phase. A round groups per-Pod metric timestamps within `10` seconds of each other, requires consistent CPU windows (`<= 5s` spread), and requires an exact match to the active `Running` Pod set observed near the round (`<= 8s` age).
+- **Incomplete, skewed, or missing observations:** Skewed Pod timestamps (`> 10s` apart) are never combined into a simultaneous total. Rounds missing one or more running Pods are recorded separately as `partial_samples` (and `partial_cpu_millicores` / `partial_memory_mib`, never mixed into total `cpu_millicores` / `memory_mib`). Rounds with churn/window mismatches are counted in `rejected_samples`. Phases with zero complete rounds leave `cpu_millicores` and `memory_mib` blank (`missing`), never zero-filled or interpolated.
+- **Coverage & plots:** `resource-by-ramp.csv` exports `complete_samples`, `partial_samples`, `rejected_samples`, `missing_samples`, `coverage_ratio`, `completeness_status`, and `missing_reasons`. `utils/plot_autoscaler.py` plots `resource-usage.{png,pdf}` with a dedicated resource-coverage bar panel and missing/partial annotations so churn-induced gaps are never presented as unbiased full-phase means. Metrics Server scrapes asynchronously (~15–30s windows), so rapid Pod replacement churn can still yield gaps; those gaps are retained rather than fabricated.
+
+## Proposed low-load TC-on / TC-off path diagnostic (not executed)
+
+To isolate fixed UPF/inter-node path latency from queueing and autoscaling effects without altering the `100` ms all-attempt p90 objective, run a short low-load diagnostic pair (e.g. `1`–`3` UEs at `1`–`2` RPS/UE on a fixed replica count) with `--tc-ms 10` vs. without `--tc-ms`:
+
+```bash
+# Diagnostic only (low load, fixed replicas; compare p50/p90 baseline path delay):
+.venv/bin/python -m utils.fixed_replica_harness --campaign-dir results/diag_tc_off --stage diag --block 1 --run-id tc_off --replicas 6 --node gnb-2 --schedule 3:1:1:1 --rps-per-ue 1 --max-in-flight-per-ue 4
+.venv/bin/python -m utils.fixed_replica_harness --campaign-dir results/diag_tc_on  --stage diag --block 1 --run-id tc_on  --replicas 6 --node gnb-2 --schedule 3:1:1:1 --rps-per-ue 1 --max-in-flight-per-ue 4 --tc-ms 10
+```

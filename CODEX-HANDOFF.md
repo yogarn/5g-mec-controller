@@ -165,3 +165,18 @@ Refactored the controller and experiment harness to follow Kubernetes separation
 3. **Limitations:**
    - Do not push, sync, or run cluster tests while experiments are running on `core`.
    - `24` replicas at `500m` CPU / `256Mi` memory each requires `12000m` CPU and `6144Mi` memory free on `gnb-3`; `check_node_capacity` will fail before traffic if `gnb-3` has less available capacity unless `--max-replicas` is lowered.
+
+## 8. Scaler Capacity Guard & Resource Churn Reporting Fixes
+
+1. **Changes:**
+   - **Effective Pod requests (`experiments/campaign.py`):** Replaced container-only request summing with `_pod_effective_requests(spec)` applied identically to the Deployment template and existing non-terminal Pods on `gnb-3`. Accounts for ordinary containers, sequential + restartable (`restartPolicy: Always`) init containers, Pod-level `spec.resources`, Pod `spec.overhead`, `limits` fallback when `requests` is omitted, and keeps terminating Pods (`deletionTimestamp` set) reserved while ignoring `Succeeded`/`Failed` Pods. Unsupported configurations (`resourceClaims`, container `resources.claims`, unsupported init `restartPolicy`, unsupported `overhead`/`resources` keys) fail clearly with `ValueError`.
+   - **Churn-aware resource sampling & summarization (`utils/monitor_resources.py`):** `sample()` now retains metrics for all workload-prefixed Pods (including recently terminated/terminating Pods). `summarize()` clusters deduplicated Pod metrics into simultaneous rounds (`<= 10s` timestamp skew, `<= 5s` CPU window spread) instead of zipping arbitrary timestamps across Pods. Exports `complete_samples`, `partial_samples`, `rejected_samples`, `missing_samples`, `total_observations`, `coverage_ratio`, `partial_cpu_millicores`, `partial_memory_mib`, `completeness_status`, and `missing_reasons`. Incomplete or missing phases remain blank (`''`), never zero-filled or interpolated.
+   - **Coverage-aware plotting (`utils/plot_autoscaler.py`):** Added `load_resource_coverage`, missing/partial annotations on CPU/RAM panels, and a resource-coverage bar panel in `resource-usage.{png,pdf}`.
+   - **Docs (`EXPERIMENTS.md`):** Documented exact resource summary semantics/limitations and a proposed low-load TC-on/TC-off path diagnostic (not executed; 100 ms objective unchanged).
+2. **Validation:**
+   - `python3 /tmp/audit_scaler_capacity.py`: failed as expected with `RuntimeError: node gnb-3 cannot fit 1 replicas: needs 500m CPU / 256Mi memory, available 0m CPU / 3968Mi memory`.
+   - `python3 -m pytest -q --ignore=utils/test_plot_autoscaler.py --ignore=apps/pedestrian-detection/tests/test_app.py`: all tests passed (including new tests in `experiments/test_campaign.py` and `utils/test_monitor_resources.py`).
+   - `python3 -m py_compile utils/plot_autoscaler.py utils/test_plot_autoscaler.py` and `bash -n experiments/run.sh`: passed.
+3. **Unresolved limitations:**
+   - `utils/test_plot_autoscaler.py` could not be executed locally because `matplotlib` is not installed in `/usr/bin/python3` (only `py_compile` ran locally; run `pytest utils/test_plot_autoscaler.py` in `.venv` after syncing).
+   - Metrics Server scrapes asynchronously (~15–30s windows), so rapid Pod replacement churn can still leave phases with `0` complete simultaneous rounds; those gaps are reported as missing rather than fabricated.
