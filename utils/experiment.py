@@ -184,6 +184,30 @@ def run_fixed_rate_phase(
             raise
 
 
+def probe_registered_service_paths(site_groups, urls, timeout, count=5):
+    """Probe the actual NodePort /health service path from registered lifecycle-owned UEs."""
+    results = {}
+    for group, ues in site_groups:
+        if not ues:
+            continue
+        ue = ues[0]
+        health_url = urls[group].rsplit('/', 1)[0] + '/health'
+        parsed = urlsplit(health_url)
+        samples = [attempt(parsed, 'GET', None, {}, ue['ip'], timeout) for _ in range(count)]
+        durs = sorted(s['duration_ms'] for s in samples if s['success'])
+        results[group] = {
+            'source_address': ue['ip'],
+            'interface': ue.get('iface'),
+            'url': health_url,
+            'samples': samples,
+            'successes': len(durs),
+            'min_ms': durs[0] if durs else None,
+            'median_ms': durs[len(durs) // 2] if durs else None,
+            'max_ms': durs[-1] if durs else None,
+        }
+    return results
+
+
 def parse_phase_durations(text, count, default):
     if text is None:
         if not math.isfinite(default) or default <= 0:
@@ -284,6 +308,11 @@ def run(args):
                 if len(sites) != 3 or tuple(map(len, sites)) != counts:
                     raise RuntimeError('registered UE count differs from requested split')
                 site_groups = tuple((f'gnb-{site}', ues) for site, ues in enumerate(sites, 1))
+                if getattr(args, 'probe_service_path', False):
+                    probes_path = out / 'service-path-probes.json'
+                    existing_probes = json.loads(probes_path.read_text()) if probes_path.exists() else {}
+                    existing_probes[phase['phase']] = probe_registered_service_paths(site_groups, urls, args.timeout)
+                    probes_path.write_text(json.dumps(existing_probes, indent=2) + '\n')
                 selected = [(group, ue['ip'], index)
                             for index, (group, ue) in enumerate(
                                 (group, ue) for group, ues in site_groups for ue in ues)]
@@ -353,6 +382,8 @@ def main(argv=None):
     parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')
     parser.add_argument('--telemetry-url', help='Collector HTTP(S) /observations URL')
     parser.add_argument('--telemetry-token-file', help='File containing the collector bearer token')
+    parser.add_argument('--probe-service-path', action='store_true',
+                        help='probe NodePort /health from one registered UE per active site before phase traffic')
     parser.add_argument('--armed', action='store_true', help='Authorize creation and replacement of UE sessions')
     args = parser.parse_args(argv)
     if args.output_dir is None:

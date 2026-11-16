@@ -29,9 +29,9 @@ from experiments.campaign import (
     workload_identity,
     workload_manifest,
 )
-from utils.cadvisor_resources import export_prometheus_resources, summarize_cadvisor
+from utils.cadvisor_resources import DEFAULT_PROMETHEUS_URL, export_prometheus_resources, summarize_cadvisor
 from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
-from utils.summarize import summarize as summarize_campaign_requests
+from utils.summarize import main as summarize_main
 from utils.traffic_control import POOL_NAME, TrafficDelay
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,21 +96,29 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
             'p90_ms': percentile(vals, 0.90),
         }
 
-    def stats(subset, dur_s):
-        n = len(subset)
+    def stats(subset, dur_s, scheduled=None, started=None, missed=None):
+        completed = len(subset)
         succ = [r for r in subset if r.get('success')]
-        fail = n - len(succ)
+        successful = len(succ)
+        fail = completed - successful
+        denom = scheduled if scheduled is not None else completed
         succ_durs = sorted(r['duration_ms'] for r in succ)
         all_durs = sorted(r['duration_ms'] for r in subset)
-        acc_slo = sum(1 for r in succ if r['duration_ms'] <= slo_ms) / n if n else 0.0
-        acc_500 = sum(1 for r in succ if r['duration_ms'] <= 500.0) / n if n else 0.0
-        acc_300 = sum(1 for r in succ if r['duration_ms'] <= 300.0) / n if n else 0.0
+        acc_slo = sum(1 for r in succ if r['duration_ms'] <= slo_ms) / denom if denom else 0.0
+        acc_500 = sum(1 for r in succ if r['duration_ms'] <= 500.0) / denom if denom else 0.0
+        acc_300 = sum(1 for r in succ if r['duration_ms'] <= 300.0) / denom if denom else 0.0
         return {
-            'offered': n,
-            'completed': len(succ),
+            'scheduled': scheduled,
+            'started': started,
+            'completed': completed,
+            'successful': successful,
             'failures': fail,
-            'error_rate': fail / n if n else 0.0,
-            'rps': len(succ) / dur_s if dur_s > 0 else 0.0,
+            'missed': missed,
+            'error_rate': fail / completed if completed else 0.0,
+            'offered_rps': scheduled / dur_s if (scheduled is not None and dur_s > 0) else None,
+            'started_rps': started / dur_s if (started is not None and dur_s > 0) else None,
+            'completed_rps': completed / dur_s if dur_s > 0 else 0.0,
+            'rps': successful / dur_s if dur_s > 0 else 0.0,
             'slo_ms': float(slo_ms),
             'acc_slo': acc_slo,
             'viol_slo': 1.0 - acc_slo,
@@ -134,9 +142,26 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
             },
         }
 
+    if all(e.get('scheduled') is not None for e in ends):
+        full_scheduled = sum(int(e['scheduled']) for e in ends)
+        full_started = sum(int(e.get('started', e['scheduled'])) for e in ends)
+        full_missed = sum(int(e.get('missed', 0)) for e in ends)
+    else:
+        full_scheduled = len(reqs)
+        full_started = len(reqs)
+        full_missed = 0
+
     steady = [r for r in reqs if r['start_time'] >= t_measure_start]
     steady_dur = max(1.0, t_end - t_measure_start)
     full_dur = max(1.0, t_end - t0)
+    full_stats = stats(reqs, full_dur, scheduled=full_scheduled, started=full_started, missed=full_missed)
+    steady_stats = stats(
+        steady,
+        steady_dur,
+        scheduled=full_scheduled if warmup_s <= 0 else None,
+        started=full_started if warmup_s <= 0 else None,
+        missed=full_missed if warmup_s <= 0 else None,
+    )
     by_site = {
         site: stats([r for r in steady if r.get('group') == site], steady_dur)
         for site in sorted({r.get('group') for r in steady if r.get('group')})
@@ -145,8 +170,8 @@ def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
         'start_time': t0,
         'measure_start_time': t_measure_start,
         'end_time': t_end,
-        'steady': stats(steady, steady_dur),
-        'full': stats(reqs, full_dur),
+        'steady': steady_stats,
+        'full': full_stats,
         'steady_by_site': by_site,
     }
 
@@ -194,42 +219,19 @@ def summarize_resources(res_jsonl, t_measure_start, t_end):
     }
 
 
-def probe_ue_service_path(settings, site_urls, count=5):
-    """Run UE-bound HTTP /health probes over the actual NodePort service path per site."""
-    probe_script = (
-        "import json, sys; from urllib.parse import urlsplit; "
-        "import yaml; from benchmark.client import attempt; "
-        "cfg = json.loads(sys.stdin.read()); "
-        "inv = yaml.safe_load(open(cfg['inventory'])); "
-        "ues = inv.get('ues', inv) if isinstance(inv, dict) else inv; "
-        "by_site = {}; "
-        "[by_site.setdefault(u['group'], u['source_address']) for u in ues if isinstance(u, dict) and 'group' in u]; "
-        "out = {}; "
-        "for site, url in cfg['site_urls'].items(): "
-        "  src = by_site.get(site); "
-        "  hurl = url.rsplit('/', 1)[0] + '/health'; "
-        "  samples = [attempt(urlsplit(hurl), 'GET', None, {}, src, 5.0) for _ in range(cfg['count'])] if src else []; "
-        "  durs = sorted(s['duration_ms'] for s in samples if s['success']); "
-        "  out[site] = {'source_address': src, 'url': hurl, 'samples': samples, "
-        "               'successes': len(durs), 'min_ms': durs[0] if durs else None, "
-        "               'median_ms': durs[len(durs)//2] if durs else None, 'max_ms': durs[-1] if durs else None}; "
-        "print(json.dumps(out))"
-    )
-    payload = json.dumps({
-        'inventory': settings['inventory'],
-        'site_urls': site_urls,
-        'count': int(count),
-    })
-    res = subprocess.run(
-        remote(settings, ['sudo', '-n', '.venv/bin/python', '-c', probe_script]),
-        input=payload, capture_output=True, text=True, check=True,
-    )
-    return json.loads(res.stdout)
+def _default_prometheus_url():
+    cfg_path = ROOT / 'config.yaml'
+    if cfg_path.exists():
+        data = yaml.safe_load(cfg_path.read_text()) or {}
+        if data.get('prometheus_url'):
+            return data['prometheus_url']
+    return DEFAULT_PROMETHEUS_URL
 
 
 def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedule, duration, warmup, tc_ms,
             rps_per_ue=DEFAULT_RPS_PER_UE, max_in_flight_per_ue=DEFAULT_MAX_IN_FLIGHT_PER_UE,
-            workload='face-detection', slo_ms=500.0, probe_service_path=False, plan_only=False):
+            workload='face-detection', slo_ms=500.0, probe_service_path=False, plan_only=False,
+            prometheus_url=None):
     run_dir = campaign_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
 
@@ -282,11 +284,6 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
         (run_dir / 'pods-ready.json').write_text(json.dumps(pods_json, indent=2) + '\n')
 
         site_urls = {site: f'http://{ip}:{nodeport}/detect' for site, ip in settings['site_node_ips'].items()}
-        service_path_probes = None
-        if probe_service_path:
-            service_path_probes = probe_ue_service_path(settings, site_urls)
-            (run_dir / 'service-path-probes.json').write_text(json.dumps(service_path_probes, indent=2) + '\n')
-
         res_file = run_dir / 'resources.jsonl'
         sampler = subprocess.Popen(
             [sys.executable, '-m', 'utils.monitor_resources', 'sample', str(res_file), '--namespace', NAMESPACE, '--app', app_name],
@@ -308,6 +305,8 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
             '--telemetry-token-file', settings['token'],
             '--output-dir', ue_out,
         ]
+        if probe_service_path:
+            ue_cmd.append('--probe-service-path')
         ue_log = run_dir / 'ue-runner.log'
         with ue_log.open('w') as lf:
             subprocess.run(remote(settings, ue_cmd), stdout=lf, stderr=subprocess.STDOUT, check=True)
@@ -327,6 +326,13 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
             raise RuntimeError(f'checksum mismatch for {run_id}: {local_hash} != {remote_hash}')
         (run_dir / 'requests.sha256').write_text(f'{local_hash}  requests.jsonl\n')
 
+        service_path_probes = None
+        if probe_service_path:
+            probes_dest = run_dir / 'service-path-probes.json'
+            with probes_dest.open('wb') as out_f:
+                subprocess.run(remote(settings, ['sudo', '-n', 'cat', f'{ue_out}/service-path-probes.json']), stdout=out_f, check=True)
+            service_path_probes = json.loads(probes_dest.read_text())
+
         # Collect per-pod request logs and cgroup stats
         backend_counts = {}
         cgroup_stats = {}
@@ -344,18 +350,16 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
         (run_dir / 'backend-counts.json').write_text(json.dumps(backend_counts, indent=2) + '\n')
         (run_dir / 'cgroup-stats.json').write_text(json.dumps(cgroup_stats, indent=2) + '\n')
 
-        summarize_campaign_requests(raw_dest, slo_ms=slo_ms)
-        prom_url = settings.get('prometheus_url')
-        cadvisor_summary = None
-        if prom_url:
-            prom_json = export_prometheus_resources(
-                raw_dest, run_dir, prometheus_url=prom_url,
-                namespace=NAMESPACE, pod_prefix=f'{app_name}-',
-            )
-            cadvisor_summary = str(summarize_cadvisor(
-                prom_json, raw_dest, run_dir / 'summary.csv', run_dir,
-                metrics_jsonl_path=res_file,
-            ))
+        summarize_main([str(raw_dest), '--slo-ms', str(slo_ms)])
+        prom_url = prometheus_url or settings.get('prometheus_url') or _default_prometheus_url()
+        prom_json = export_prometheus_resources(
+            raw_dest, run_dir, prometheus_url=prom_url,
+            namespace=NAMESPACE, pod_prefix=f'{app_name}-',
+        )
+        cadvisor_summary = str(summarize_cadvisor(
+            prom_json, raw_dest, run_dir / 'summary.csv', run_dir,
+            metrics_jsonl_path=res_file,
+        ))
 
         req_sum = summarize_requests(raw_dest, warmup, slo_ms=slo_ms)
         res_sum = summarize_resources(res_file, req_sum['measure_start_time'], req_sum['end_time'])
@@ -375,11 +379,12 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
 def append_ledger(csv_path, summary, valid=True, exclusion_reason='', next_decision=''):
     eff = summary['effective']
     st = summary['requests']['steady']
+    full = summary['requests']['full']
     rs = summary['resources']
     fields = [
         'stage', 'run_id', 'block', 'method', 'revision', 'config_path',
-        'start_time', 'end_time', 'offered', 'completed', 'failures',
-        'acc_500ms', 'acc_300ms', 'succ_p50_ms', 'succ_p90_ms', 'succ_p95_ms', 'all_p90_ms',
+        'start_time', 'end_time', 'scheduled', 'started', 'completed', 'successful', 'failures', 'missed',
+        'acc_slo', 'acc_500ms', 'acc_300ms', 'succ_p50_ms', 'succ_p90_ms', 'succ_p95_ms', 'all_p90_ms',
         'rps', 'replicas', 'cpu_mean_m', 'mem_max_mi', 'backend_counts',
         'valid', 'exclusion_reason', 'next_decision',
     ]
@@ -397,9 +402,13 @@ def append_ledger(csv_path, summary, valid=True, exclusion_reason='', next_decis
             'config_path': f"{eff['run_id']}/effective-config.json",
             'start_time': f"{summary['requests']['measure_start_time']:.3f}",
             'end_time': f"{summary['requests']['end_time']:.3f}",
-            'offered': st['offered'],
+            'scheduled': full['scheduled'],
+            'started': full['started'],
             'completed': st['completed'],
+            'successful': st['successful'],
             'failures': st['failures'],
+            'missed': full['missed'],
+            'acc_slo': f"{st['acc_slo']:.4f}",
             'acc_500ms': f"{st['acc_500']:.4f}",
             'acc_300ms': f"{st['acc_300']:.4f}",
             'succ_p50_ms': f"{st['succ_p50_ms']:.2f}" if st['succ_p50_ms'] is not None else '',
@@ -437,6 +446,8 @@ def main(argv=None):
     p.add_argument('--cooldown-after', type=float, default=16.0)
     p.add_argument('--probe-service-path', action='store_true',
                    help='run UE-bound HTTP /health probes over the NodePort service path per site')
+    p.add_argument('--prometheus-url', default=None,
+                   help='Prometheus URL for cAdvisor/throttling export (default: config prometheus_url or config.yaml)')
     p.add_argument('--plan-only', action='store_true',
                    help='write manifest and effective-config.json without cluster access or traffic')
     args = p.parse_args(argv)
@@ -467,7 +478,8 @@ def main(argv=None):
                           args.replicas, args.node, args.schedule, args.duration, args.warmup, args.tc_ms,
                           args.rps_per_ue, args.max_in_flight_per_ue,
                           workload=args.workload, slo_ms=args.slo_ms,
-                          probe_service_path=args.probe_service_path)
+                          probe_service_path=args.probe_service_path,
+                          prometheus_url=args.prometheus_url)
         append_ledger(cdir / 'runs.csv', summary)
         if args.cooldown_after > 0:
             time.sleep(args.cooldown_after)
