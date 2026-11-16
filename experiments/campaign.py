@@ -707,7 +707,7 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None):
     """Persist the exact matched replica budget and manifests used by a method."""
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
@@ -726,10 +726,22 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
                             or internal_target_dec <= Decimal(str(latency_floor_ms))):
         raise ValueError('latency floor requires staircase scaling with native HPA and 0 < floor < internal RT target')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
+    if min_replicas is not None:
+        if type(min_replicas) is not int or min_replicas < 1:
+            raise ValueError('min replicas must be a positive integer')
+        if fixed_replicas is not None:
+            raise ValueError('use min_replicas without fixed_replicas')
     if fixed_replicas is not None:
         if type(fixed_replicas) is not int or fixed_replicas < 1:
             raise ValueError('fixed replicas must be a positive integer')
-        config['min_replicas'] = max_replicas = fixed_replicas
+        effective_min_replicas = max_replicas = fixed_replicas
+    elif min_replicas is not None:
+        effective_min_replicas = min_replicas
+    elif comparison == 'scaling':
+        effective_min_replicas = SCALER_MIN_REPLICAS
+    else:
+        effective_min_replicas = config['min_replicas']
+    config['min_replicas'] = effective_min_replicas
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
         raise ValueError('max replicas must be an integer at least min_replicas')
     if resource_weights is not None:
@@ -748,7 +760,7 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
                       else config.get('scheduler_name', 'mec-placement-scheduler'))
     deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
     if comparison == 'scaling':
-        deployments[0]['spec']['replicas'] = SCALER_MIN_REPLICAS
+        deployments[0]['spec']['replicas'] = effective_min_replicas
         deployments[0]['spec']['template']['spec']['affinity'] = {
             'nodeAffinity': {
                 'requiredDuringSchedulingIgnoredDuringExecution': {
@@ -762,9 +774,8 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
                 }
             }
         }
-        config['min_replicas'] = SCALER_MIN_REPLICAS
-    if fixed_replicas is not None:
-        deployments[0]['spec']['replicas'] = fixed_replicas
+    if fixed_replicas is not None or min_replicas is not None:
+        deployments[0]['spec']['replicas'] = effective_min_replicas
     method_manifest = root / f'{method}-workload.yaml'
     with method_manifest.open('x') as stream:
         yaml.safe_dump_all(documents, stream, sort_keys=False)
@@ -809,9 +820,31 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     return config, config_path, hpa_path
 
 
+def _wait_initial_replicas_ready(app, expected_replicas, method=None, timeout=180):
+    """Wait for deployment rollout and verify at least expected_replicas are ready."""
+    prefix = f'{method}: ' if method else ''
+    try:
+        kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + app, f'--timeout={timeout}s')
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f'{prefix}deployment/{app} did not reach {expected_replicas} ready replicas within {timeout}s'
+        ) from exc
+    deadline = time.monotonic() + timeout
+    while True:
+        dep = get('deployment', app)
+        ready = (dep.get('status') or {}).get('readyReplicas') or 0
+        if ready >= expected_replicas:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f'{prefix}deployment/{app} has {ready}/{expected_replicas} ready replicas after {timeout}s'
+            )
+        time.sleep(1)
+
+
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
                resource_weights=None, locality_weight=None, comparison='full',
-               autoscaler='controller', placement_engine='python', deschedule_interval=None, fixed_replicas=None):
+               autoscaler='controller', placement_engine='python', deschedule_interval=None, fixed_replicas=None, min_replicas=None):
     if placement_engine not in PLACEMENT_ENGINES:
         raise ValueError(f'placement_engine must be one of {PLACEMENT_ENGINES}')
     output = root / method
@@ -821,7 +854,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   comparison, autoscaler, deschedule_interval, fixed_replicas,
                                                   staircase=settings.get('staircase', False),
                                                   latency_floor_ms=settings.get('latency_floor_ms', 0),
-                                                  rt_target_factor=settings.get('rt_target_factor', 1.0))
+                                                  rt_target_factor=settings.get('rt_target_factor', 1.0),
+                                                  min_replicas=min_replicas if min_replicas is not None else settings.get('min_replicas'))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -864,7 +898,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                             time.sleep(1)
                         else:
                             raise RuntimeError('controller did not deploy the workload')
-                kube('-n', NAMESPACE, 'rollout', 'status', 'deployment/' + app, '--timeout=180s')
+                _wait_initial_replicas_ready(app, config['min_replicas'], method=method)
                 service = get('service', app)
                 check_service_routing(service)
                 port = service['spec']['ports'][0]['nodePort']
@@ -1029,6 +1063,8 @@ def main(argv=None):
                         help='staircase only: fixed reference latency in whole milliseconds; 0 keeps raw RT/SLO')
     parser.add_argument('--fixed-replicas', type=int,
                         help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
+    parser.add_argument('--min-replicas', type=int,
+                        help='shared baseline HPA and proposed minimum and initial replica count (default: 1 for scaling, config.yaml otherwise)')
     parser.add_argument('--max-replicas', type=int,
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
     parser.add_argument('--debug', action='store_true',
@@ -1059,6 +1095,10 @@ def main(argv=None):
             parser.error('--fixed-replicas requires --scenario mobility9')
         if args.max_replicas is not None:
             parser.error('use --fixed-replicas without --max-replicas')
+        if args.min_replicas is not None:
+            parser.error('use --min-replicas without --fixed-replicas')
+    if args.min_replicas is not None and args.min_replicas < 1:
+        parser.error('--min-replicas must be a positive integer')
     if args.scenario in SCALER_SCENARIOS and args.comparison not in (None, 'scaling'):
         parser.error('scaling scenarios require --comparison scaling')
     if args.comparison == 'scaling' and args.scenario not in (None, *SCALER_SCENARIOS):
@@ -1182,6 +1222,7 @@ def main(argv=None):
     if args.fixed_replicas is not None:
         max_replicas = args.fixed_replicas
     min_replicas = (args.fixed_replicas if args.fixed_replicas is not None
+                    else args.min_replicas if args.min_replicas is not None
                     else SCALER_MIN_REPLICAS if args.comparison == 'scaling'
                     else controller_config['min_replicas'])
     if args.fixed_replicas is None and max_replicas < min_replicas:
@@ -1278,7 +1319,7 @@ def main(argv=None):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
                             staircase=settings['staircase'], latency_floor_ms=args.latency_floor_ms,
-                            rt_target_factor=args.rt_target_factor)
+                            rt_target_factor=args.rt_target_factor, min_replicas=args.min_replicas)
         if args.latency_floor_ms or metric_unit == 'milliseconds':
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
@@ -1307,6 +1348,7 @@ def main(argv=None):
         root.mkdir(parents=True, exist_ok=False)
         with (root / 'campaign.yaml').open('x') as stream:
             yaml.safe_dump(settings | shared_metadata | {
+                'min_replicas': min_replicas,
                 'max_replicas': max_replicas, 'debug': args.debug,
                 'resource_weights': resource_weights,
                 'locality_weight': locality_weight}, stream)
@@ -1369,7 +1411,8 @@ def main(argv=None):
                 reset(workload)
                 run_method(settings, args.campaign, root, method, delay, slo_ms, max_replicas, args.debug,
                            resource_weights, locality_weight, args.comparison,
-                           args.autoscaler, args.placement_engine, args.deschedule_interval, args.fixed_replicas)
+                           args.autoscaler, args.placement_engine, args.deschedule_interval, args.fixed_replicas,
+                           min_replicas=args.min_replicas)
             command([sys.executable, '-m', 'utils.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
         finally:
             try:

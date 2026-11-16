@@ -299,6 +299,8 @@ def test_run_method_forwards_reporting_slo_to_summarize(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(args, 0, stdout='deployment.apps/mec-placement-face-detection\n', stderr='')
 
     def fake_get(kind, name, namespace=campaign.NAMESPACE):
+        if kind == 'deployment' and namespace == campaign.NAMESPACE:
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30080}]}}
         raise AssertionError(f'unexpected get {kind} {name} {namespace}')

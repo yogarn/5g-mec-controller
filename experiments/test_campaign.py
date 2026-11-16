@@ -454,6 +454,8 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     def fake_get(kind, name, namespace=campaign.NAMESPACE):
         if kind == 'deployment' and name == 'placement-controller' and namespace == 'placement':
             return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+        if kind == 'deployment' and namespace == campaign.NAMESPACE:
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30080}]}}
         raise AssertionError(f'unexpected get {kind} {name} {namespace}')
@@ -660,7 +662,7 @@ def test_staircase_plan_is_balanced_with_matched_bounded_hpas(tmp_path):
     steps = [list(map(int, s.split(':'))) for s in plan['schedule'].split(',')]
     assert [s[0] for s in steps] == [3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3]
     assert all(s[1:] == [s[0] // 3] * 3 for s in steps)
-    assert plan['phase_durations_s'] == [180.0] * 12 + [600.0]
+    assert plan['phase_durations_s'] == [60.0] * 12 + [600.0]
     assert plan['hpa_behavior_profile'] == 'bounded-staircase'
     hpas = [yaml.safe_load((out / f'{m}-hpa.yaml').read_text()) for m in ('baseline', 'proposed')]
     assert hpas[0]['spec']['behavior'] == hpas[1]['spec']['behavior']
@@ -784,6 +786,8 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
         if namespace == 'placement' and name == 'placement-controller':
             raise AssertionError('placement-controller must not be queried in scaling mode')
         if namespace == 'placement' and name == 'prometheus-adapter':
+            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+        if kind == 'deployment' and namespace == campaign.NAMESPACE:
             return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}}
@@ -1024,7 +1028,7 @@ def test_run_method_collects_filtered_events_even_on_failure(tmp_path, monkeypat
         raise AssertionError(f'unexpected kube call: {args}')
 
     monkeypatch.setattr(campaign, 'kube', fake_kube)
-    monkeypatch.setattr(campaign, 'get', lambda *a, **kw: {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}})
+    monkeypatch.setattr(campaign, 'get', lambda *a, **kw: {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}, 'status': {'readyReplicas': 1}})
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'active_telemetry', lambda *a, **kw: True)
