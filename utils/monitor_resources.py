@@ -98,7 +98,7 @@ def sample(output, namespace='services', app='mec-placement-face-detection'):
             time.sleep(2)
 
 
-def summarize(raw, requests, summary_csv, output):
+def summarize(raw, requests, summary_csv, output, write_resource_csv=True):
     samples = [json.loads(line) for line in Path(raw).read_text().splitlines()]
     events = [json.loads(line) for line in Path(requests).read_text().splitlines()]
     starts = {r['phase']: r for r in events if r.get('event') == 'phase_start'}
@@ -184,6 +184,8 @@ def summarize(raw, requests, summary_csv, output):
                                  'ready_count': sum(p['ready'] for p in pods),
                                  'pod_names': ';'.join(p['name'] for p in pods), 'sample_time': last['sample_time'],
                                  'phase_end': end, 'sample_age_seconds': end - last['sample_time']})
+    if not write_resource_csv:
+        return
     with (out / 'resource-by-ramp.csv').open('x', newline='') as stream:
         fields = [
             'phase', 'cpu_millicores', 'memory_mib', 'complete_samples',
@@ -352,11 +354,12 @@ def main():
     p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
     p.add_argument('--app', default='mec-placement-face-detection', help='workload app label and Pod prefix')
     p = sub.add_parser('summarize'); p.add_argument('samples'); p.add_argument('requests'); p.add_argument('summary'); p.add_argument('output')
+    p.add_argument('--skip-resource-csv', action='store_true', help='skip resource-by-ramp.csv when cAdvisor is the primary resource source')
     args = parser.parse_args()
     if args.action == 'sample':
         sample(args.output, args.namespace, args.app)
     else:
-        summarize(args.samples, args.requests, args.summary, args.output)
+        summarize(args.samples, args.requests, args.summary, args.output, write_resource_csv=not args.skip_resource_csv)
 
 
 if __name__ == '__main__':

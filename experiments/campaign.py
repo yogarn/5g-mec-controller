@@ -805,7 +805,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
         kube('-n', NAMESPACE, 'get', 'deployments,pods,hpa', '-o', 'json', stdout=stream)
     transfer(settings, campaign, method, output)
     command([sys.executable, '-m', 'utils.summarize', output / 'requests.jsonl', '--slo-ms', str(slo_ms)])
-    command([sys.executable, '-m', 'utils.monitor_resources', 'summarize', output / 'metrics.jsonl', output / 'requests.jsonl', output / 'summary.csv', output])
+    command([sys.executable, '-m', 'utils.monitor_resources', 'summarize', output / 'metrics.jsonl', output / 'requests.jsonl', output / 'summary.csv', output, '--skip-resource-csv'])
+    command([sys.executable, '-m', 'utils.cadvisor_resources', 'run', output / 'requests.jsonl', output / 'summary.csv', output, '--metrics-jsonl', output / 'metrics.jsonl', '--prometheus-url', config['prometheus_url'], '--namespace', NAMESPACE, '--pod-prefix', app + '-'])
     command([sys.executable, '-m', 'utils.telemetry_history', output / 'requests.jsonl', output, '--prometheus-url', config['prometheus_url']])
 
 
@@ -985,6 +986,12 @@ def main(argv=None):
         'replica_bounds': {'min': min_replicas, 'max': max_replicas},
         'pacing': {'rps_per_ue': float(args.rps_per_ue), 'max_in_flight_per_ue': args.max_in_flight_per_ue},
         'tc_ms': args.tc_ms,
+        'resource_measurement': {
+            'source': 'prometheus-cadvisor',
+            'scrape_interval_seconds': 5,
+            'rate_window_seconds': 30,
+            'metrics_server_hpa_unchanged': True,
+        },
     }
     if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')

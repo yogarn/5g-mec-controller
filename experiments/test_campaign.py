@@ -683,6 +683,12 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
         'proposed': {'type': 'latency_p90_ms', 'target': 100},
     }
     assert plan['tc_ms'] is None
+    assert plan['resource_measurement'] == {
+        'source': 'prometheus-cadvisor',
+        'scrape_interval_seconds': 5,
+        'rate_window_seconds': 30,
+        'metrics_server_hpa_unchanged': True,
+    }
 
 
 def test_scaler_balanced_final_hold_and_overrides(tmp_path):

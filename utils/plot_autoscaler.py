@@ -177,7 +177,7 @@ def load_resource_coverage(root, phases):
             rejected = number(row['rejected_samples'], f'{path}: {phase} rejected_samples', integer=True) if 'rejected_samples' in fields else 0
             missing = number(row['missing_samples'], f'{path}: {phase} missing_samples', integer=True) if 'missing_samples' in fields else 0
             rounds = complete + partial + rejected
-            denom = rounds + missing
+            denom = number(row['expected_samples'], f'{path}: {phase} expected_samples', integer=True) if 'expected_samples' in fields and str(row['expected_samples']).strip() else (rounds + missing)
             if 'coverage_ratio' in fields and str(row['coverage_ratio']).strip():
                 cov_pct = 100.0 * number(row['coverage_ratio'], f'{path}: {phase} coverage_ratio')
             else:
@@ -188,12 +188,17 @@ def load_resource_coverage(root, phases):
                 'partial' if denom > complete else
                 'complete'
             )
+            source = (row.get('resource_source') or '').strip() or 'metrics-server'
+            rate_win = (row.get('rate_window_seconds') or '').strip() or ''
             coverage[method].append({
                 'complete': complete,
                 'rounds': rounds,
                 'missing': missing,
+                'expected': denom,
                 'coverage_pct': cov_pct,
                 'status': status,
+                'source': source,
+                'rate_window_seconds': rate_win,
                 'cpu_quality': (row.get('cpu_quality') or '').strip() or ('exact' if complete > 0 else 'missing'),
             })
     return coverage
@@ -316,8 +321,11 @@ def main():
         ax.legend(handles=handles, frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
         export(fig, "pod-placement")
 
+        sources = sorted({entry['source'] for m in METHODS for entry in resource_coverage[m]})
+        rate_wins = sorted({entry['rate_window_seconds'] for m in METHODS for entry in resource_coverage[m] if entry['rate_window_seconds']})
+        source_note = ', '.join(sources) + (f"; {', '.join(rate_wins)}s CPU rate window" if rate_wins else "")
         fig, axes = plt.subplots(3, 1, figsize=(width, 9), sharex=True, layout="constrained")
-        fig.suptitle("Mean of complete simultaneous resource samples per phase; gaps and coverage show churn/missingness")
+        fig.suptitle(f"Mean workload resources per phase ({source_note}; gaps/annotations show missingness)")
         for ax, key, title, ylabel in zip(axes[:2], ("cpu_millicores", "memory_mib"),
                                           ("CPU usage (~ = approx. overlapping windows)", "RAM working set (point-in-time)"),
                                           ("Total pod CPU (millicores)", "Total pod memory (MiB)")):
@@ -326,12 +334,12 @@ def main():
                 ax.plot(x, ys, linestyle=STYLES[method], marker="o", label=METHOD_LABELS[method])
                 for pos, val, cov_info in zip(x, ys, resource_coverage[method]):
                     is_approx = key == "cpu_millicores" and cov_info.get("cpu_quality", "exact") in ("approximate", "mixed_exact_and_approximate")
+                    denom = cov_info.get('expected') or (cov_info['rounds'] + cov_info['missing'])
                     if math.isnan(val):
-                        tag = f"{METHOD_LABELS[method][0]}:0/{cov_info['rounds']}" if cov_info['rounds'] else f"{METHOD_LABELS[method][0]}:N/A"
+                        tag = f"{METHOD_LABELS[method][0]}:0/{denom}" if denom else f"{METHOD_LABELS[method][0]}:N/A"
                         ax.annotate(tag, (pos, 0), ha="center", va="bottom", fontsize=7,
                                     xytext=(0, 2 if method == "baseline" else 10), textcoords="offset points")
                     elif cov_info['coverage_pct'] < 100.0 or is_approx:
-                        denom = cov_info['rounds'] + cov_info['missing']
                         prefix = "~" if is_approx else ""
                         ax.annotate(f"{prefix}{cov_info['complete']}/{denom}", (pos, val),
                                     ha="center", va="bottom", fontsize=7,
