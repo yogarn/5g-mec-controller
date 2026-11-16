@@ -84,15 +84,15 @@ def test_load_resource_coverage_preserves_missing_and_partial_rounds(tmp_path):
             writer.writeheader()
             writer.writerows(rows)
     cov = load_resource_coverage(tmp_path, ['p1', 'p2'])
-    assert cov['baseline'][0] == {'complete': 3, 'rounds': 3, 'missing': 0, 'expected': 3, 'coverage_pct': 100.0, 'status': 'complete', 'source': 'metrics-server', 'rate_window_seconds': '', 'cpu_quality': 'exact'}
-    assert cov['baseline'][1] == {'complete': 0, 'rounds': 3, 'missing': 0, 'expected': 3, 'coverage_pct': 0.0, 'status': 'incomplete_only', 'source': 'metrics-server', 'rate_window_seconds': '', 'cpu_quality': 'missing'}
-    assert cov['proposed'][0] == {'complete': 1, 'rounds': 2, 'missing': 0, 'expected': 2, 'coverage_pct': 50.0, 'status': 'partial', 'source': 'metrics-server', 'rate_window_seconds': '', 'cpu_quality': 'exact'}
-    assert cov['proposed'][1] == {'complete': 0, 'rounds': 0, 'missing': 0, 'expected': 0, 'coverage_pct': 0.0, 'status': 'missing', 'source': 'metrics-server', 'rate_window_seconds': '', 'cpu_quality': 'missing'}
+    assert cov['baseline'][0] == {'complete': 3, 'rounds': 3, 'missing': 0, 'expected': 3, 'coverage_pct': 100.0, 'status': 'complete', 'source': 'metrics-server', 'rate_window_seconds': '', 'freshness_seconds': '', 'cpu_quality': 'exact'}
+    assert cov['baseline'][1] == {'complete': 0, 'rounds': 3, 'missing': 0, 'expected': 3, 'coverage_pct': 0.0, 'status': 'incomplete_only', 'source': 'metrics-server', 'rate_window_seconds': '', 'freshness_seconds': '', 'cpu_quality': 'missing'}
+    assert cov['proposed'][0] == {'complete': 1, 'rounds': 2, 'missing': 0, 'expected': 2, 'coverage_pct': 50.0, 'status': 'partial', 'source': 'metrics-server', 'rate_window_seconds': '', 'freshness_seconds': '', 'cpu_quality': 'exact'}
+    assert cov['proposed'][1] == {'complete': 0, 'rounds': 0, 'missing': 0, 'expected': 0, 'coverage_pct': 0.0, 'status': 'missing', 'source': 'metrics-server', 'rate_window_seconds': '', 'freshness_seconds': '', 'cpu_quality': 'missing'}
 
 
 def test_load_resource_coverage_supports_cadvisor_source_and_rate_window(tmp_path):
     fieldnames = [
-        'phase', 'resource_source', 'rate_window_seconds', 'cpu_millicores', 'memory_mib',
+        'phase', 'resource_source', 'rate_window_seconds', 'freshness_seconds', 'cpu_millicores', 'memory_mib',
         'complete_samples', 'expected_samples', 'coverage_ratio', 'completeness_status', 'cpu_quality',
     ]
     for method, val in (('baseline', '12'), ('proposed', '6')):
@@ -102,13 +102,15 @@ def test_load_resource_coverage_supports_cadvisor_source_and_rate_window(tmp_pat
             writer = csv.DictWriter(stream, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerow({
-                'phase': 'p1', 'resource_source': 'prometheus-cadvisor', 'rate_window_seconds': '30',
+                'phase': 'p1', 'resource_source': 'prometheus-cadvisor', 'rate_window_seconds': '45',
+                'freshness_seconds': '25',
                 'cpu_millicores': '250', 'memory_mib': '128', 'complete_samples': val,
                 'expected_samples': '12', 'coverage_ratio': f'{int(val) / 12:.4f}',
-                'completeness_status': 'complete' if val == '12' else 'partial', 'cpu_quality': 'rate_30s',
+                'completeness_status': 'complete' if val == '12' else 'partial', 'cpu_quality': 'rate_45s',
             })
     cov = load_resource_coverage(tmp_path, ['p1'])
     assert cov['baseline'][0]['source'] == 'prometheus-cadvisor'
-    assert cov['baseline'][0]['rate_window_seconds'] == '30'
+    assert cov['baseline'][0]['rate_window_seconds'] == '45'
+    assert cov['baseline'][0]['freshness_seconds'] == '25'
     assert cov['baseline'][0]['expected'] == 12
     assert cov['proposed'][0]['coverage_pct'] == 50.0

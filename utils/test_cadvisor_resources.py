@@ -7,6 +7,7 @@ import pytest
 from utils.cadvisor_resources import (
     RESOURCE_SOURCE,
     export_prometheus_resources,
+    main as cadvisor_main,
     summarize_cadvisor,
 )
 
@@ -39,12 +40,13 @@ def _setup_phases(tmp_path, phases, pod_timeline):
     return requests, summary, metrics_jsonl
 
 
-def _write_prom_json(path, cpu_series, mem_series, up_series=None, rate_window=30.0, step=5.0, query_errors=None):
+def _write_prom_json(path, cpu_series, mem_series, up_series=None, rate_window=45.0, freshness=25.0, step=5.0, query_errors=None):
     payload = {
         'source': RESOURCE_SOURCE,
         'pod_prefix': 'app-',
         'step_seconds': step,
         'rate_window_seconds': rate_window,
+        'freshness_seconds': freshness,
         'scrape_interval_seconds': step,
         'results': {
             'cpu_seconds_total': cpu_series,
@@ -83,7 +85,8 @@ def test_constant_cpu_growth_and_memory_mib_conversion(tmp_path):
     summarize_cadvisor(prom, requests, summary, out, metrics_jsonl_path=metrics_jsonl)
     row, = list(csv.DictReader((out / 'resource-by-ramp.csv').open()))
     assert row['resource_source'] == 'prometheus-cadvisor'
-    assert row['rate_window_seconds'] == '30'
+    assert row['rate_window_seconds'] == '45'
+    assert row['freshness_seconds'] == '25'
     assert float(row['cpu_millicores']) == pytest.approx(250.0)
     assert float(row['memory_mib']) == pytest.approx(128.0)
     assert row['complete_samples'] == '12'
@@ -159,11 +162,11 @@ def test_stale_data_insufficient_samples_and_memory_without_cpu(tmp_path):
     start = 1700000000.0
     requests, summary, metrics_jsonl = _setup_phases(
         tmp_path,
-        [('phase_01', start, start + 30)],
-        [(start + t, ['app-a']) for t in range(0, 35, 5)],
+        [('phase_01', start, start + 40)],
+        [(start + t, ['app-a']) for t in range(0, 45, 5)],
     )
     # CPU has only 1 sample at t=5 -> insufficient_samples_for_rate; later steps are stale/missing.
-    # Memory is fresh at t=5, 10, 15 (64MiB) and stale at t=20, 25, 30 (>15s after t=15? Wait: 30-15=15, t=35 would be stale; let's stop mem at t=10 so t=30 is stale!).
+    # Memory is fresh at t=5..35 (within 25s of t=10) and stale at t=40 (30s > 25s).
     prom = _write_prom_json(
         tmp_path / 'resources-prometheus.json',
         [_series('app-a', 'app', [(start + 5, 1.0)])],
@@ -178,7 +181,7 @@ def test_stale_data_insufficient_samples_and_memory_without_cpu(tmp_path):
     assert int(row['insufficient_rate_samples']) >= 1
     assert 'insufficient_samples_for_rate' in row['missing_reasons'].split(';')
     assert float(row['memory_mib']) == pytest.approx(64.0)
-    assert row['memory_complete_samples'] == '5'  # t=5,10,15,20,25 (within 15s of t=10); t=30 is stale
+    assert row['memory_complete_samples'] == '7'  # t=5..35 within 25s of t=10; t=40 is stale
     assert row['memory_completeness_status'] == 'partial'
 
 
@@ -250,7 +253,8 @@ def test_offline_export_saves_metadata_and_records_errors_without_fallback(tmp_p
     saved = json.loads(prom_json.read_text())
     assert saved['source'] == 'prometheus-cadvisor'
     assert saved['step_seconds'] == 5.0
-    assert saved['rate_window_seconds'] == 30.0
+    assert saved['rate_window_seconds'] == 45.0
+    assert saved['freshness_seconds'] == 25.0
     assert saved['source_metadata']['fallback_used'] is False
     assert set(saved['query_errors']) == {'cpu_seconds_total', 'memory_working_set_bytes', 'scrape_up'}
 
@@ -278,7 +282,7 @@ def test_export_uses_raw_range_vector_query_for_exact_scrape_timestamps(tmp_path
     assert saved['query_type'] == 'raw_range_vector_at_end'
     assert len(seen_urls) == 3
     assert all('/api/v1/query?' in u and '/api/v1/query_range' not in u for u in seen_urls)
-    assert saved['queries']['cpu_seconds_total'].endswith('[100s]')
+    assert saved['queries']['cpu_seconds_total'].endswith('[115s]')
 
 
 def test_restarted_container_never_inherits_old_instance_cpu_rate(tmp_path):
@@ -307,3 +311,97 @@ def test_restarted_container_never_inherits_old_instance_cpu_rate(tmp_path):
     assert float(row['cpu_millicores']) == pytest.approx((250 * 3 + 500 * 2) / 5)
     assert row['memory_complete_samples'] == '6'
     assert float(row['memory_mib']) == pytest.approx((64 * 3 + 128 * 3) / 6)
+
+
+def test_staggered_10_to_20s_source_samples_with_stable_nine_pod_inventory(tmp_path):
+    start = 1700000000.0
+    pods = [f'app-{i}' for i in range(1, 10)]
+    requests, summary, metrics_jsonl = _setup_phases(
+        tmp_path,
+        [('phase_01', start, start + 60)],
+        [(start + t, pods) for t in range(-45, 65, 5)],
+    )
+    # Staggered 10-20s cAdvisor timestamps across 9 pods (e.g. 16s spacing with per-pod offsets).
+    # With freshness=25s and rate_window=45s, all 12 phase steps have complete CPU & RAM.
+    cpu_series = []
+    mem_series = []
+    for idx, pod in enumerate(pods):
+        offset = (idx * 3) % 16
+        ts_list = [start + t for t in range(-48 + offset, 65, 16)]
+        cpu_series.append(_series(pod, 'app', [(ts, (ts - (start - 48)) * 0.1) for ts in ts_list]))
+        mem_series.append(_series(pod, 'app', [(ts, 64 * 1024**2) for ts in ts_list]))
+    prom = _write_prom_json(tmp_path / 'resources-prometheus.json', cpu_series, mem_series)
+    out = tmp_path / 'out'
+    summarize_cadvisor(prom, requests, summary, out, metrics_jsonl_path=metrics_jsonl)
+    row, = list(csv.DictReader((out / 'resource-by-ramp.csv').open()))
+    assert row['rate_window_seconds'] == '45'
+    assert row['freshness_seconds'] == '25'
+    assert row['memory_complete_samples'] == '12'
+    assert row['cpu_complete_samples'] == '12'
+    assert row['completeness_status'] == 'complete'
+    assert float(row['cpu_millicores']) == pytest.approx(900.0)
+    assert float(row['memory_mib']) == pytest.approx(9 * 64.0)
+
+
+def test_staggered_pod_replacement_preserves_incomplete_cpu_after_replacement(tmp_path):
+    start = 1700000000.0
+    stable_pods = [f'app-{i}' for i in range(1, 9)]
+    # app-9 replaced by app-10 at t=25.
+    timeline = [
+        (start + t, stable_pods + (['app-9'] if t < 25 else ['app-10']))
+        for t in range(-45, 65, 5)
+    ]
+    requests, summary, metrics_jsonl = _setup_phases(tmp_path, [('phase_01', start, start + 60)], timeline)
+    cpu_series = []
+    mem_series = []
+    for idx, pod in enumerate(stable_pods):
+        ts_list = [start + t for t in range(-45 + (idx % 3) * 4, 65, 15)]
+        cpu_series.append(_series(pod, 'app', [(ts, (ts - (start - 45)) * 0.1) for ts in ts_list]))
+        mem_series.append(_series(pod, 'app', [(ts, 50 * 1024**2) for ts in ts_list]))
+    # app-9 stops at t=20; app-10 gets first sample at t=30 (1 sample -> insufficient at t=30, 35, 40)
+    # and second sample at t=45 (rate valid from t=45..60). Memory is valid at t=25? Wait: app-10 mem starts at t=25!
+    cpu_series.append(_series('app-9', 'app', [(start + t, (t + 45) * 0.1) for t in range(-45, 25, 15)]))
+    cpu_series.append(_series('app-10', 'app', [(start + 30, 0.0), (start + 45, 3.0), (start + 60, 6.0)]))
+    mem_series.append(_series('app-9', 'app', [(start + t, 50 * 1024**2) for t in range(-45, 25, 15)]))
+    mem_series.append(_series('app-10', 'app', [(start + t, 50 * 1024**2) for t in (25, 40, 55)]))
+    prom = _write_prom_json(tmp_path / 'resources-prometheus.json', cpu_series, mem_series)
+    out = tmp_path / 'out'
+    summarize_cadvisor(prom, requests, summary, out, metrics_jsonl_path=metrics_jsonl)
+    row, = list(csv.DictReader((out / 'resource-by-ramp.csv').open()))
+    assert row['memory_complete_samples'] == '12'
+    assert int(row['cpu_complete_samples']) < 12
+    assert int(row['insufficient_rate_samples']) > 0
+    assert row['cpu_completeness_status'] == 'partial'
+
+
+def test_offline_reprocessing_with_cpu_window_override_and_historical_file_compat(tmp_path):
+    start = 1700000000.0
+    requests, summary, metrics_jsonl = _setup_phases(
+        tmp_path, [('phase_01', start, start + 60)], [(start + t, ['app-a']) for t in range(-45, 65, 5)]
+    )
+    # Historical file written with 30s rate_window and NO freshness_seconds field.
+    hist_path = tmp_path / 'resources-prometheus.json'
+    hist_path.write_text(json.dumps({
+        'source': RESOURCE_SOURCE,
+        'pod_prefix': 'app-',
+        'step_seconds': 5.0,
+        'rate_window_seconds': 30.0,
+        'scrape_interval_seconds': 5.0,
+        'results': {
+            'cpu_seconds_total': [_series('app-a', 'app', [(start + t, (t + 45) * 0.2) for t in range(-45, 65, 20)])],
+            'memory_working_set_bytes': [_series('app-a', 'app', [(start + t, 100 * 1024**2) for t in range(-45, 65, 20)])],
+            'scrape_up': [],
+        },
+        'query_errors': {},
+    }))
+    reprocessed_dir = tmp_path / 'reprocessed'
+    cadvisor_main([
+        'summarize', str(hist_path), str(requests), str(summary), str(reprocessed_dir),
+        '--metrics-jsonl', str(metrics_jsonl), '--rate-window', '45', '--freshness', '25',
+    ])
+    row, = list(csv.DictReader((reprocessed_dir / 'resource-by-ramp.csv').open()))
+    assert row['rate_window_seconds'] == '45'
+    assert row['freshness_seconds'] == '25'
+    assert row['cpu_complete_samples'] == '12'
+    assert row['memory_complete_samples'] == '12'
+    assert float(row['cpu_millicores']) == pytest.approx(200.0)

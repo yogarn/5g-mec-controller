@@ -286,12 +286,12 @@ New experiment runs use **Prometheus/cAdvisor** as the primary source for `resou
   curl -fsS 'http://10.34.211.140:30990/api/v1/query?query=up{job="kubelet-cadvisor"}'
   curl -fsS 'http://10.34.211.140:30990/api/v1/query?query=count(container_cpu_usage_seconds_total{job="kubelet-cadvisor",namespace="services"})'
   ```
-- **One-line analysis / reprocessing into a new output directory (never overwrite historical results):**
+- **One-line offline reprocessing from saved `resources-prometheus.json` into a new output directory (no Prometheus connection needed; never overwrite historical results):**
   ```bash
-  .venv/bin/python -m utils.cadvisor_resources run results/RUN/baseline/requests.jsonl results/RUN/baseline/summary.csv results/RUN_reprocessed/baseline --metrics-jsonl results/RUN/baseline/metrics.jsonl --prometheus-url http://10.34.211.140:30990 --pod-prefix mec-placement-face-detection-
+  .venv/bin/python -m utils.cadvisor_resources summarize results/RUN/baseline/resources-prometheus.json results/RUN/baseline/requests.jsonl results/RUN/baseline/summary.csv results/RUN_reprocessed/baseline --metrics-jsonl results/RUN/baseline/metrics.jsonl --rate-window 45 --freshness 25
   ```
 - **Live checks still required before live evaluation:** verify `nodes/proxy` `/metrics/cadvisor` access on all 4 nodes (`core-5g`, `gnb1`, `gnb-2`, `gnb-3`), confirm container-instance identity labels (`id`/`container_id`), verify `up{job="kubelet-cadvisor"} == 1` with no duplicate targets, and check 5s scrape CPU/memory overhead and 24h retention.
-- **Boundary effects:** CPU rates use a `30s` rate window per container instance (with counter-reset handling), which can span phase transitions; newly started containers require `>= 2` samples in the window before a rate exists. Overlapping rate averages do not measure exact phase CPU energy. If cAdvisor data is missing, `resource-by-ramp.csv` leaves totals blank rather than substituting Metrics Server.
+- **Boundary effects:** CPU rates use a `45s` rate window (with `25s` freshness to accommodate 10–20s cAdvisor container timestamp spacing while keeping Prometheus scrape and Pod lifecycle polling at `5s`) per container instance (with counter-reset handling). A `45s` CPU rate window can cross the `60s` phase boundaries, and newly started containers require `>= 2` samples in the window before a rate exists. Resource summaries are averages of valid observations, not exact phase CPU consumption. If cAdvisor data is missing, `resource-by-ramp.csv` leaves totals blank rather than substituting Metrics Server.
 
 ## Proposed low-load TC-on / TC-off path diagnostic (not executed)
 

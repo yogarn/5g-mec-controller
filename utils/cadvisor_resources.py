@@ -5,9 +5,10 @@ Uses kubelet /metrics/cadvisor series scraped by Prometheus:
 - container_cpu_usage_seconds_total (per-container-instance rate with reset handling)
 - container_memory_working_set_bytes (point-in-time working set)
 
-Boundary note: a 30-second CPU rate window can span phase transitions, and new
-containers require at least two samples in the window before a rate exists.
-Overlapping rate averages must not be treated as exact phase CPU energy.
+Boundary note: a 45-second CPU rate window can span 60-second phase transitions,
+and new containers require at least two samples in the window before a rate
+exists. Overlapping rate averages are averages of valid observations, not exact
+phase CPU energy or consumption.
 """
 import argparse
 import csv
@@ -22,8 +23,8 @@ from urllib.request import urlopen
 RESOURCE_SOURCE = 'prometheus-cadvisor'
 DEFAULT_PROMETHEUS_URL = 'http://10.34.211.140:30990'
 DEFAULT_SCRAPE_INTERVAL_S = 5.0
-DEFAULT_RATE_WINDOW_S = 30.0
-DEFAULT_FRESHNESS_S = 15.0
+DEFAULT_RATE_WINDOW_S = 45.0
+DEFAULT_FRESHNESS_S = 25.0
 POD_LOOKUP_MAX_AGE_S = 8.0
 
 
@@ -59,6 +60,7 @@ def export_prometheus_resources(
     step_s=DEFAULT_SCRAPE_INTERVAL_S,
     rate_window_s=DEFAULT_RATE_WINDOW_S,
     scrape_interval_s=DEFAULT_SCRAPE_INTERVAL_S,
+    freshness_s=DEFAULT_FRESHNESS_S,
     fetch_fn=None,
     strict=False,
 ):
@@ -101,6 +103,7 @@ def export_prometheus_resources(
         'pod_prefix': pod_prefix,
         'step_seconds': float(step_s),
         'rate_window_seconds': float(rate_window_s),
+        'freshness_seconds': float(freshness_s),
         'scrape_interval_seconds': float(scrape_interval_s),
         'start': lower,
         'end': upper,
@@ -199,7 +202,8 @@ def summarize_cadvisor(
     summary_csv_path,
     output_dir,
     metrics_jsonl_path=None,
-    freshness_s=DEFAULT_FRESHNESS_S,
+    rate_window_s=None,
+    freshness_s=None,
 ):
     """Summarize exported Prometheus/cAdvisor series aligned to UE phases."""
     prom = json.loads(Path(prometheus_json_path).read_text())
@@ -211,7 +215,8 @@ def summarize_cadvisor(
 
     pod_prefix = prom.get('pod_prefix', 'mec-placement-face-detection-')
     step_s = float(prom.get('step_seconds', DEFAULT_SCRAPE_INTERVAL_S))
-    rate_window_s = float(prom.get('rate_window_seconds', DEFAULT_RATE_WINDOW_S))
+    rate_window_s = float(rate_window_s if rate_window_s is not None else prom.get('rate_window_seconds', DEFAULT_RATE_WINDOW_S))
+    freshness_s = float(freshness_s if freshness_s is not None else prom.get('freshness_seconds', DEFAULT_FRESHNESS_S))
     scrape_interval_s = float(prom.get('scrape_interval_seconds', DEFAULT_SCRAPE_INTERVAL_S))
     results = prom.get('results') or {}
     query_errors = prom.get('query_errors') or {}
@@ -222,7 +227,7 @@ def summarize_cadvisor(
     running_at = _load_running_lookup(metrics_jsonl_path)
 
     fields = [
-        'phase', 'resource_source', 'rate_window_seconds', 'scrape_interval_seconds',
+        'phase', 'resource_source', 'rate_window_seconds', 'freshness_seconds', 'scrape_interval_seconds',
         'cpu_millicores', 'memory_mib', 'complete_samples',
         'memory_complete_samples', 'cpu_complete_samples',
         'partial_samples', 'memory_partial_samples', 'cpu_partial_samples',
@@ -382,6 +387,7 @@ def summarize_cadvisor(
                 'phase': phase,
                 'resource_source': RESOURCE_SOURCE,
                 'rate_window_seconds': f'{rate_window_s:g}',
+                'freshness_seconds': f'{freshness_s:g}',
                 'scrape_interval_seconds': f'{scrape_interval_s:g}',
                 'cpu_millicores': sum(v[0] for v in cpu_full) / len(cpu_full) if cpu_full else '',
                 'memory_mib': sum(v[0] for v in mem_full) / len(mem_full) if mem_full else '',
@@ -411,8 +417,9 @@ def summarize_cadvisor(
                 'first_metric_time': min(all_times) if all_times else '',
                 'last_metric_time': max(all_times) if all_times else '',
                 'description': (
-                    f'Prometheus/cAdvisor ({rate_window_s:g}s CPU rate window, {scrape_interval_s:g}s scrape); '
-                    'CPU rate windows can span phase boundaries; incomplete/missing steps excluded'
+                    f'Prometheus/cAdvisor ({rate_window_s:g}s CPU rate window, {freshness_s:g}s freshness, '
+                    f'{scrape_interval_s:g}s scrape); CPU rate windows can cross phase boundaries; '
+                    'averages of valid observations, not exact phase CPU consumption'
                 ),
             })
             print(
@@ -434,6 +441,7 @@ def main(argv=None):
     exp.add_argument('--pod-prefix', default='mec-placement-face-detection-')
     exp.add_argument('--step', type=float, default=DEFAULT_SCRAPE_INTERVAL_S)
     exp.add_argument('--rate-window', type=float, default=DEFAULT_RATE_WINDOW_S)
+    exp.add_argument('--freshness', type=float, default=DEFAULT_FRESHNESS_S)
     exp.add_argument('--scrape-interval', type=float, default=DEFAULT_SCRAPE_INTERVAL_S)
     exp.add_argument('--strict', action='store_true')
 
@@ -443,7 +451,8 @@ def main(argv=None):
     sum_p.add_argument('summary', type=Path)
     sum_p.add_argument('output', type=Path)
     sum_p.add_argument('--metrics-jsonl', type=Path, default=None)
-    sum_p.add_argument('--freshness', type=float, default=DEFAULT_FRESHNESS_S)
+    sum_p.add_argument('--rate-window', type=float, default=None, help='override CPU rate window in seconds (default: file metadata or 45s)')
+    sum_p.add_argument('--freshness', type=float, default=None, help='override freshness window in seconds (default: file metadata or 25s)')
 
     run_p = sub.add_parser('run', help='Export from Prometheus and summarize into resource-by-ramp.csv')
     run_p.add_argument('requests', type=Path)
@@ -464,23 +473,25 @@ def main(argv=None):
             args.requests, args.output, prometheus_url=args.prometheus_url,
             namespace=args.namespace, pod_prefix=args.pod_prefix,
             step_s=args.step, rate_window_s=args.rate_window,
-            scrape_interval_s=args.scrape_interval, strict=args.strict,
+            scrape_interval_s=args.scrape_interval, freshness_s=args.freshness, strict=args.strict,
         )
     elif args.action == 'summarize':
         summarize_cadvisor(
             args.prometheus_json, args.requests, args.summary, args.output,
-            metrics_jsonl_path=args.metrics_jsonl, freshness_s=args.freshness,
+            metrics_jsonl_path=args.metrics_jsonl, rate_window_s=args.rate_window,
+            freshness_s=args.freshness,
         )
     else:
         prom_json = export_prometheus_resources(
             args.requests, args.output, prometheus_url=args.prometheus_url,
             namespace=args.namespace, pod_prefix=args.pod_prefix,
             step_s=args.step, rate_window_s=args.rate_window,
-            scrape_interval_s=args.scrape_interval,
+            scrape_interval_s=args.scrape_interval, freshness_s=args.freshness,
         )
         summarize_cadvisor(
             prom_json, args.requests, args.summary, args.output,
-            metrics_jsonl_path=args.metrics_jsonl, freshness_s=args.freshness,
+            metrics_jsonl_path=args.metrics_jsonl, rate_window_s=args.rate_window,
+            freshness_s=args.freshness,
         )
 
 

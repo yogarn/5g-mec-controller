@@ -686,7 +686,8 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert plan['resource_measurement'] == {
         'source': 'prometheus-cadvisor',
         'scrape_interval_seconds': 5,
-        'rate_window_seconds': 30,
+        'rate_window_seconds': 45,
+        'freshness_seconds': 25,
         'metrics_server_hpa_unchanged': True,
     }
 

@@ -190,6 +190,7 @@ def load_resource_coverage(root, phases):
             )
             source = (row.get('resource_source') or '').strip() or 'metrics-server'
             rate_win = (row.get('rate_window_seconds') or '').strip() or ''
+            freshness = (row.get('freshness_seconds') or '').strip() or ''
             coverage[method].append({
                 'complete': complete,
                 'rounds': rounds,
@@ -199,6 +200,7 @@ def load_resource_coverage(root, phases):
                 'status': status,
                 'source': source,
                 'rate_window_seconds': rate_win,
+                'freshness_seconds': freshness,
                 'cpu_quality': (row.get('cpu_quality') or '').strip() or ('exact' if complete > 0 else 'missing'),
             })
     return coverage
@@ -323,7 +325,13 @@ def main():
 
         sources = sorted({entry['source'] for m in METHODS for entry in resource_coverage[m]})
         rate_wins = sorted({entry['rate_window_seconds'] for m in METHODS for entry in resource_coverage[m] if entry['rate_window_seconds']})
-        source_note = ', '.join(sources) + (f"; {', '.join(rate_wins)}s CPU rate window" if rate_wins else "")
+        freshnesses = sorted({entry['freshness_seconds'] for m in METHODS for entry in resource_coverage[m] if entry.get('freshness_seconds')})
+        details = []
+        if rate_wins:
+            details.append(f"{', '.join(rate_wins)}s CPU rate window")
+        if freshnesses:
+            details.append(f"{', '.join(freshnesses)}s freshness")
+        source_note = ', '.join(sources) + (f"; {'; '.join(details)}" if details else "")
         fig, axes = plt.subplots(3, 1, figsize=(width, 9), sharex=True, layout="constrained")
         fig.suptitle(f"Mean workload resources per phase ({source_note}; gaps/annotations show missingness)")
         for ax, key, title, ylabel in zip(axes[:2], ("cpu_millicores", "memory_mib"),
