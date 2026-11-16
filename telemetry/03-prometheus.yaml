@@ -18,7 +18,7 @@ rules:
       - endpoints
       - pods
     verbs: ["get", "list", "watch"]
-  - nonResourceURLs: ["/metrics"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -516,6 +516,43 @@ data:
         scrape_interval: 15s
         static_configs:
           - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
+
+      # Scrape kubelet /metrics/cadvisor on eligible experiment nodes via API server proxy.
+      # Uses the in-cluster ServiceAccount CA and bearer token (ClusterRole nodes/proxy).
+      # Cardinality filter keeps only workload container CPU/RAM series in namespace="services"
+      # and drops empty (pod-cgroup aggregate) and pause ("POD") containers to avoid double-counting.
+      - job_name: 'kubelet-cadvisor'
+        scrape_interval: 5s
+        scrape_timeout: 4s
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (core-5g|gnb1|gnb-2|gnb-3)
+            action: keep
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: (container_cpu_usage_seconds_total|container_memory_working_set_bytes)
+            action: keep
+          - source_labels: [namespace]
+            regex: services
+            action: keep
+          - source_labels: [container]
+            regex: (|POD)
+            action: drop
 ---
 apiVersion: apps/v1
 kind: Deployment
