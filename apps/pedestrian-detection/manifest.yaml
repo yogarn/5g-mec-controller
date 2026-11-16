@@ -1,5 +1,3 @@
-# Preview only. Resource allocations are starting values, not calibrated capacity.
-# Replace the local-only image with an immutable digest after validation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,7 +40,7 @@ spec:
                 - core-5g
       containers:
       - name: pedestrian-detection
-        image: 10.34.211.140:30500/pedestrian-detection@sha256:478371df0a763f4f60b670f9eb800ca8da285667aa6b9b39b00b54c3a3dbae82
+        image: 10.34.211.140:30500/pedestrian-detection@sha256:44878a87af1976556d975a1748ffc730300570a98e6e692c42db6f346afe8abc
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
