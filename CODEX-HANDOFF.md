@@ -219,3 +219,9 @@ Refactored the controller and experiment harness to follow Kubernetes separation
 - Added `--long-run` for `--scenario mobility9`: seven 120s phases per method, 28 minutes of traffic per pair. Records `long_run` and effective phase durations in plan/campaign metadata; defaults remain 60s without the flag.
 - Mutually exclusive with `--phase-duration`; rejected outside mobility9. Retains the normal HPA and descheduler timers, replica budget, TC and request pacing. Existing plots summarize whole phases; separate first/second-minute analysis is not added.
 - Validation: `python3 -m pytest -q experiments/test_campaign.py` — 95 passed; `bash -n experiments/run.sh` and `git diff --check` passed. No live traffic or deployment changes.
+
+## 11. Short Rebuild and Scaler Commands
+
+- `bash experiments/run.sh rebuild`: build pedestrian image with a unique tag, smoke-test the real loaded model and port-5001 health/readiness endpoints, push to the local registry, and pin the published digest in both workload manifests. Shares the campaign lock; does not deploy or start traffic.
+- `bash experiments/run.sh ramp scaler_02`: scaler-balanced preset with 120s phases, final hold, TC 10ms, SLO 150ms, 5 RPS/UE and max 8 in flight. Existing campaign options may override defaults. Uses the original RT-ratio HPA; does not implement the scale-down proposal.
+- Rebuild tests cover smoke/digest failures preserving manifests, active campaign locking, dry-run behavior, published digest pinning and shell dispatch. No image build or experiment was run while preparing these commands.
