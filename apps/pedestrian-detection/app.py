@@ -1,6 +1,9 @@
 """HTTP image detection compatible with the existing UE multipart requests."""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import json
 import os
+import threading
 import time
 import warnings
 
@@ -8,20 +11,115 @@ from flask import Flask, jsonify, request
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 
-def create_app(detector=None):
+class HealthState:
+    """Thread-safe model and inference-worker health state."""
+
+    def __init__(self, hang_timeout_s=30.0):
+        self._lock = threading.Lock()
+        self.ready = False
+        self.failed = False
+        self.error = None
+        self.model_sha256 = None
+        self.input_size = None
+        self.inference_started_at = None
+        self.hang_timeout_s = float(hang_timeout_s)
+
+    def mark_ready(self, model_sha256, input_size):
+        with self._lock:
+            self.ready = True
+            self.failed = False
+            self.error = None
+            self.model_sha256 = model_sha256
+            self.input_size = input_size
+
+    def mark_failed(self, error):
+        with self._lock:
+            self.ready = False
+            self.failed = True
+            self.error = str(error)
+
+    def begin_inference(self):
+        with self._lock:
+            self.inference_started_at = time.monotonic()
+
+    def end_inference(self):
+        with self._lock:
+            self.inference_started_at = None
+
+    def status(self, check_hang=True):
+        with self._lock:
+            if self.failed:
+                return 503, {'status': 'error', 'error': self.error or 'worker failed'}
+            if not self.ready:
+                return 503, {'status': 'starting'}
+            if check_hang and self.inference_started_at is not None:
+                elapsed = time.monotonic() - self.inference_started_at
+                if elapsed > self.hang_timeout_s:
+                    return 503, {'status': 'hung', 'elapsed_seconds': round(elapsed, 3)}
+            return 200, {'status': 'ok', 'model_sha256': self.model_sha256, 'input_size': self.input_size}
+
+
+def start_health_server(state, host='0.0.0.0', port=5001):
+    """Run a dedicated health HTTP listener independent of the Gunicorn inference queue."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ('/ready', '/health'):
+                code, payload = state.status(check_hang=True)
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = json.dumps(payload).encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer((host, int(port)), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True, name='health-listener')
+    thread.start()
+    return server
+
+
+def create_app(detector=None, health_port=None):
+    state = HealthState(hang_timeout_s=float(os.getenv('HEALTH_INFERENCE_HANG_SECONDS', '30')))
+    if health_port is None:
+        env_port = os.getenv('HEALTH_PORT', '').strip()
+        if env_port:
+            health_port = int(env_port)
+    health_server = start_health_server(state, port=health_port) if health_port is not None else None
+
     if detector is None:
         from detector import Detector
-        detector = Detector(os.getenv('MODEL_PATH', '/app/models/yolo11n-320.onnx'),
-                            threads=int(os.getenv('ORT_THREADS', '1')),
-                            confidence=float(os.getenv('CONFIDENCE', '.25')),
-                            iou=float(os.getenv('NMS_IOU', '.45')))
+        try:
+            detector = Detector(os.getenv('MODEL_PATH', '/app/models/yolo11n-320.onnx'),
+                                threads=int(os.getenv('ORT_THREADS', '1')),
+                                confidence=float(os.getenv('CONFIDENCE', '.25')),
+                                iou=float(os.getenv('NMS_IOU', '.45')))
+        except Exception as exc:
+            state.mark_failed(exc)
+            raise
+    state.mark_ready(detector.model_sha256, detector.size)
+
+    inference_lock = threading.Lock()
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024
+    app.extensions['health_state'] = state
+    app.extensions['health_server'] = health_server
 
     @app.get('/health')
     def health():
-        return jsonify(status='ok', model_sha256=detector.model_sha256,
-                       input_size=detector.size)
+        code, payload = state.status(check_hang=True)
+        return jsonify(payload), code
+
+    @app.get('/ready')
+    def ready():
+        code, payload = state.status(check_hang=True)
+        return jsonify(payload), code
 
     @app.post('/detect')
     def detect():
@@ -38,7 +136,15 @@ def create_app(detector=None):
         except (UnidentifiedImageError, OSError, ValueError,
                 Image.DecompressionBombError, Image.DecompressionBombWarning):
             return jsonify(error='could not decode image'), 400
-        boxes = detector.predict(image)
+        with inference_lock:
+            state.begin_inference()
+            try:
+                boxes = detector.predict(image)
+            except Exception as exc:
+                state.mark_failed(exc)
+                raise
+            finally:
+                state.end_inference()
         return jsonify(person_count=len(boxes), persons=boxes,
                        processing_ms=(time.perf_counter() - started) * 1000,
                        model_sha256=detector.model_sha256, input_size=detector.size)

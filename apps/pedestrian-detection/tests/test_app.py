@@ -66,3 +66,129 @@ def test_runtime_and_http_contract_with_real_onnx_session(tmp_path):
 def test_bad_export_shape_fails_instead_of_silent_detections():
     with pytest.raises(ValueError, match='COCO output'):
         person_boxes(np.zeros((1, 300, 6)), (640, 480), (1, 1, 0, 0))
+
+
+def test_health_listener_stays_responsive_while_detect_is_blocked():
+    import json
+    import threading
+    from urllib.request import urlopen
+    from werkzeug.serving import make_server
+    from app import HealthState
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingDetector:
+        model_sha256 = 'deadbeef'
+        size = 320
+
+        def predict(self, _image):
+            entered.set()
+            assert release.wait(timeout=5)
+            return []
+
+    flask_app = create_app(BlockingDetector(), health_port=0)
+    health_server = flask_app.extensions['health_server']
+    health_port = health_server.server_address[1]
+    api_server = make_server('127.0.0.1', 0, flask_app, threaded=False)
+    api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
+    api_thread.start()
+    try:
+        # Send /detect on the single-threaded API server; it blocks inside predict().
+        boundary = 'testboundary'
+        img_bytes = payload()['image'][0].read()
+        body = (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="road.jpg"\r\n'
+            f'Content-Type: image/jpeg\r\n\r\n'
+        ).encode() + img_bytes + f'\r\n--{boundary}--\r\n'.encode()
+        detect_result = {}
+
+        def call_detect():
+            from urllib.request import Request
+            req = Request(
+                f'http://127.0.0.1:{api_server.server_port}/detect',
+                data=body,
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+                method='POST',
+            )
+            with urlopen(req, timeout=5) as resp:
+                detect_result['status'] = resp.status
+
+        t = threading.Thread(target=call_detect, daemon=True)
+        t.start()
+        assert entered.wait(timeout=3)
+
+        # Health listener on dedicated port responds immediately while /detect is blocked.
+        with urlopen(f'http://127.0.0.1:{health_port}/health', timeout=1) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read())['status'] == 'ok'
+        with urlopen(f'http://127.0.0.1:{health_port}/ready', timeout=1) as resp:
+            assert resp.status == 200
+
+        release.set()
+        t.join(timeout=3)
+        assert detect_result['status'] == 200
+    finally:
+        release.set()
+        api_server.shutdown()
+        api_server.server_close()
+        health_server.shutdown()
+        health_server.server_close()
+
+
+def test_health_reflects_startup_hang_and_worker_failure(monkeypatch, tmp_path):
+    from app import HealthState
+
+    state = HealthState(hang_timeout_s=0.05)
+    code, body = state.status(check_hang=True)
+    assert code == 503 and body['status'] == 'starting'
+
+    state.mark_ready('abc', 320)
+    assert state.status(check_hang=True)[0] == 200
+
+    state.begin_inference()
+    import time
+    time.sleep(0.08)
+    code, body = state.status(check_hang=True)
+    assert code == 503 and body['status'] == 'hung'
+    state.end_inference()
+
+    # Verify HTTP /health and /ready both return 503 when watchdog expires on live listener.
+    from urllib.error import HTTPError
+    from urllib.request import urlopen
+    hung_app = create_app(type('D', (), {'model_sha256': 'abc', 'size': 320, 'predict': lambda self, img: []})(), health_port=0)
+    hung_server = hung_app.extensions['health_server']
+    hung_port = hung_server.server_address[1]
+    try:
+        hung_state = hung_app.extensions['health_state']
+        hung_state.hang_timeout_s = 0.02
+        hung_state.begin_inference()
+        time.sleep(0.05)
+        for path in ('/health', '/ready'):
+            with pytest.raises(HTTPError) as exc:
+                urlopen(f'http://127.0.0.1:{hung_port}{path}', timeout=1)
+            assert exc.value.code == 503
+        hung_state.end_inference()
+    finally:
+        hung_server.shutdown()
+        hung_server.server_close()
+
+    class FailingDetector:
+        model_sha256 = 'abc'
+        size = 320
+
+        def predict(self, _image):
+            raise RuntimeError('ort failure')
+
+    app = create_app(FailingDetector())
+    app.config['TESTING'] = True
+    client = app.test_client()
+    assert client.get('/health').status_code == 200
+    with pytest.raises(RuntimeError, match='ort failure'):
+        client.post('/detect', data=payload())
+    assert client.get('/health').status_code == 503
+    assert client.get('/ready').status_code == 503
+
+    monkeypatch.setenv('MODEL_PATH', str(tmp_path / 'missing.onnx'))
+    with pytest.raises(Exception):
+        create_app()

@@ -41,15 +41,19 @@ spec:
           env:
             - name: ORT_THREADS
               value: "1"
+            - name: HEALTH_PORT
+              value: "5001"
           startupProbe:
             httpGet:
-              path: /health
-              port: 5000
+              path: /ready
+              port: health
             periodSeconds: 2
             failureThreshold: 60
           ports:
             - name: http
               containerPort: 5000
+            - name: health
+              containerPort: 5001
           resources:
             requests:
               cpu: 500m
@@ -59,14 +63,14 @@ spec:
               memory: 2Gi
           readinessProbe:
             httpGet:
-              path: /health
-              port: 5000
+              path: /ready
+              port: health
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 5000
+              port: health
             initialDelaySeconds: 10
             periodSeconds: 10
 ---
