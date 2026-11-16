@@ -494,3 +494,25 @@ Example commands:
 # Live ramp experiment opting into min-replicas=2 via run.sh forwarding:
 bash experiments/run.sh ramp scaler_floor_min2_01 --rt-target-factor 1.0 --min-replicas 2
 ```
+
+
+## Per-request instrumentation, throttling, provenance, and scale-down controls
+
+- **Per-request server timings (`pedestrian-detection`):** `/detect` returns
+  `request_id`, `server_pod`, `server_node`, `processing_ms`, `body_read_ms`,
+  `decode_ms`, `lock_wait_ms`, and `inference_ms`, recorded by
+  `benchmark/client.py` after client latency measurement completes (nulls on
+  errors or non-JSON bodies). **Limitation:** time spent before the Flask
+  handler is entered (TCP accept and Gunicorn pre-handler socket queueing) is
+  not visible from inside the app.
+- **CPU throttling and node CPU:** `telemetry/03-prometheus.yaml` retains
+  `container_cpu_cfs_throttled_periods_total`, `container_cpu_cfs_periods_total`,
+  and `container_cpu_cfs_throttled_seconds_total`, and `utils/cadvisor_resources.py`
+  exports raw series plus per-phase aggregate `throttled_period_ratio` (missing
+  data left blank, never zero).
+- **Scale-down and method order:** `--scale-down-stabilization-seconds`,
+  `--scale-down-pods`, and `--scale-down-period-seconds` apply identically to
+  both HPAs; `--method-order` (`baseline-first`, `proposed-first`, `random`)
+  controls execution order. Both and provenance (`core_git`, `ue_git`,
+  `kubernetes_server_version`, `kube_proxy_mode`, `workload_image`,
+  `method_order`) are recorded in `plan.yaml` and `campaign.yaml`.
