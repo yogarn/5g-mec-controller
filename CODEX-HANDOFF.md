@@ -180,3 +180,17 @@ Refactored the controller and experiment harness to follow Kubernetes separation
 3. **Unresolved limitations:**
    - `utils/test_plot_autoscaler.py` could not be executed locally because `matplotlib` is not installed in `/usr/bin/python3` (only `py_compile` ran locally; run `pytest utils/test_plot_autoscaler.py` in `.venv` after syncing).
    - Metrics Server scrapes asynchronously (~15–30s windows), so rapid Pod replacement churn can still leave phases with `0` complete simultaneous rounds; those gaps are reported as missing rather than fabricated.
+
+## 9. Prometheus/cAdvisor Resource Monitoring
+
+1. **Changes:**
+   - **`telemetry/03-prometheus.yaml`:** Added `kubelet-cadvisor` 5s scrape job (`scrape_timeout: 4s`) using Kubernetes API server `nodes/proxy` (`/api/v1/nodes/<node>/proxy/metrics/cadvisor`), ServiceAccount CA + token, eligible-node filter (`core-5g|gnb1|gnb-2|gnb-3`), and explicit `metric_relabel_configs` keeping only `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` for `namespace="services"` while dropping `container=""` (pod-cgroup aggregates) and `container="POD"` (pause containers). Added `"/metrics/cadvisor"` to `ClusterRole` `nonResourceURLs`. Metrics Server and native CPU HPA are unchanged.
+   - **`utils/cadvisor_resources.py`:** Exports raw Prometheus range queries (`resources-prometheus.json` with queries, timestamps, step, rate window, units, and `fallback_used: false`) and summarizes per-container-instance CPU rates (`30s` window, counter-reset handling, `>= 2` samples required) and working-set memory (`MiB`) independently against `metrics.jsonl` Pod lifecycle observations, without zero-filling, interpolating, or substituting Metrics Server.
+   - **`experiments/campaign.py`, `utils/monitor_resources.py`, `utils/plot_autoscaler.py`:** New runs keep `monitor_resources sample` for Pod placement (`pods-by-ramp.csv`) and lifecycle (`metrics.jsonl`), pass `--skip-resource-csv` to `monitor_resources summarize`, and generate `resource-by-ramp.csv` via `utils.cadvisor_resources run`. `plot_autoscaler.py` displays the resource source, CPU rate window, sample counts, and missingness while preserving legacy Metrics Server CSV compatibility.
+2. **Validation:**
+   - `python3 -m pytest -q --ignore=utils/test_plot_autoscaler.py --ignore=apps/pedestrian-detection/tests/test_app.py`: `237 passed, 23 subtests passed` (including 7 new synthetic tests in `utils/test_cadvisor_resources.py`).
+   - `python3 -m py_compile utils/plot_autoscaler.py utils/test_plot_autoscaler.py`, `bash -n experiments/run.sh`, and YAML validation of `telemetry/03-prometheus.yaml`: passed.
+3. **Deployment assumptions & unresolved live checks:**
+   - Assumes K3s API server `nodes/proxy` routes `/api/v1/nodes/<node>/proxy/metrics/cadvisor` with ServiceAccount auth and exposes `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` with `container` and `id`/`container_id` labels.
+   - Requires live verification after applying `telemetry/03-prometheus.yaml`: endpoint access, metric/label names, `up{job="kubelet-cadvisor"} == 1`, absence of duplicate targets, 5s scrape overhead, and 24h TSDB retention.
+   - `utils/test_plot_autoscaler.py` was only `py_compile`-checked locally (`matplotlib` is not installed in `/usr/bin/python3`).

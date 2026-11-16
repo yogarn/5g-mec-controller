@@ -273,6 +273,26 @@ bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balance
 - **Incomplete, skewed, or missing observations:** Skewed Pod timestamps (`> 10s` apart) are never combined into a simultaneous total. Rounds missing one or more running Pods are recorded separately as `partial_samples` (and `partial_cpu_millicores` / `partial_memory_mib`, never mixed into total `cpu_millicores` / `memory_mib`). Rounds with churn/window mismatches are counted in `rejected_samples`. Phases with zero complete rounds leave `cpu_millicores` and `memory_mib` blank (`missing`), never zero-filled or interpolated.
 - **Coverage & plots:** `resource-by-ramp.csv` exports `complete_samples`, `partial_samples`, `rejected_samples`, `missing_samples`, `round_completeness_ratio` (complete among observed rounds), `availability_ratio` (non-empty metric observations over total valid + error observations), `coverage_ratio`, `completeness_status`, and `missing_reasons`. Rounds whose Pod membership changes across their `[min_t, max_t]` interval are rejected (`pod_membership_changed_within_round`). `utils/plot_autoscaler.py` plots `resource-usage.{png,pdf}` with a dedicated resource-coverage bar panel and missing/partial annotations so churn-induced gaps are never presented as unbiased full-phase means. Metrics Server scrapes asynchronously (~15–30s windows), so rapid Pod replacement churn can still yield gaps; those gaps are retained rather than fabricated.
 
+## Prometheus/cAdvisor resource monitoring (`utils/cadvisor_resources.py`)
+
+New experiment runs use **Prometheus/cAdvisor** as the primary source for `resource-by-ramp.csv` and `resource-usage.{png,pdf}`, while **Metrics Server remains unchanged for native CPU HPA** (`autoscaler/hpa-baseline.yaml`). Application Pods require no sidecars or manifest changes: cAdvisor is exposed per node by kubelet (`/metrics/cadvisor`) and scraped by `placement-prometheus` via the Kubernetes API server proxy (`nodes/proxy` RBAC, ServiceAccount TLS + bearer token) every `5s` (`scrape_timeout: 4s`) with explicit cardinality filtering (`container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` only, `namespace="services"`, `container!=""` and `container!="POD"`).
+
+- **Deploy / reload Prometheus config (once after syncing):**
+  ```bash
+  kubectl apply -f telemetry/03-prometheus.yaml && kubectl -n placement rollout status deployment/placement-prometheus --timeout=120s
+  ```
+- **Verify metric availability on the live cluster:**
+  ```bash
+  curl -fsS 'http://10.34.211.140:30990/api/v1/query?query=up{job="kubelet-cadvisor"}'
+  curl -fsS 'http://10.34.211.140:30990/api/v1/query?query=count(container_cpu_usage_seconds_total{job="kubelet-cadvisor",namespace="services"})'
+  ```
+- **One-line analysis / reprocessing into a new output directory (never overwrite historical results):**
+  ```bash
+  .venv/bin/python -m utils.cadvisor_resources run results/RUN/baseline/requests.jsonl results/RUN/baseline/summary.csv results/RUN_reprocessed/baseline --metrics-jsonl results/RUN/baseline/metrics.jsonl --prometheus-url http://10.34.211.140:30990 --pod-prefix mec-placement-face-detection-
+  ```
+- **Live checks still required before live evaluation:** verify `nodes/proxy` `/metrics/cadvisor` access on all 4 nodes (`core-5g`, `gnb1`, `gnb-2`, `gnb-3`), confirm container-instance identity labels (`id`/`container_id`), verify `up{job="kubelet-cadvisor"} == 1` with no duplicate targets, and check 5s scrape CPU/memory overhead and 24h retention.
+- **Boundary effects:** CPU rates use a `30s` rate window per container instance (with counter-reset handling), which can span phase transitions; newly started containers require `>= 2` samples in the window before a rate exists. Overlapping rate averages do not measure exact phase CPU energy. If cAdvisor data is missing, `resource-by-ramp.csv` leaves totals blank rather than substituting Metrics Server.
+
 ## Proposed low-load TC-on / TC-off path diagnostic (not executed)
 
 To isolate fixed UPF/inter-node path latency from queueing and autoscaling effects without altering the `100` ms all-attempt p90 objective, run a short low-load diagnostic pair (e.g. `1`–`3` UEs at `1`–`2` RPS/UE on a fixed replica count) with `--tc-ms 10` vs. without `--tc-ms`:
