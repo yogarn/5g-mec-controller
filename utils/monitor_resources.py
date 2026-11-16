@@ -126,7 +126,7 @@ def summarize(raw, requests, summary_csv, output):
         mid_t = 0.5 * (min_t + max_t)
         round_pods = frozenset(item[1] for item in round_entries)
         candidates = []
-        for probe_t in (mid_t, max_t, min_t):
+        for probe_t in (min_t, mid_t, max_t):
             cand = running_at(probe_t)
             if cand is not None and cand not in candidates:
                 candidates.append(cand)
@@ -137,9 +137,11 @@ def summarize(raw, requests, summary_csv, output):
                     candidates.append(cand)
         if not candidates:
             return 'rejected', 'no_pod_inventory_near_metric'
-        if any(cand and round_pods == cand for cand in candidates):
-            return 'complete', None
+        if len(set(candidates)) > 1:
+            return 'rejected', 'pod_membership_changed_within_round'
         ref = candidates[0]
+        if ref and round_pods == ref:
+            return 'complete', None
         if ref and round_pods < ref:
             return 'partial', 'missing_pod_metrics'
         return 'rejected', 'pod_set_churn_mismatch'
@@ -170,8 +172,10 @@ def summarize(raw, requests, summary_csv, output):
     with (out / 'resource-by-ramp.csv').open('x', newline='') as stream:
         fields = [
             'phase', 'cpu_millicores', 'memory_mib', 'complete_samples',
-            'partial_samples', 'rejected_samples', 'missing_samples', 'total_observations',
-            'coverage_ratio', 'partial_cpu_millicores', 'partial_memory_mib',
+            'partial_samples', 'rejected_samples', 'missing_samples',
+            'total_observations', 'empty_observations', 'error_observations',
+            'round_completeness_ratio', 'availability_ratio', 'coverage_ratio',
+            'partial_cpu_millicores', 'partial_memory_mib',
             'completeness_status', 'missing_reasons',
             'first_metric_time', 'last_metric_time', 'description',
         ]
@@ -227,13 +231,26 @@ def summarize(raw, requests, summary_csv, output):
 
             phase_obs = [s for s in valid if start <= s['sample_time'] <= end]
             phase_errors = [s for s in samples if 'error' in s and start <= s['sample_time'] <= end]
+            empty_observations = sum(1 for obs in phase_obs if not obs['metrics'])
+            error_observations = len(phase_errors)
+            total_attempts = len(phase_obs) + error_observations
+            with_metrics = len(phase_obs) - empty_observations
+            if empty_observations:
+                reasons.add('empty_observations')
+            if error_observations:
+                reasons.add('sampler_errors')
             total_rounds = len(rounds)
-            missing_samples = 0
-            if total_rounds == 0:
+            missing_samples = empty_observations + error_observations
+            if total_rounds == 0 and missing_samples == 0:
                 missing_samples = 1
-                reasons.add('sampler_errors' if (phase_errors and not phase_obs) else 'no_metrics_in_phase')
-            coverage_ratio = len(complete_vals) / total_rounds if total_rounds > 0 else 0.0
-            if complete_vals and not partial_vals and not rejected_samples:
+                reasons.add('no_metrics_in_phase')
+            elif total_rounds == 0:
+                reasons.add('no_metrics_in_phase')
+            round_completeness_ratio = len(complete_vals) / total_rounds if total_rounds > 0 else 0.0
+            availability_ratio = with_metrics / total_attempts if total_attempts > 0 else 0.0
+            coverage_denom = total_rounds + missing_samples
+            coverage_ratio = len(complete_vals) / coverage_denom if coverage_denom > 0 else 0.0
+            if complete_vals and not partial_vals and not rejected_samples and missing_samples == 0:
                 status = 'complete'
             elif complete_vals:
                 status = 'partial'
@@ -250,7 +267,11 @@ def summarize(raw, requests, summary_csv, output):
                 'partial_samples': len(partial_vals),
                 'rejected_samples': rejected_samples,
                 'missing_samples': missing_samples,
-                'total_observations': len(phase_obs),
+                'total_observations': total_attempts,
+                'empty_observations': empty_observations,
+                'error_observations': error_observations,
+                'round_completeness_ratio': f'{round_completeness_ratio:.4f}',
+                'availability_ratio': f'{availability_ratio:.4f}',
                 'coverage_ratio': f'{coverage_ratio:.4f}',
                 'partial_cpu_millicores': sum(v[0] for v in partial_vals) / len(partial_vals) if partial_vals else '',
                 'partial_memory_mib': sum(v[1] for v in partial_vals) / len(partial_vals) if partial_vals else '',
@@ -258,9 +279,9 @@ def summarize(raw, requests, summary_csv, output):
                 'missing_reasons': ';'.join(sorted(reasons)),
                 'first_metric_time': min((v[2] for v in complete_vals), default=''),
                 'last_metric_time': max((v[3] for v in complete_vals), default=''),
-                'description': 'mean of complete simultaneous Metrics Server pod samples (<=10s skew); CPU windows may overlap phases; incomplete/churned rounds excluded',
+                'description': 'mean of complete simultaneous Metrics Server pod samples (<=10s skew, stable pod membership); CPU windows may overlap phases; incomplete/churned/missing intervals excluded',
             })
-            print(f'{phase}: resource samples={len(complete_vals)} (partial={len(partial_vals)}, rejected={rejected_samples}, status={status})')
+            print(f'{phase}: resource samples={len(complete_vals)} (partial={len(partial_vals)}, rejected={rejected_samples}, missing={missing_samples}, status={status})')
 
 
 def main():

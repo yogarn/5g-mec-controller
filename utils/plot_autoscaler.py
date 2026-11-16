@@ -175,20 +175,23 @@ def load_resource_coverage(root, phases):
             complete = number(row['complete_samples'], f'{path}: {phase} complete_samples', integer=True) if 'complete_samples' in fields else (0 if optional_number(row['cpu_millicores'], 'cpu_millicores') != optional_number(row['cpu_millicores'], 'cpu_millicores') else 1)
             partial = number(row['partial_samples'], f'{path}: {phase} partial_samples', integer=True) if 'partial_samples' in fields else 0
             rejected = number(row['rejected_samples'], f'{path}: {phase} rejected_samples', integer=True) if 'rejected_samples' in fields else 0
+            missing = number(row['missing_samples'], f'{path}: {phase} missing_samples', integer=True) if 'missing_samples' in fields else 0
             rounds = complete + partial + rejected
+            denom = rounds + missing
             if 'coverage_ratio' in fields and str(row['coverage_ratio']).strip():
                 cov_pct = 100.0 * number(row['coverage_ratio'], f'{path}: {phase} coverage_ratio')
             else:
-                cov_pct = 100.0 * complete / rounds if rounds > 0 else 0.0
+                cov_pct = 100.0 * complete / denom if denom > 0 else 0.0
             status = (row.get('completeness_status') or '').strip() or (
-                'missing' if complete == 0 and rounds == 0 else
+                'missing' if complete == 0 and denom == 0 else
                 'incomplete_only' if complete == 0 else
-                'partial' if rounds > complete else
+                'partial' if denom > complete else
                 'complete'
             )
             coverage[method].append({
                 'complete': complete,
                 'rounds': rounds,
+                'missing': missing,
                 'coverage_pct': cov_pct,
                 'status': status,
             })
@@ -324,8 +327,9 @@ def main():
                         tag = f"{METHOD_LABELS[method][0]}:0/{cov_info['rounds']}" if cov_info['rounds'] else f"{METHOD_LABELS[method][0]}:N/A"
                         ax.annotate(tag, (pos, 0), ha="center", va="bottom", fontsize=7,
                                     xytext=(0, 2 if method == "baseline" else 10), textcoords="offset points")
-                    elif cov_info['rounds'] > cov_info['complete']:
-                        ax.annotate(f"{cov_info['complete']}/{cov_info['rounds']}", (pos, val),
+                    elif cov_info['coverage_pct'] < 100.0:
+                        denom = cov_info['rounds'] + cov_info['missing']
+                        ax.annotate(f"{cov_info['complete']}/{denom}", (pos, val),
                                     ha="center", va="bottom", fontsize=7,
                                     xytext=(0, 4), textcoords="offset points")
             ax.set(ylabel=ylabel, title=title, ylim=(0, None))

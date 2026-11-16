@@ -266,4 +266,58 @@ def test_mismatched_cpu_windows_rejected_and_zero_metrics_phase_is_missing(tmp_p
     assert p2['missing_samples'] == '1'
     assert p2['cpu_millicores'] == ''
     assert p2['completeness_status'] == 'missing'
-    assert p2['missing_reasons'] == 'no_metrics_in_phase'
+    assert p2['missing_reasons'] == 'empty_observations;no_metrics_in_phase'
+
+
+def test_missing_intervals_and_errors_counted_in_availability_and_coverage(tmp_path):
+    start = 1700000000
+    requests, summary = _write_single_phase(tmp_path, start=start, duration=60)
+    pod = {'name': 'a', 'node': 'gnb-3', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    metric = {'timestamp': ts(5), 'window': '15s',
+              'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '1024Ki'}}]}
+    samples = [{'sample_time': start + 5, 'pods': [pod], 'metrics': {'a': metric}}]
+    samples += [{'sample_time': start + t, 'pods': [pod], 'metrics': {}} for t in (10, 20, 30, 40, 50, 59)]
+    samples += [{'sample_time': start + 25, 'error': 'metrics API unavailable'}]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        row, = list(csv.DictReader(stream))
+    assert row['complete_samples'] == '1'
+    assert row['missing_samples'] == '7'
+    assert row['empty_observations'] == '6'
+    assert row['error_observations'] == '1'
+    assert row['total_observations'] == '8'
+    assert float(row['round_completeness_ratio']) == 1.0
+    assert float(row['availability_ratio']) == 0.125
+    assert float(row['coverage_ratio']) == 0.125
+    assert row['completeness_status'] == 'partial'
+    assert row['missing_reasons'] == 'empty_observations;sampler_errors'
+
+
+def test_pod_membership_change_within_round_is_rejected(tmp_path):
+    start = 1700000000
+    requests, summary = _write_single_phase(tmp_path, start=start, duration=60)
+    pod_a = {'name': 'a', 'node': 'gnb-3', 'phase': 'Running', 'ready': True}
+    pod_b = {'name': 'b', 'node': 'gnb-3', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    m = lambda offset: {'timestamp': ts(offset), 'window': '15s',
+                        'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '1024Ki'}}]}
+    samples = [
+        {'sample_time': start + 10, 'pods': [pod_a], 'metrics': {'a': m(10)}},
+        {'sample_time': start + 15, 'pods': [pod_a, pod_b], 'metrics': {}},
+        {'sample_time': start + 18, 'pods': [pod_b], 'metrics': {'b': m(18)}},
+    ]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        row, = list(csv.DictReader(stream))
+    assert row['complete_samples'] == '0'
+    assert row['rejected_samples'] == '1'
+    assert row['cpu_millicores'] == ''
+    assert row['memory_mib'] == ''
+    assert row['completeness_status'] == 'incomplete_only'
+    assert float(row['coverage_ratio']) == 0.0
+    assert 'pod_membership_changed_within_round' in row['missing_reasons'].split(';')

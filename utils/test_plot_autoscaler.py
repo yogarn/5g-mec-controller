@@ -84,7 +84,7 @@ def test_load_resource_coverage_preserves_missing_and_partial_rounds(tmp_path):
             writer.writeheader()
             writer.writerows(rows)
     cov = load_resource_coverage(tmp_path, ['p1', 'p2'])
-    assert cov['baseline'][0] == {'complete': 3, 'rounds': 3, 'coverage_pct': 100.0, 'status': 'complete'}
-    assert cov['baseline'][1] == {'complete': 0, 'rounds': 3, 'coverage_pct': 0.0, 'status': 'incomplete_only'}
-    assert cov['proposed'][0] == {'complete': 1, 'rounds': 2, 'coverage_pct': 50.0, 'status': 'partial'}
-    assert cov['proposed'][1] == {'complete': 0, 'rounds': 0, 'coverage_pct': 0.0, 'status': 'missing'}
+    assert cov['baseline'][0] == {'complete': 3, 'rounds': 3, 'missing': 0, 'coverage_pct': 100.0, 'status': 'complete'}
+    assert cov['baseline'][1] == {'complete': 0, 'rounds': 3, 'missing': 0, 'coverage_pct': 0.0, 'status': 'incomplete_only'}
+    assert cov['proposed'][0] == {'complete': 1, 'rounds': 2, 'missing': 0, 'coverage_pct': 50.0, 'status': 'partial'}
+    assert cov['proposed'][1] == {'complete': 0, 'rounds': 0, 'missing': 0, 'coverage_pct': 0.0, 'status': 'missing'}
