@@ -67,16 +67,18 @@ def export_prometheus_resources(
     lower = min(float(x['start_time']) for x in starts.values()) - float(rate_window_s) - float(step_s)
     upper = max(float(x['end_time']) for x in ends.values()) + float(step_s)
     queries = build_queries(namespace=namespace, pod_prefix=pod_prefix)
+    span_s = max(1, int(math.ceil(upper - lower)))
+    range_queries = {key: f'{query}[{span_s}s]' for key, query in queries.items()}
     fetcher = fetch_fn or _fetch_json
     results = {}
     query_errors = {}
     base = prometheus_url.rstrip('/')
-    for key, query in queries.items():
-        url = base + '/api/v1/query_range?' + urlencode({
+    for key, query in range_queries.items():
+        # Querying /api/v1/query with a range selector returns exact raw TSDB
+        # scrape timestamps rather than query_range step-repeated lookback values.
+        url = base + '/api/v1/query?' + urlencode({
             'query': query,
-            'start': lower,
-            'end': upper,
-            'step': step_s,
+            'time': upper,
         })
         try:
             data = fetcher(url)
@@ -93,6 +95,7 @@ def export_prometheus_resources(
     out.mkdir(parents=True, exist_ok=True)
     payload = {
         'source': RESOURCE_SOURCE,
+        'query_type': 'raw_range_vector_at_end',
         'prometheus_url': prometheus_url,
         'namespace': namespace,
         'pod_prefix': pod_prefix,
@@ -105,7 +108,7 @@ def export_prometheus_resources(
             'cpu': 'millicores (rate from cumulative CPU seconds)',
             'memory': 'MiB (from container_memory_working_set_bytes)',
         },
-        'queries': queries,
+        'queries': range_queries,
         'results': results,
         'query_errors': query_errors,
         'source_metadata': {
@@ -286,17 +289,33 @@ def summarize_cadvisor(
                 if not running_pods:
                     continue
 
-                # Memory: pick freshest container instance per (pod, container) to avoid double-counting restarts.
+                # Select the current container instance per (pod, container) before validating
+                # samples so a restarted container never falls back to the old instance's rate.
+                def _current_instances(series_dict, container_of):
+                    selected = {}
+                    for ckey, samples in series_dict.items():
+                        pod, cname = container_of[ckey]
+                        if pod not in running_pods:
+                            continue
+                        latest_ts = None
+                        for ts, _ in samples:
+                            if ts <= t_eval:
+                                latest_ts = ts
+                            else:
+                                break
+                        if latest_ts is None:
+                            continue
+                        rank = (latest_ts, samples[0][0])
+                        prev = selected.get((pod, cname))
+                        if prev is None or rank > prev[0]:
+                            selected[(pod, cname)] = (rank, samples)
+                    return {key: item[1] for key, item in selected.items()}
+
                 best_mem = {}
-                for ckey, samples in mem_series.items():
-                    pod, cname = mem_container_of[ckey]
-                    if pod not in running_pods:
-                        continue
+                for (pod, cname), samples in _current_instances(mem_series, mem_container_of).items():
                     val, sample_ts, state = _memory_mib_at(samples, t_eval, freshness_s)
                     if state == 'ok':
-                        prev = best_mem.get((pod, cname))
-                        if prev is None or sample_ts > prev[1]:
-                            best_mem[(pod, cname)] = (val, sample_ts)
+                        best_mem[(pod, cname)] = (val, sample_ts)
                 fresh_mem_pods = {pod for pod, _ in best_mem}
                 if running_pods <= fresh_mem_pods:
                     mem_full.append((sum(v[0] for v in best_mem.values()), t_eval))
@@ -307,18 +326,12 @@ def summarize_cadvisor(
                     mem_missing += 1
                     reasons.add('missing_memory_samples')
 
-                # CPU: pick freshest valid rate per (pod, container).
                 best_cpu = {}
                 saw_insufficient = False
-                for ckey, samples in cpu_series.items():
-                    pod, cname = cpu_container_of[ckey]
-                    if pod not in running_pods:
-                        continue
+                for (pod, cname), samples in _current_instances(cpu_series, cpu_container_of).items():
                     val, sample_ts, state = _rate_millicores_at(samples, t_eval, rate_window_s, freshness_s)
                     if state == 'ok':
-                        prev = best_cpu.get((pod, cname))
-                        if prev is None or sample_ts > prev[1]:
-                            best_cpu[(pod, cname)] = (val, sample_ts)
+                        best_cpu[(pod, cname)] = (val, sample_ts)
                     elif state == 'insufficient_samples':
                         saw_insufficient = True
                 fresh_cpu_pods = {pod for pod, _ in best_cpu}

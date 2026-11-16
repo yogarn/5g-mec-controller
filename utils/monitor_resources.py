@@ -78,8 +78,6 @@ def sample(output, namespace='services', app='mec-placement-face-detection'):
         while not stop:
             try:
                 pods = kubectl(namespace, 'get', 'pods', '-l', 'app=' + app, '-o', 'json')['items']
-                measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
-                metrics = {m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(app + '-')}
                 rows = []
                 for pod in pods:
                     metadata, status = pod['metadata'], pod.get('status', {})
@@ -88,8 +86,14 @@ def sample(output, namespace='services', app='mec-placement-face-detection'):
                     rows.append({'name': metadata['name'], 'node': pod.get('spec', {}).get('nodeName') or '<pending>',
                                  'phase': status.get('phase'),
                                  'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', []))})
-                observation = {'sample_time': time.time(), 'pods': rows,
-                               'metrics': metrics}
+                observation = {'sample_time': time.time(), 'pods': rows, 'metrics': {}}
+                try:
+                    measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
+                    observation['metrics'] = {
+                        m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(app + '-')
+                    }
+                except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
+                    observation['metrics_error'] = str(exc)
                 stream.write(json.dumps(observation, separators=(',', ':')) + '\n')
                 stream.flush()
             except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
@@ -268,8 +272,8 @@ def summarize(raw, requests, summary_csv, output, write_resource_csv=True):
                 else:
                     rejected_samples += 1
 
-            phase_obs = [s for s in valid if start <= s['sample_time'] <= end]
-            phase_errors = [s for s in samples if 'error' in s and start <= s['sample_time'] <= end]
+            phase_obs = [s for s in valid if start <= s['sample_time'] <= end and 'metrics_error' not in s]
+            phase_errors = [s for s in samples if ('error' in s or 'metrics_error' in s) and start <= s['sample_time'] <= end]
             empty_observations = sum(1 for obs in phase_obs if not obs['metrics'])
             error_observations = len(phase_errors)
             total_attempts = len(phase_obs) + error_observations

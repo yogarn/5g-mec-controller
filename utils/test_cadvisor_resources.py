@@ -261,3 +261,49 @@ def test_offline_export_saves_metadata_and_records_errors_without_fallback(tmp_p
     assert row['memory_mib'] == ''
     assert row['completeness_status'] == 'missing'
     assert 'prometheus_query_error' in row['missing_reasons'].split(';')
+
+
+def test_export_uses_raw_range_vector_query_for_exact_scrape_timestamps(tmp_path):
+    start = 1700000000.0
+    requests, _, _ = _setup_phases(tmp_path, [('phase_01', start, start + 60)], [(start, ['app-a'])])
+    seen_urls = []
+
+    def fake_fetch(url):
+        seen_urls.append(url)
+        return {'status': 'success', 'data': {'resultType': 'matrix', 'result': []}}
+
+    out = tmp_path / 'out'
+    prom_json = export_prometheus_resources(requests, out, fetch_fn=fake_fetch)
+    saved = json.loads(prom_json.read_text())
+    assert saved['query_type'] == 'raw_range_vector_at_end'
+    assert len(seen_urls) == 3
+    assert all('/api/v1/query?' in u and '/api/v1/query_range' not in u for u in seen_urls)
+    assert saved['queries']['cpu_seconds_total'].endswith('[100s]')
+
+
+def test_restarted_container_never_inherits_old_instance_cpu_rate(tmp_path):
+    start = 1700000000.0
+    requests, summary, metrics_jsonl = _setup_phases(
+        tmp_path,
+        [('phase_01', start, start + 30)],
+        [(start + t, ['app-a']) for t in range(0, 35, 5)],
+    )
+    # Old instance runs t=0..15 at 250m; new instance starts at t=20 (only 1 sample at t=20 -> insufficient!)
+    # and runs at 500m for t=25, 30. At t=20, summarizer MUST NOT fall back to old instance's 250m!
+    cpu_old = _series('app-a', 'app', [(start + t, t * 0.25) for t in (0, 5, 10, 15)], instance_id='old')
+    cpu_new = _series('app-a', 'app', [(start + 20, 0.0), (start + 25, 2.5), (start + 30, 5.0)], instance_id='new')
+    mem_old = _series('app-a', 'app', [(start + t, 64 * 1024**2) for t in (0, 5, 10, 15)], instance_id='old')
+    mem_new = _series('app-a', 'app', [(start + t, 128 * 1024**2) for t in (20, 25, 30)], instance_id='new')
+    prom = _write_prom_json(
+        tmp_path / 'resources-prometheus.json',
+        [cpu_old, cpu_new],
+        [mem_old, mem_new],
+    )
+    out = tmp_path / 'out'
+    summarize_cadvisor(prom, requests, summary, out, metrics_jsonl_path=metrics_jsonl)
+    row, = list(csv.DictReader((out / 'resource-by-ramp.csv').open()))
+    assert row['cpu_complete_samples'] == '5'
+    assert row['insufficient_rate_samples'] == '1'
+    assert float(row['cpu_millicores']) == pytest.approx((250 * 3 + 500 * 2) / 5)
+    assert row['memory_complete_samples'] == '6'
+    assert float(row['memory_mib']) == pytest.approx((64 * 3 + 128 * 3) / 6)

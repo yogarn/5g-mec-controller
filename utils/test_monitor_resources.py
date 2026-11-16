@@ -355,3 +355,34 @@ def test_pod_membership_change_within_round_is_rejected(tmp_path):
     assert row['completeness_status'] == 'incomplete_only'
     assert float(row['coverage_ratio']) == 0.0
     assert 'pod_membership_changed_within_round' in row['missing_reasons'].split(';')
+
+
+def test_sample_records_pod_inventory_even_when_metrics_server_fails(tmp_path, monkeypatch):
+    import subprocess
+    from utils.cadvisor_resources import _load_running_lookup
+
+    output = tmp_path / 'metrics.jsonl'
+    monkeypatch.setattr('sys.argv', ['monitor_resources.py', 'sample', str(output)])
+    handlers = {}
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(monitor_resources.time, 'sleep',
+                        lambda seconds: handlers[monitor_resources.signal.SIGTERM](None, None))
+    pod_name = monitor_resources.PREFIX + 'healthy'
+
+    def check_output(command, *, text, timeout):
+        if '--raw' in command:
+            raise subprocess.CalledProcessError(1, command, 'metrics server unavailable')
+        return json.dumps({'items': [{
+            'metadata': {'name': pod_name}, 'spec': {'nodeName': 'gnb-3'},
+            'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]},
+        }]})
+
+    monkeypatch.setattr(monitor_resources.subprocess, 'check_output', check_output)
+    monitor_resources.main()
+
+    observation, = [json.loads(line) for line in output.read_text().splitlines()]
+    assert observation['pods'] == [{'name': pod_name, 'node': 'gnb-3', 'phase': 'Running', 'ready': True}]
+    assert observation['metrics'] == {}
+    assert 'metrics_error' in observation
+    lookup = _load_running_lookup(output)
+    assert lookup(observation['sample_time'] + 1.0) == frozenset({pod_name})
