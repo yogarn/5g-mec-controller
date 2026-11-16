@@ -22,8 +22,9 @@ resources and UE traffic. `--plan-only` is the offline exception.
   Calibrate `ORT_THREADS` before deciding whether one or two is appropriate.
 - Startup never downloads a model; missing/incompatible weights stop startup.
 - Four-MiB request limit and 16-megapixel decoded-image limit.
-- Starting resource requests/limits match the face manifest for an initial
-  comparison. They are not evidence of pedestrian replica capacity or RAM needs.
+- Resource requests are 500m CPU / 256Mi memory; limits are 1 CPU / 512Mi
+  memory (twice the requests), matching the compatibility face manifest. These
+  are experimental settings, not evidence of replica capacity or peak RAM needs.
 - `processing_ms` covers handler-side decoding, preprocessing, inference wait,
   inference, and postprocessing. It excludes network and WSGI admission wait;
   **do not call client time minus processing_ms propagation delay**. That residual
