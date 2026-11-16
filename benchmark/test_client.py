@@ -94,3 +94,73 @@ def test_failed_attempt_and_exclusive_output(tmp_path):
     with pytest.raises(FileExistsError):
         client.run(args)
     assert path.read_text() == original
+
+
+def test_attempt_records_server_timings_and_nulls_on_error_or_malformed_json():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlsplit
+
+    seen_ids = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen_ids.append(self.headers.get('X-Request-ID'))
+            if self.path == '/ok':
+                body = json.dumps({
+                    'request_id': self.headers.get('X-Request-ID'),
+                    'server_pod': 'pod-a',
+                    'server_node': 'gnb-3',
+                    'processing_ms': 12.5,
+                    'body_read_ms': 1.0,
+                    'decode_ms': 2.0,
+                    'lock_wait_ms': 0.5,
+                    'inference_ms': 9.0,
+                }).encode('utf-8')
+                self.send_response(200)
+            elif self.path == '/bad-json':
+                body = b'not-json{'
+                self.send_response(200)
+            else:
+                body = json.dumps({
+                    'server_pod': 'pod-a',
+                    'processing_ms': 99.0,
+                }).encode('utf-8')
+                self.send_response(500)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f'http://127.0.0.1:{server.server_port}'
+        ok = client.attempt(urlsplit(base + '/ok'), 'POST', b'x', {}, '127.0.0.1', 2)
+        assert ok['success'] is True
+        assert ok['request_id'] == seen_ids[0] and ok['request_id']
+        assert ok['server_pod'] == 'pod-a'
+        assert ok['server_node'] == 'gnb-3'
+        assert ok['server_processing_ms'] == 12.5
+        assert ok['server_body_read_ms'] == 1.0
+        assert ok['server_decode_ms'] == 2.0
+        assert ok['server_lock_wait_ms'] == 0.5
+        assert ok['server_inference_ms'] == 9.0
+
+        bad = client.attempt(urlsplit(base + '/bad-json'), 'POST', b'x', {}, '127.0.0.1', 2)
+        assert bad['success'] is True
+        assert bad['server_pod'] is None
+        assert bad['server_processing_ms'] is None
+        assert bad['server_lock_wait_ms'] is None
+
+        err = client.attempt(urlsplit(base + '/err'), 'POST', b'x', {}, '127.0.0.1', 2)
+        assert err['success'] is False
+        assert err['http_status'] == 500
+        assert err['server_pod'] is None
+        assert err['server_processing_ms'] is None
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()

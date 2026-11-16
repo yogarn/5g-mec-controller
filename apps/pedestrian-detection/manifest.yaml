@@ -73,6 +73,14 @@ spec:
           value: '1'
         - name: HEALTH_PORT
           value: '5001'
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         startupProbe:
           httpGet:
             path: /ready

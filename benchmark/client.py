@@ -15,6 +15,7 @@ import ssl
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -95,11 +96,28 @@ def validate(args):
     return phases, groups, url, headers
 
 
+def _optional_str(value):
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_ms(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    val = float(value)
+    return val if math.isfinite(val) else None
+
+
 def attempt(url, method, body, headers, source, timeout):
     start = time.time()
     clock = time.monotonic()
+    req_headers = dict(headers or {})
+    request_id = next((v for k, v in req_headers.items() if k.lower() == 'x-request-id' and v), None)
+    if request_id is None:
+        request_id = uuid.uuid4().hex
+        req_headers['X-Request-ID'] = request_id
     status = None
     error = None
+    raw_body = None
     conn = None
     try:
         cls = http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection
@@ -107,19 +125,46 @@ def attempt(url, method, body, headers, source, timeout):
         target = url.path or '/'
         if url.query:
             target += '?' + url.query
-        conn.request(method, target, body=body, headers=headers)
+        conn.request(method, target, body=body, headers=req_headers)
         response = conn.getresponse()
         status = response.status
-        response.read()
+        raw_body = response.read()
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError) as exc:
         error = f'{type(exc).__name__}: {exc}'
     finally:
         if conn is not None:
             conn.close()
-    return {'start_time': start, 'end_time': time.time(),
-            'duration_ms': (time.monotonic() - clock) * 1000,
+    end_time = time.time()
+    duration_ms = (time.monotonic() - clock) * 1000
+    success = error is None and status is not None and 200 <= status < 300
+    server_fields = {
+        'request_id': request_id,
+        'server_pod': None,
+        'server_node': None,
+        'server_processing_ms': None,
+        'server_body_read_ms': None,
+        'server_decode_ms': None,
+        'server_lock_wait_ms': None,
+        'server_inference_ms': None,
+    }
+    if success and raw_body:
+        try:
+            payload = json.loads(raw_body.decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            server_fields['request_id'] = _optional_str(payload.get('request_id')) or request_id
+            server_fields['server_pod'] = _optional_str(payload.get('server_pod'))
+            server_fields['server_node'] = _optional_str(payload.get('server_node'))
+            server_fields['server_processing_ms'] = _optional_ms(payload.get('processing_ms'))
+            server_fields['server_body_read_ms'] = _optional_ms(payload.get('body_read_ms'))
+            server_fields['server_decode_ms'] = _optional_ms(payload.get('decode_ms'))
+            server_fields['server_lock_wait_ms'] = _optional_ms(payload.get('lock_wait_ms'))
+            server_fields['server_inference_ms'] = _optional_ms(payload.get('inference_ms'))
+    return {'start_time': start, 'end_time': end_time,
+            'duration_ms': duration_ms,
             'http_status': status, 'error': error,
-            'success': error is None and status is not None and 200 <= status < 300}
+            'success': success, **server_fields}
 
 
 def run(args):

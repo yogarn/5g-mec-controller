@@ -58,6 +58,12 @@ def test_runtime_and_http_contract_with_real_onnx_session(tmp_path):
     assert result.json['person_count'] == 1
     assert result.json['processing_ms'] >= 0
     assert result.json['persons'][0]['w'] == 160
+    assert result.json['server_pod'] == os.getenv('POD_NAME', None)
+    assert result.json['server_node'] == os.getenv('NODE_NAME', None)
+    assert isinstance(result.json['request_id'], str) and result.json['request_id']
+    summed = (result.json['body_read_ms'] + result.json['decode_ms']
+              + result.json['lock_wait_ms'] + result.json['inference_ms'])
+    assert abs(summed - result.json['processing_ms']) < 0.05
     assert client.post('/detect').status_code == 400
     assert client.post('/detect', data={'image': (io.BytesIO(b'bad'), 'bad.jpg')}).status_code == 400
     assert client.post('/detect', data=b'x' * (4 * 1024 * 1024 + 1), content_type='application/octet-stream').status_code == 413

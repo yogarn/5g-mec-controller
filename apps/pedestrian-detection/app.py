@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import uuid
 import warnings
 
 from flask import Flask, jsonify, request
@@ -124,19 +125,24 @@ def create_app(detector=None, health_port=None):
     @app.post('/detect')
     def detect():
         started = time.perf_counter()
+        request_id = request.headers.get('X-Request-ID') or uuid.uuid4().hex
         if 'image' not in request.files:
-            return jsonify(error="missing 'image' file field"), 400
+            return jsonify(error="missing 'image' file field", request_id=request_id), 400
+        raw_bytes = request.files['image'].read()
+        after_read = time.perf_counter()
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', Image.DecompressionBombWarning)
-                with Image.open(io.BytesIO(request.files['image'].read())) as source:
+                with Image.open(io.BytesIO(raw_bytes)) as source:
                     if source.width * source.height > 16_000_000:
-                        return jsonify(error='image exceeds 16 megapixels'), 413
+                        return jsonify(error='image exceeds 16 megapixels', request_id=request_id), 413
                     image = ImageOps.exif_transpose(source).convert('RGB')
         except (UnidentifiedImageError, OSError, ValueError,
                 Image.DecompressionBombError, Image.DecompressionBombWarning):
-            return jsonify(error='could not decode image'), 400
+            return jsonify(error='could not decode image', request_id=request_id), 400
+        after_decode = time.perf_counter()
         with inference_lock:
+            after_lock = time.perf_counter()
             state.begin_inference()
             try:
                 boxes = detector.predict(image)
@@ -145,8 +151,20 @@ def create_app(detector=None, health_port=None):
                 raise
             finally:
                 state.end_inference()
-        return jsonify(person_count=len(boxes), persons=boxes,
-                       processing_ms=(time.perf_counter() - started) * 1000,
-                       model_sha256=detector.model_sha256, input_size=detector.size)
+            after_infer = time.perf_counter()
+        return jsonify(
+            person_count=len(boxes),
+            persons=boxes,
+            request_id=request_id,
+            server_pod=os.getenv('POD_NAME') or None,
+            server_node=os.getenv('NODE_NAME') or None,
+            processing_ms=(after_infer - started) * 1000,
+            body_read_ms=(after_read - started) * 1000,
+            decode_ms=(after_decode - after_read) * 1000,
+            lock_wait_ms=(after_lock - after_decode) * 1000,
+            inference_ms=(after_infer - after_lock) * 1000,
+            model_sha256=detector.model_sha256,
+            input_size=detector.size,
+        )
 
     return app
