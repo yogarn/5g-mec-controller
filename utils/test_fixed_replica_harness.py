@@ -139,11 +139,12 @@ def test_probe_registered_service_paths_uses_registered_ues():
             ('gnb-2', []),
             ('gnb-3', [{'ip': '127.0.0.1', 'iface': 'uesimtun1'}]),
         )
-        urls = {
+        from utils.experiment import validate_site_urls
+        urls = validate_site_urls({
             'gnb-1': f'http://127.0.0.1:{srv.server_port}/detect',
             'gnb-2': f'http://127.0.0.1:{srv.server_port}/detect',
             'gnb-3': f'http://127.0.0.1:{srv.server_port}/detect',
-        }
+        })
         probes = probe_registered_service_paths(site_groups, urls, timeout=2.0, count=2)
         assert set(probes) == {'gnb-1', 'gnb-3'}
         assert probes['gnb-1']['successes'] == 2

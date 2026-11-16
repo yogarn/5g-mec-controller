@@ -191,8 +191,11 @@ def probe_registered_service_paths(site_groups, urls, timeout, count=5):
         if not ues:
             continue
         ue = ues[0]
-        health_url = urls[group].rsplit('/', 1)[0] + '/health'
-        parsed = urlsplit(health_url)
+        raw_url = urls[group]
+        parsed = (urlsplit(raw_url) if isinstance(raw_url, str) else raw_url)._replace(
+            path='/health', query='', fragment='',
+        )
+        health_url = parsed.geturl()
         samples = [attempt(parsed, 'GET', None, {}, ue['ip'], timeout) for _ in range(count)]
         durs = sorted(s['duration_ms'] for s in samples if s['success'])
         results[group] = {
