@@ -18,7 +18,7 @@ from pathlib import Path
 LABEL = 'app=mec-placement-face-detection'
 PREFIX = 'mec-placement-face-detection-'
 NODES = ('core-5g', 'gnb1', 'gnb-2', 'gnb-3', '<pending>')
-MAX_ROUND_SKEW_S = 10.0
+MAX_ROUND_SKEW_S = 20.0
 POD_LOOKUP_MAX_AGE_S = 8.0
 WINDOW_MISMATCH_TOLERANCE_S = 5.0
 
@@ -110,6 +110,9 @@ def summarize(raw, requests, summary_csv, output):
     valid = [s for s in samples if 'pods' in s and 'metrics' in s]
     valid.sort(key=lambda s: s['sample_time'])
     sample_times = [s['sample_time'] for s in valid]
+
+    def has_nearby_inventory(when):
+        return any(abs(st - when) <= POD_LOOKUP_MAX_AGE_S for st in sample_times)
 
     def running_at(when):
         index = bisect_right(sample_times, when) - 1
@@ -216,7 +219,13 @@ def summarize(raw, requests, summary_csv, output):
             points = sorted(deduped.values(), key=lambda item: (item[0], item[1]))
             rounds = []
             current = []
+            rejected_samples = 0
+            reasons = set()
             for point in points:
+                if not has_nearby_inventory(point[0]):
+                    rejected_samples += 1
+                    reasons.add('no_pod_inventory_near_metric')
+                    continue
                 if not current or (point[0] - current[0][0] <= MAX_ROUND_SKEW_S and point[1] not in {p[1] for p in current}):
                     current.append(point)
                 else:
@@ -231,8 +240,6 @@ def summarize(raw, requests, summary_csv, output):
             cpu_approx_samples = 0
             cpu_rejected_samples = 0
             partial_vals = []
-            rejected_samples = 0
-            reasons = set()
             for round_entries in rounds:
                 kind, reason = classify_round(round_entries)
                 if reason:

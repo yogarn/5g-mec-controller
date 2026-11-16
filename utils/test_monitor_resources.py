@@ -203,7 +203,7 @@ def test_skewed_pod_timestamps_never_combined_into_simultaneous_total(tmp_path):
                              'containers': [{'name': 'app', 'usage': {'cpu': cpu, 'memory': '1024Ki'}}]}
     samples = [
         {'sample_time': start + 10, 'pods': [pod_a, pod_b], 'metrics': {'app-a': m(10, '100m')}},
-        {'sample_time': start + 25, 'pods': [pod_a, pod_b], 'metrics': {'app-b': m(25, '200m')}},
+        {'sample_time': start + 35, 'pods': [pod_a, pod_b], 'metrics': {'app-b': m(35, '200m')}},
     ]
     data = tmp_path / 'metrics.jsonl'
     data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
