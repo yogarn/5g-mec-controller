@@ -15,6 +15,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+from utils.phase_windows import summarize_windows, write_windows
 
 METHODS = ("baseline", "proposed")
 STYLES = {"baseline": "--", "proposed": "-"}
@@ -276,6 +277,54 @@ def main():
             ax.legend(frameon=False, ncols=2)
         axes[-1].set(xticks=x, xticklabels=labels, xlabel=xlabel)
         export(fig, "response-time")
+
+        # Keep the unrestricted figure above; make typical latencies readable in
+        # a companion view, explicitly marking every point outside the zoom.
+        windows = {}
+        for method in METHODS:
+            if (args.results_dir / method / 'requests.jsonl').exists():
+                rows = summarize_windows(args.results_dir / method, args.slo_ms)
+                write_windows(rows, args.output_dir / f'{method}-phase-windows.csv')
+                windows[method] = {(r['phase'], r['window']): r for r in rows}
+        fig, axes = plt.subplots(2, 1, figsize=(width, 7), sharex=True, layout="constrained")
+        for ax, window, title in zip(axes, ('whole_phase', 'late_phase'),
+                                    ('Whole-phase P90 (zoom)', 'Final 60s P90 (convergence not assumed)')):
+            for method, color in (("proposed", "#D55E00"), ("baseline", "#0072B2")):
+                values = [optional_number(summaries[method][p]['p90_ms'], 'p90_ms')
+                          if window == 'whole_phase' else
+                          optional_number(windows.get(method, {}).get((p, window), {}).get('p90_ms'), 'p90_ms')
+                          for p in phases]
+                ax.plot(x, [min(v, 300) for v in values], linestyle=STYLES[method],
+                        color=color, marker='o', label=METHOD_LABELS[method])
+                for pos, value in zip(x, values):
+                    if value > 300:
+                        ax.plot(pos, 295, marker='^', color=color)
+                        ax.annotate(f'{METHOD_LABELS[method][0]}: {value:.0f}ms ↑', (pos, 295),
+                                    xytext=(0, -12 if method == 'baseline' else -25),
+                                    textcoords='offset points', ha='center', fontsize=7)
+            ax.axhline(args.slo_ms, color='#d62728', linestyle='--', label=f'SLO ({args.slo_ms:g} ms)')
+            ax.set(ylim=(0, 300), ylabel='Response time (ms)', title=title)
+            ax.grid(axis='y', linestyle=':')
+            ax.legend(frameon=False, ncols=3)
+        axes[-1].set(xticks=x, xticklabels=labels, xlabel=xlabel)
+        export(fig, 'response-time-zoom')
+
+        if len(windows) == len(METHODS):
+            fig, axes = plt.subplots(2, 1, figsize=(width, 7), sharex=True, layout='constrained')
+            for ax, key, title in zip(axes, ('p90_ms', 'violation_percent'),
+                                      ('Final 60s successful-request P90 (full range)',
+                                       'Final 60s failed or slow attempts (%)')):
+                for method in METHODS:
+                    values = [optional_number(windows[method][(p, 'late_phase')][key], key) for p in phases]
+                    ax.plot(x, values, linestyle=STYLES[method], marker='o', label=METHOD_LABELS[method])
+                if key == 'p90_ms':
+                    ax.axhline(args.slo_ms, color='#d62728', linestyle='--')
+                ax.set(title=title, ylim=(0, 100 if key == 'violation_percent' else None))
+                ax.grid(axis='y', linestyle=':')
+                ax.legend(frameon=False)
+            fig.suptitle('Late-phase measurements; steady state is not assumed; coverage in phase-windows CSVs')
+            axes[-1].set(xticks=x, xticklabels=labels, xlabel=xlabel)
+            export(fig, 'late-phase')
 
         fig, axes = plt.subplots(2, 1, figsize=(width, 7), sharex=True, layout="constrained")
         ax, cov_ax = axes
