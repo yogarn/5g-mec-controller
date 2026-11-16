@@ -118,9 +118,6 @@ def summarize(raw, requests, summary_csv, output):
         return frozenset(p['name'] for p in valid[index]['pods'] if p['phase'] == 'Running')
 
     def classify_round(round_entries):
-        windows = [item[4] for item in round_entries if item[4] is not None]
-        if windows and max(windows) - min(windows) > WINDOW_MISMATCH_TOLERANCE_S:
-            return 'rejected', 'mismatched_cpu_windows'
         min_t = round_entries[0][0]
         max_t = round_entries[-1][0]
         mid_t = 0.5 * (min_t + max_t)
@@ -145,6 +142,21 @@ def summarize(raw, requests, summary_csv, output):
         if ref and round_pods < ref:
             return 'partial', 'missing_pod_metrics'
         return 'rejected', 'pod_set_churn_mismatch'
+
+    def classify_cpu_alignment(round_entries):
+        if len(round_entries) <= 1:
+            return 'exact', None
+        windows = [item[4] for item in round_entries]
+        if all(w is None for w in windows):
+            return 'exact', None
+        if any(w is None for w in windows):
+            return 'approximate', 'cpu_window_partial_metadata'
+        overlap = min(item[0] for item in round_entries) - max(item[0] - item[4] for item in round_entries)
+        if overlap <= 0:
+            return 'rejected', 'non_overlapping_cpu_windows'
+        if max(windows) - min(windows) <= WINDOW_MISMATCH_TOLERANCE_S:
+            return 'exact', None
+        return 'approximate', 'cpu_window_skew_approximate'
 
     nodes = sorted(set(NODES) | {p['node'] for s in valid for p in s['pods']})
     out = Path(output)
@@ -172,12 +184,15 @@ def summarize(raw, requests, summary_csv, output):
     with (out / 'resource-by-ramp.csv').open('x', newline='') as stream:
         fields = [
             'phase', 'cpu_millicores', 'memory_mib', 'complete_samples',
-            'partial_samples', 'rejected_samples', 'missing_samples',
+            'memory_complete_samples', 'cpu_complete_samples',
+            'cpu_exact_samples', 'cpu_approximate_samples', 'cpu_rejected_samples',
+            'cpu_quality', 'partial_samples', 'rejected_samples', 'missing_samples',
             'total_observations', 'empty_observations', 'error_observations',
             'round_completeness_ratio', 'availability_ratio', 'coverage_ratio',
+            'memory_coverage_ratio', 'cpu_coverage_ratio',
             'partial_cpu_millicores', 'partial_memory_mib',
-            'completeness_status', 'missing_reasons',
-            'first_metric_time', 'last_metric_time', 'description',
+            'completeness_status', 'memory_completeness_status', 'cpu_completeness_status',
+            'missing_reasons', 'first_metric_time', 'last_metric_time', 'description',
         ]
         writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
         for row in summary:
@@ -210,7 +225,11 @@ def summarize(raw, requests, summary_csv, output):
             if current:
                 rounds.append(current)
 
-            complete_vals = []
+            mem_vals = []
+            cpu_vals = []
+            cpu_exact_samples = 0
+            cpu_approx_samples = 0
+            cpu_rejected_samples = 0
             partial_vals = []
             rejected_samples = 0
             reasons = set()
@@ -223,7 +242,18 @@ def summarize(raw, requests, summary_csv, output):
                 min_t = round_entries[0][0]
                 max_t = round_entries[-1][0]
                 if kind == 'complete':
-                    complete_vals.append((total_cpu, total_mem, min_t, max_t))
+                    mem_vals.append((total_mem, min_t, max_t))
+                    cpu_kind, cpu_reason = classify_cpu_alignment(round_entries)
+                    if cpu_reason:
+                        reasons.add(cpu_reason)
+                    if cpu_kind == 'exact':
+                        cpu_exact_samples += 1
+                        cpu_vals.append((total_cpu, min_t, max_t))
+                    elif cpu_kind == 'approximate':
+                        cpu_approx_samples += 1
+                        cpu_vals.append((total_cpu, min_t, max_t))
+                    else:
+                        cpu_rejected_samples += 1
                 elif kind == 'partial':
                     partial_vals.append((total_cpu, total_mem, min_t, max_t))
                 else:
@@ -246,24 +276,44 @@ def summarize(raw, requests, summary_csv, output):
                 reasons.add('no_metrics_in_phase')
             elif total_rounds == 0:
                 reasons.add('no_metrics_in_phase')
-            round_completeness_ratio = len(complete_vals) / total_rounds if total_rounds > 0 else 0.0
+            round_completeness_ratio = len(mem_vals) / total_rounds if total_rounds > 0 else 0.0
             availability_ratio = with_metrics / total_attempts if total_attempts > 0 else 0.0
             coverage_denom = total_rounds + missing_samples
-            coverage_ratio = len(complete_vals) / coverage_denom if coverage_denom > 0 else 0.0
-            if complete_vals and not partial_vals and not rejected_samples and missing_samples == 0:
-                status = 'complete'
-            elif complete_vals:
-                status = 'partial'
-            elif partial_vals or rejected_samples:
-                status = 'incomplete_only'
+            mem_coverage_ratio = len(mem_vals) / coverage_denom if coverage_denom > 0 else 0.0
+            cpu_coverage_ratio = len(cpu_vals) / coverage_denom if coverage_denom > 0 else 0.0
+            coverage_ratio = mem_coverage_ratio
+
+            def _status(accepted, rej):
+                if accepted and not partial_vals and not rej and missing_samples == 0:
+                    return 'complete'
+                if accepted:
+                    return 'partial'
+                if partial_vals or rej:
+                    return 'incomplete_only'
+                return 'missing'
+
+            mem_status = _status(len(mem_vals), rejected_samples)
+            cpu_status = _status(len(cpu_vals), rejected_samples + cpu_rejected_samples)
+            if cpu_exact_samples and cpu_approx_samples:
+                cpu_quality = 'mixed_exact_and_approximate'
+            elif cpu_approx_samples:
+                cpu_quality = 'approximate'
+            elif cpu_exact_samples:
+                cpu_quality = 'exact'
             else:
-                status = 'missing'
+                cpu_quality = 'missing'
 
             writer.writerow({
                 'phase': phase,
-                'cpu_millicores': sum(v[0] for v in complete_vals) / len(complete_vals) if complete_vals else '',
-                'memory_mib': sum(v[1] for v in complete_vals) / len(complete_vals) if complete_vals else '',
-                'complete_samples': len(complete_vals),
+                'cpu_millicores': sum(v[0] for v in cpu_vals) / len(cpu_vals) if cpu_vals else '',
+                'memory_mib': sum(v[0] for v in mem_vals) / len(mem_vals) if mem_vals else '',
+                'complete_samples': len(mem_vals),
+                'memory_complete_samples': len(mem_vals),
+                'cpu_complete_samples': len(cpu_vals),
+                'cpu_exact_samples': cpu_exact_samples,
+                'cpu_approximate_samples': cpu_approx_samples,
+                'cpu_rejected_samples': cpu_rejected_samples,
+                'cpu_quality': cpu_quality,
                 'partial_samples': len(partial_vals),
                 'rejected_samples': rejected_samples,
                 'missing_samples': missing_samples,
@@ -273,15 +323,19 @@ def summarize(raw, requests, summary_csv, output):
                 'round_completeness_ratio': f'{round_completeness_ratio:.4f}',
                 'availability_ratio': f'{availability_ratio:.4f}',
                 'coverage_ratio': f'{coverage_ratio:.4f}',
+                'memory_coverage_ratio': f'{mem_coverage_ratio:.4f}',
+                'cpu_coverage_ratio': f'{cpu_coverage_ratio:.4f}',
                 'partial_cpu_millicores': sum(v[0] for v in partial_vals) / len(partial_vals) if partial_vals else '',
                 'partial_memory_mib': sum(v[1] for v in partial_vals) / len(partial_vals) if partial_vals else '',
-                'completeness_status': status,
+                'completeness_status': mem_status,
+                'memory_completeness_status': mem_status,
+                'cpu_completeness_status': cpu_status,
                 'missing_reasons': ';'.join(sorted(reasons)),
-                'first_metric_time': min((v[2] for v in complete_vals), default=''),
-                'last_metric_time': max((v[3] for v in complete_vals), default=''),
-                'description': 'mean of complete simultaneous Metrics Server pod samples (<=10s skew, stable pod membership); CPU windows may overlap phases; incomplete/churned/missing intervals excluded',
+                'first_metric_time': min((v[1] for v in mem_vals), default=''),
+                'last_metric_time': max((v[2] for v in mem_vals), default=''),
+                'description': 'memory is point-in-time working set; CPU is window-averaged (labeled approximate when overlapping windows differ by >5s); <=10s skew, stable pod membership',
             })
-            print(f'{phase}: resource samples={len(complete_vals)} (partial={len(partial_vals)}, rejected={rejected_samples}, missing={missing_samples}, status={status})')
+            print(f'{phase}: mem_samples={len(mem_vals)} cpu_samples={len(cpu_vals)} ({cpu_quality}) (partial={len(partial_vals)}, rejected={rejected_samples}, cpu_rejected={cpu_rejected_samples}, missing={missing_samples})')
 
 
 def main():

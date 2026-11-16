@@ -194,6 +194,7 @@ def load_resource_coverage(root, phases):
                 'missing': missing,
                 'coverage_pct': cov_pct,
                 'status': status,
+                'cpu_quality': (row.get('cpu_quality') or '').strip() or ('exact' if complete > 0 else 'missing'),
             })
     return coverage
 
@@ -318,18 +319,21 @@ def main():
         fig, axes = plt.subplots(3, 1, figsize=(width, 9), sharex=True, layout="constrained")
         fig.suptitle("Mean of complete simultaneous resource samples per phase; gaps and coverage show churn/missingness")
         for ax, key, title, ylabel in zip(axes[:2], ("cpu_millicores", "memory_mib"),
-                                          ("CPU usage", "RAM working set"), ("Total pod CPU (millicores)", "Total pod memory (MiB)")):
+                                          ("CPU usage (~ = approx. overlapping windows)", "RAM working set (point-in-time)"),
+                                          ("Total pod CPU (millicores)", "Total pod memory (MiB)")):
             for method, offset in (("proposed", 0.0), ("baseline", 0.0)):
                 ys = [optional_number(resources[method][phase][key], key) for phase in phases]
                 ax.plot(x, ys, linestyle=STYLES[method], marker="o", label=METHOD_LABELS[method])
                 for pos, val, cov_info in zip(x, ys, resource_coverage[method]):
+                    is_approx = key == "cpu_millicores" and cov_info.get("cpu_quality", "exact") in ("approximate", "mixed_exact_and_approximate")
                     if math.isnan(val):
                         tag = f"{METHOD_LABELS[method][0]}:0/{cov_info['rounds']}" if cov_info['rounds'] else f"{METHOD_LABELS[method][0]}:N/A"
                         ax.annotate(tag, (pos, 0), ha="center", va="bottom", fontsize=7,
                                     xytext=(0, 2 if method == "baseline" else 10), textcoords="offset points")
-                    elif cov_info['coverage_pct'] < 100.0:
+                    elif cov_info['coverage_pct'] < 100.0 or is_approx:
                         denom = cov_info['rounds'] + cov_info['missing']
-                        ax.annotate(f"{cov_info['complete']}/{denom}", (pos, val),
+                        prefix = "~" if is_approx else ""
+                        ax.annotate(f"{prefix}{cov_info['complete']}/{denom}", (pos, val),
                                     ha="center", va="bottom", fontsize=7,
                                     xytext=(0, 4), textcoords="offset points")
             ax.set(ylabel=ylabel, title=title, ylim=(0, None))

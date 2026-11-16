@@ -245,10 +245,12 @@ def test_mismatched_cpu_windows_rejected_and_zero_metrics_phase_is_missing(tmp_p
     pod_b = {'name': 'app-b', 'node': 'gnb-2', 'phase': 'Running', 'ready': True}
     ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
     samples = [
+        # Phase 1: overlapping differing CPU windows (5.58s vs 32.59s) -> memory exact, CPU approximate.
         {'sample_time': start + 16, 'pods': [pod_a, pod_b], 'metrics': {
-            'app-a': {'timestamp': ts(15), 'window': '15s', 'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '1024Ki'}}]},
-            'app-b': {'timestamp': ts(16), 'window': '60s', 'containers': [{'name': 'app', 'usage': {'cpu': '200m', 'memory': '1024Ki'}}]},
+            'app-a': {'timestamp': ts(15), 'window': '5.58s', 'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '1024Ki'}}]},
+            'app-b': {'timestamp': ts(16), 'window': '32.59s', 'containers': [{'name': 'app', 'usage': {'cpu': '200m', 'memory': '1024Ki'}}]},
         }},
+        # Phase 2: empty observations -> missing.
         {'sample_time': start + 80, 'pods': [pod_a, pod_b], 'metrics': {}},
     ]
     data = tmp_path / 'metrics.jsonl'
@@ -256,17 +258,49 @@ def test_mismatched_cpu_windows_rejected_and_zero_metrics_phase_is_missing(tmp_p
     summarize(data, requests, summary, tmp_path)
     with (tmp_path / 'resource-by-ramp.csv').open() as stream:
         p1, p2 = list(csv.DictReader(stream))
-    assert p1['complete_samples'] == '0'
-    assert p1['rejected_samples'] == '1'
-    assert p1['cpu_millicores'] == ''
-    assert p1['completeness_status'] == 'incomplete_only'
-    assert p1['missing_reasons'] == 'mismatched_cpu_windows'
+    assert p1['memory_complete_samples'] == '1'
+    assert float(p1['memory_mib']) == 2.0
+    assert p1['cpu_complete_samples'] == '1'
+    assert p1['cpu_approximate_samples'] == '1'
+    assert p1['cpu_quality'] == 'approximate'
+    assert float(p1['cpu_millicores']) == 300.0
+    assert 'cpu_window_skew_approximate' in p1['missing_reasons'].split(';')
 
     assert p2['complete_samples'] == '0'
     assert p2['missing_samples'] == '1'
     assert p2['cpu_millicores'] == ''
+    assert p2['memory_mib'] == ''
     assert p2['completeness_status'] == 'missing'
     assert p2['missing_reasons'] == 'empty_observations;no_metrics_in_phase'
+
+
+def test_non_overlapping_cpu_windows_reject_cpu_while_preserving_memory(tmp_path):
+    start = 1700000000
+    requests, summary = _write_single_phase(tmp_path, start=start, duration=60)
+    pod_a = {'name': 'app-a', 'node': 'gnb1', 'phase': 'Running', 'ready': True}
+    pod_b = {'name': 'app-b', 'node': 'gnb-2', 'phase': 'Running', 'ready': True}
+    ts = lambda offset: datetime.fromtimestamp(start + offset, timezone.utc).isoformat()
+    samples = [
+        # Windows [5, 10] and [13, 28] do not overlap in time, though timestamps are 8s apart.
+        {'sample_time': start + 18, 'pods': [pod_a, pod_b], 'metrics': {
+            'app-a': {'timestamp': ts(10), 'window': '5s', 'containers': [{'name': 'app', 'usage': {'cpu': '100m', 'memory': '1024Ki'}}]},
+            'app-b': {'timestamp': ts(18), 'window': '5s', 'containers': [{'name': 'app', 'usage': {'cpu': '200m', 'memory': '1024Ki'}}]},
+        }},
+    ]
+    data = tmp_path / 'metrics.jsonl'
+    data.write_text(''.join(json.dumps(s) + '\n' for s in samples))
+    summarize(data, requests, summary, tmp_path)
+    with (tmp_path / 'resource-by-ramp.csv').open() as stream:
+        row, = list(csv.DictReader(stream))
+    assert row['memory_complete_samples'] == '1'
+    assert float(row['memory_mib']) == 2.0
+    assert row['memory_completeness_status'] == 'complete'
+    assert row['cpu_complete_samples'] == '0'
+    assert row['cpu_rejected_samples'] == '1'
+    assert row['cpu_millicores'] == ''
+    assert row['cpu_quality'] == 'missing'
+    assert row['cpu_completeness_status'] == 'incomplete_only'
+    assert 'non_overlapping_cpu_windows' in row['missing_reasons'].split(';')
 
 
 def test_missing_intervals_and_errors_counted_in_availability_and_coverage(tmp_path):
