@@ -463,3 +463,34 @@ Example `--plan-only` commands (no cluster access or traffic):
 # Floor mode with 0.90 headroom factor via ramp preset forwarding (135ms internal target, 5ms excess target):
 bash experiments/run.sh ramp --rt-target-factor 0.90 --plan-only /tmp/plan_floor_090
 ```
+
+
+## Shared minimum-capacity experiment (`--min-replicas`)
+
+`--min-replicas` (optional positive integer) sets a shared minimum and initial
+replica count for both baseline and proposed methods:
+
+- Sets `spec.minReplicas` on both `baseline-hpa.yaml` and `proposed-hpa.yaml`,
+  sets initial `spec.replicas` on both `baseline-workload.yaml` and
+  `proposed-workload.yaml`, updates `min_replicas` in runtime controller
+  configs, and records `replica_bounds.min` in `plan.yaml` and `campaign.yaml`.
+- Before starting each method's traffic, the runner waits for the Deployment
+  rollout and verifies `readyReplicas >= min_replicas` (aborting on timeout).
+- Cannot be combined with `--fixed-replicas` and must not exceed the effective
+  `--max-replicas`. The `ramp` preset retains its default minimum (`1`) unless
+  `--min-replicas` is passed explicitly.
+- **Interpretation boundary:** This is a **shared minimum-capacity experiment**
+  (for example, starting both CPU and RT autoscalers at 2 pods while keeping
+  proposed scaling purely RT-driven with `--rt-target-factor 1.0`). Do not
+  interpret results from `--min-replicas > 1` as evidence of proactive RT
+  scaling.
+
+Example commands:
+
+```bash
+# Offline plan preview with shared minimum 2 replicas:
+.venv/bin/python -m experiments.campaign --comparison scaling --scenario scaler-staircase --slo-ms 150 --latency-floor-ms 130 --rt-target-factor 1.0 --min-replicas 2 --plan-only /tmp/plan_floor_min2
+
+# Live ramp experiment opting into min-replicas=2 via run.sh forwarding:
+bash experiments/run.sh ramp scaler_floor_min2_01 --rt-target-factor 1.0 --min-replicas 2
+```
