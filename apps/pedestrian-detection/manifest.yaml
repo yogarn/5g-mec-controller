@@ -42,7 +42,7 @@ spec:
                 - core-5g
       containers:
       - name: pedestrian-detection
-        image: 10.34.211.140:30500/pedestrian-detection@sha256:e7fbf9a1792fd20dc312c0a24dffc6d64c0b9b85fbaf6bb56c2e426ca4474970
+        image: 10.34.211.140:30500/pedestrian-detection@sha256:478371df0a763f4f60b670f9eb800ca8da285667aa6b9b39b00b54c3a3dbae82
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
