@@ -16,8 +16,22 @@ from pathlib import Path
 
 import yaml
 
-from experiments.campaign import APP, NAMESPACE, check_service_routing, command, kube, remote, stop_process
+from experiments.campaign import (
+    NAMESPACE,
+    _collect_live_provenance,
+    _local_git_provenance,
+    _workload_image_ref,
+    check_service_routing,
+    command,
+    kube,
+    remote,
+    stop_process,
+    workload_identity,
+    workload_manifest,
+)
+from utils.cadvisor_resources import export_prometheus_resources, summarize_cadvisor
 from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
+from utils.summarize import summarize as summarize_campaign_requests
 from utils.traffic_control import POOL_NAME, TrafficDelay
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,8 +49,8 @@ def percentile(sorted_vals, p):
     return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
 
 
-def build_manifest(replicas, node, use_tc):
-    docs = list(yaml.safe_load_all((ROOT / 'apps/face-detection/manifest.yaml').read_text()))
+def build_manifest(replicas, node, use_tc, workload='face-detection'):
+    docs = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     for doc in docs:
         if not doc:
             continue
@@ -54,13 +68,13 @@ def build_manifest(replicas, node, use_tc):
     return yaml.safe_dump_all(docs, sort_keys=False)
 
 
-def cleanup_app():
-    kube('-n', NAMESPACE, 'delete', 'deployment', APP, '--ignore-not-found', '--wait=true', '--timeout=120s')
-    kube('-n', NAMESPACE, 'delete', 'service', APP, '--ignore-not-found', '--wait=true', '--timeout=120s')
-    kube('-n', NAMESPACE, 'wait', '--for=delete', 'pod', '-l', f'app={APP}', '--timeout=120s')
+def cleanup_app(app_name):
+    kube('-n', NAMESPACE, 'delete', 'deployment', app_name, '--ignore-not-found', '--wait=true', '--timeout=120s')
+    kube('-n', NAMESPACE, 'delete', 'service', app_name, '--ignore-not-found', '--wait=true', '--timeout=120s')
+    kube('-n', NAMESPACE, 'wait', '--for=delete', 'pod', '-l', f'app={app_name}', '--timeout=120s')
 
 
-def summarize_requests(jsonl_path, warmup_s):
+def summarize_requests(jsonl_path, warmup_s, slo_ms=500.0):
     rows = [json.loads(line) for line in jsonl_path.read_text().splitlines() if line.strip()]
     starts = [r for r in rows if r.get('event') == 'phase_start']
     ends = [r for r in rows if r.get('event') == 'phase_end']
@@ -71,12 +85,24 @@ def summarize_requests(jsonl_path, warmup_s):
     t_measure_start = t0 + warmup_s
     t_end = ends[-1]['end_time']
 
+    def _timing_summary(subset, key):
+        vals = sorted(r[key] for r in subset if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool))
+        if not vals:
+            return {'count': 0, 'mean_ms': None, 'p50_ms': None, 'p90_ms': None}
+        return {
+            'count': len(vals),
+            'mean_ms': sum(vals) / len(vals),
+            'p50_ms': percentile(vals, 0.50),
+            'p90_ms': percentile(vals, 0.90),
+        }
+
     def stats(subset, dur_s):
         n = len(subset)
         succ = [r for r in subset if r.get('success')]
         fail = n - len(succ)
         succ_durs = sorted(r['duration_ms'] for r in succ)
         all_durs = sorted(r['duration_ms'] for r in subset)
+        acc_slo = sum(1 for r in succ if r['duration_ms'] <= slo_ms) / n if n else 0.0
         acc_500 = sum(1 for r in succ if r['duration_ms'] <= 500.0) / n if n else 0.0
         acc_300 = sum(1 for r in succ if r['duration_ms'] <= 300.0) / n if n else 0.0
         return {
@@ -85,6 +111,9 @@ def summarize_requests(jsonl_path, warmup_s):
             'failures': fail,
             'error_rate': fail / n if n else 0.0,
             'rps': len(succ) / dur_s if dur_s > 0 else 0.0,
+            'slo_ms': float(slo_ms),
+            'acc_slo': acc_slo,
+            'viol_slo': 1.0 - acc_slo,
             'acc_500': acc_500,
             'viol_500': 1.0 - acc_500,
             'acc_300': acc_300,
@@ -93,17 +122,32 @@ def summarize_requests(jsonl_path, warmup_s):
             'succ_p90_ms': percentile(succ_durs, 0.90),
             'succ_p95_ms': percentile(succ_durs, 0.95),
             'all_p90_ms': percentile(all_durs, 0.90),
+            'server_timings': {
+                field: _timing_summary(succ, field)
+                for field in (
+                    'server_processing_ms',
+                    'server_body_read_ms',
+                    'server_decode_ms',
+                    'server_lock_wait_ms',
+                    'server_inference_ms',
+                )
+            },
         }
 
     steady = [r for r in reqs if r['start_time'] >= t_measure_start]
     steady_dur = max(1.0, t_end - t_measure_start)
     full_dur = max(1.0, t_end - t0)
+    by_site = {
+        site: stats([r for r in steady if r.get('group') == site], steady_dur)
+        for site in sorted({r.get('group') for r in steady if r.get('group')})
+    }
     return {
         'start_time': t0,
         'measure_start_time': t_measure_start,
         'end_time': t_end,
         'steady': stats(steady, steady_dur),
         'full': stats(reqs, full_dur),
+        'steady_by_site': by_site,
     }
 
 
@@ -150,46 +194,102 @@ def summarize_resources(res_jsonl, t_measure_start, t_end):
     }
 
 
+def probe_ue_service_path(settings, site_urls, count=5):
+    """Run UE-bound HTTP /health probes over the actual NodePort service path per site."""
+    probe_script = (
+        "import json, sys; from urllib.parse import urlsplit; "
+        "import yaml; from benchmark.client import attempt; "
+        "cfg = json.loads(sys.stdin.read()); "
+        "inv = yaml.safe_load(open(cfg['inventory'])); "
+        "ues = inv.get('ues', inv) if isinstance(inv, dict) else inv; "
+        "by_site = {}; "
+        "[by_site.setdefault(u['group'], u['source_address']) for u in ues if isinstance(u, dict) and 'group' in u]; "
+        "out = {}; "
+        "for site, url in cfg['site_urls'].items(): "
+        "  src = by_site.get(site); "
+        "  hurl = url.rsplit('/', 1)[0] + '/health'; "
+        "  samples = [attempt(urlsplit(hurl), 'GET', None, {}, src, 5.0) for _ in range(cfg['count'])] if src else []; "
+        "  durs = sorted(s['duration_ms'] for s in samples if s['success']); "
+        "  out[site] = {'source_address': src, 'url': hurl, 'samples': samples, "
+        "               'successes': len(durs), 'min_ms': durs[0] if durs else None, "
+        "               'median_ms': durs[len(durs)//2] if durs else None, 'max_ms': durs[-1] if durs else None}; "
+        "print(json.dumps(out))"
+    )
+    payload = json.dumps({
+        'inventory': settings['inventory'],
+        'site_urls': site_urls,
+        'count': int(count),
+    })
+    res = subprocess.run(
+        remote(settings, ['sudo', '-n', '.venv/bin/python', '-c', probe_script]),
+        input=payload, capture_output=True, text=True, check=True,
+    )
+    return json.loads(res.stdout)
+
+
 def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedule, duration, warmup, tc_ms,
-            rps_per_ue=DEFAULT_RPS_PER_UE, max_in_flight_per_ue=DEFAULT_MAX_IN_FLIGHT_PER_UE):
+            rps_per_ue=DEFAULT_RPS_PER_UE, max_in_flight_per_ue=DEFAULT_MAX_IN_FLIGHT_PER_UE,
+            workload='face-detection', slo_ms=500.0, probe_service_path=False, plan_only=False):
     run_dir = campaign_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    pod_logs_dir = run_dir / 'pod-logs'
-    pod_logs_dir.mkdir()
 
-    cleanup_app()
+    app_name = workload_identity(workload)
     use_tc = tc_ms is not None and tc_ms > 0
-    manifest_yaml = build_manifest(replicas, node, use_tc)
+    manifest_yaml = build_manifest(replicas, node, use_tc, workload=workload)
     (run_dir / 'manifest.yaml').write_text(manifest_yaml)
 
-    rev = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    provenance = {
+        'core_git': _local_git_provenance(),
+        'ue_git': None,
+        'kubernetes_server_version': None,
+        'kube_proxy_mode': None,
+        'workload_image': _workload_image_ref(workload),
+    }
+    rev = (provenance['core_git'] or {}).get('revision')
     eff_cfg = {
         'stage': stage, 'block': block, 'run_id': run_id, 'revision': rev,
+        'workload': workload, 'app_name': app_name, 'slo_ms': float(slo_ms),
         'replicas': replicas, 'node': node, 'schedule': schedule,
         'duration_s': duration, 'warmup_s': warmup, 'measure_s': duration - warmup,
         'rps_per_ue': float(rps_per_ue), 'max_in_flight_per_ue': int(max_in_flight_per_ue),
         'tc_ms': tc_ms, 'namespace': NAMESPACE,
+        'probe_service_path': bool(probe_service_path),
+        'provenance': provenance,
     }
+    if plan_only:
+        (run_dir / 'effective-config.json').write_text(json.dumps(eff_cfg, indent=2) + '\n')
+        return {'effective': eff_cfg, 'plan_only': True}
+
+    pod_logs_dir = run_dir / 'pod-logs'
+    pod_logs_dir.mkdir()
+    provenance.update(_collect_live_provenance(settings))
+    eff_cfg['provenance'] = provenance
     (run_dir / 'effective-config.json').write_text(json.dumps(eff_cfg, indent=2) + '\n')
 
+    cleanup_app(app_name)
     tc = TrafficDelay(tc_ms) if use_tc else None
     sampler = None
     try:
         if tc:
             tc.start()
         subprocess.run(['kubectl', 'apply', '-f', str(run_dir / 'manifest.yaml')], check=True)
-        kube('-n', NAMESPACE, 'rollout', 'status', f'deployment/{APP}', '--timeout=180s')
+        kube('-n', NAMESPACE, 'rollout', 'status', f'deployment/{app_name}', '--timeout=180s')
 
-        svc = json.loads(kube('-n', NAMESPACE, 'get', 'service', APP, '-o', 'json', capture_output=True, text=True).stdout)
+        svc = json.loads(kube('-n', NAMESPACE, 'get', 'service', app_name, '-o', 'json', capture_output=True, text=True).stdout)
         nodeport = svc['spec']['ports'][0]['nodePort']
-        pods_json = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', f'app={APP}', '-o', 'json', capture_output=True, text=True).stdout)
+        pods_json = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', f'app={app_name}', '-o', 'json', capture_output=True, text=True).stdout)
         pods_json['items'] = [p for p in pods_json['items'] if not p['metadata'].get('deletionTimestamp')]
         (run_dir / 'pods-ready.json').write_text(json.dumps(pods_json, indent=2) + '\n')
 
         site_urls = {site: f'http://{ip}:{nodeport}/detect' for site, ip in settings['site_node_ips'].items()}
+        service_path_probes = None
+        if probe_service_path:
+            service_path_probes = probe_ue_service_path(settings, site_urls)
+            (run_dir / 'service-path-probes.json').write_text(json.dumps(service_path_probes, indent=2) + '\n')
+
         res_file = run_dir / 'resources.jsonl'
         sampler = subprocess.Popen(
-            [sys.executable, '-m', 'utils.monitor_resources', 'sample', str(res_file), '--namespace', NAMESPACE],
+            [sys.executable, '-m', 'utils.monitor_resources', 'sample', str(res_file), '--namespace', NAMESPACE, '--app', app_name],
             cwd=str(ROOT),
         )
 
@@ -244,15 +344,30 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
         (run_dir / 'backend-counts.json').write_text(json.dumps(backend_counts, indent=2) + '\n')
         (run_dir / 'cgroup-stats.json').write_text(json.dumps(cgroup_stats, indent=2) + '\n')
 
-        req_sum = summarize_requests(raw_dest, warmup)
+        summarize_campaign_requests(raw_dest, slo_ms=slo_ms)
+        prom_url = settings.get('prometheus_url')
+        cadvisor_summary = None
+        if prom_url:
+            prom_json = export_prometheus_resources(
+                raw_dest, run_dir, prometheus_url=prom_url,
+                namespace=NAMESPACE, pod_prefix=f'{app_name}-',
+            )
+            cadvisor_summary = str(summarize_cadvisor(
+                prom_json, raw_dest, run_dir / 'summary.csv', run_dir,
+                metrics_jsonl_path=res_file,
+            ))
+
+        req_sum = summarize_requests(raw_dest, warmup, slo_ms=slo_ms)
         res_sum = summarize_resources(res_file, req_sum['measure_start_time'], req_sum['end_time'])
         summary = {'effective': eff_cfg, 'requests': req_sum, 'resources': res_sum,
+                   'cadvisor_summary_csv': cadvisor_summary,
+                   'service_path_probes': service_path_probes,
                    'backend_counts': backend_counts, 'cgroup': cgroup_stats}
         (run_dir / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
         return summary
     finally:
         stop_process(sampler)
-        cleanup_app()
+        cleanup_app(app_name)
         if tc:
             tc.close()
 
@@ -302,14 +417,17 @@ def append_ledger(csv_path, summary, valid=True, exclusion_reason='', next_decis
         })
 
 
-def main():
-    p = argparse.ArgumentParser(description='Fixed-replica calibration harness for G1/G2')
+def main(argv=None):
+    p = argparse.ArgumentParser(description='Fixed-replica diagnostic/calibration harness for B1/B2/G1/G2')
     p.add_argument('--campaign-dir', required=True)
     p.add_argument('--stage', required=True)
     p.add_argument('--block', type=int, required=True)
     p.add_argument('--run-id', required=True)
     p.add_argument('--replicas', type=int, required=True)
     p.add_argument('--node', required=True)
+    p.add_argument('--workload', choices=('face-detection', 'pedestrian-detection'), default='face-detection')
+    p.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
+    p.add_argument('--slo-ms', type=float, default=500.0)
     p.add_argument('--schedule', default='6:0:6:0')
     p.add_argument('--duration', type=float, default=180.0)
     p.add_argument('--warmup', type=float, default=60.0)
@@ -317,20 +435,39 @@ def main():
     p.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE)
     p.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE)
     p.add_argument('--cooldown-after', type=float, default=16.0)
-    args = p.parse_args()
+    p.add_argument('--probe-service-path', action='store_true',
+                   help='run UE-bound HTTP /health probes over the NodePort service path per site')
+    p.add_argument('--plan-only', action='store_true',
+                   help='write manifest and effective-config.json without cluster access or traffic')
+    args = p.parse_args(argv)
+    if args.replicas < 1:
+        p.error('--replicas must be a positive integer')
+    if not math.isfinite(args.slo_ms) or args.slo_ms <= 0:
+        p.error('--slo-ms must be finite and positive')
     if not math.isfinite(args.rps_per_ue) or args.rps_per_ue <= 0:
         p.error('--rps-per-ue must be finite and positive')
     if args.max_in_flight_per_ue < 1:
         p.error('--max-in-flight-per-ue must be a positive integer')
+    if args.workload == 'pedestrian-detection' and Path(args.config).resolve() == (ROOT / 'experiments/campaign.yaml').resolve():
+        p.error('pedestrian-detection requires a separate --config (e.g. experiments/campaign-pedestrian.example.yaml)')
 
-    settings = yaml.safe_load((ROOT / 'experiments/campaign.yaml').read_text())
+    settings = yaml.safe_load(Path(args.config).read_text())
     cdir = Path(args.campaign_dir)
     cdir.mkdir(parents=True, exist_ok=True)
+    if args.plan_only:
+        run_one(settings, cdir, args.stage, args.block, args.run_id,
+                args.replicas, args.node, args.schedule, args.duration, args.warmup, args.tc_ms,
+                args.rps_per_ue, args.max_in_flight_per_ue,
+                workload=args.workload, slo_ms=args.slo_ms,
+                probe_service_path=args.probe_service_path, plan_only=True)
+        return
     with LOCK_PATH.open('w') as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         summary = run_one(settings, cdir, args.stage, args.block, args.run_id,
                           args.replicas, args.node, args.schedule, args.duration, args.warmup, args.tc_ms,
-                          args.rps_per_ue, args.max_in_flight_per_ue)
+                          args.rps_per_ue, args.max_in_flight_per_ue,
+                          workload=args.workload, slo_ms=args.slo_ms,
+                          probe_service_path=args.probe_service_path)
         append_ledger(cdir / 'runs.csv', summary)
         if args.cooldown_after > 0:
             time.sleep(args.cooldown_after)
