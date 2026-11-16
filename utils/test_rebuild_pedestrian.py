@@ -94,7 +94,8 @@ def test_short_shell_commands_forward_to_the_right_module(tmp_path, action, args
     assert cmd[:3] == ['-u', '-m', module]
     assert cmd[-len(args):] == args
     if action == 'ramp':
-        assert cmd[cmd.index('--phase-duration') + 1] == '120'
+        assert cmd[cmd.index('--phase-duration') + 1] == '180'
         assert cmd[cmd.index('--slo-ms') + 1] == '150'
         assert cmd[cmd.index('--tc-ms') + 1] == '10'
         assert '--final-hold' in cmd
+        assert cmd[cmd.index('--scenario') + 1] == 'scaler-staircase'

@@ -32,6 +32,8 @@ APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
 MOBILITY9_SCHEDULE = '9:3:3:3,9:7:1:1,9:1:7:1,9:1:1:7,9:1:7:1,9:7:1:1,9:3:3:3'
 SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
+SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
+SCALER_SCENARIOS = ('scaler-balanced', 'scaler-staircase')
 SCALER_NODE = 'gnb-3'
 SCALER_MIN_REPLICAS = 1
 SCALER_DEFAULT_MAX_REPLICAS = 24
@@ -44,7 +46,7 @@ PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
 COMPARISON_NOTES = {
     'placement': 'Comparison A (placement): same latency-ratio autoscaler for both methods; isolates scheduler/descheduler placement.',
     'full': 'Comparison B (full system): default-scheduler + CPU HPA vs full proposed system (autoscaler + scheduler + descheduler); do not attribute results solely to placement.',
-    'scaling': 'Comparison C (scaling): default-scheduler + gnb-3-only required affinity for both methods; native CPU HPA (60% target) vs native latency HPA (100 ms p90 target).',
+    'scaling': 'Comparison C (scaling): default-scheduler + gnb-3-only required affinity for both methods; native CPU HPA (60% target) vs native latency HPA (target recorded in hpa_targets).',
 }
 
 
@@ -362,12 +364,20 @@ def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=N
 
 
 
-def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds, slo_ms=None):
+def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds, slo_ms=None, staircase=False):
     hpa = yaml.safe_load((ROOT / template_name).read_text())
     hpa['metadata']['name'] = hpa_name
     hpa['spec']['scaleTargetRef']['name'] = app_name
     hpa['spec'].update(minReplicas=min_replicas, maxReplicas=max_replicas)
     hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = int(scale_down_seconds)
+    if staircase:
+        # Matched damping for both metrics; the proposed RT/SLO formula is unchanged.
+        hpa['spec']['behavior'] = {
+            'scaleUp': {'stabilizationWindowSeconds': 0,
+                        'policies': [{'type': 'Pods', 'value': 2, 'periodSeconds': 30}]},
+            'scaleDown': {'stabilizationWindowSeconds': 60, 'tolerance': 0.01,
+                          'policies': [{'type': 'Pods', 'value': 1, 'periodSeconds': 30}]},
+        }
     if slo_ms is not None:
         hpa['spec']['metrics'][0]['external']['target']['value'] = f'{int(round(slo_ms))}m'
     with output_path.open('x') as stream:
@@ -597,7 +607,7 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False):
     """Persist the exact matched replica budget and manifests used by a method."""
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
@@ -674,13 +684,13 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
         hpa_path = _render_hpa(
             'autoscaler/hpa-baseline.yaml', root / 'baseline-hpa.yaml',
             app_name + '-baseline', app_name,
-            config['min_replicas'], max_replicas, config['scale_down_seconds'],
+            config['min_replicas'], max_replicas, config['scale_down_seconds'], staircase=staircase,
         )
     elif autoscaler == 'hpa' and (method == 'proposed' or comparison == 'placement'):
         hpa_path = _render_hpa(
             'autoscaler/hpa-proposed.yaml', root / f'{method}-hpa.yaml',
             f'{app_name}-{method}', app_name,
-            config['min_replicas'], max_replicas, config['scale_down_seconds'], slo_ms=slo_ms,
+            config['min_replicas'], max_replicas, config['scale_down_seconds'], slo_ms=slo_ms, staircase=staircase,
         )
     return config, config_path, hpa_path
 
@@ -694,7 +704,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     output.mkdir()
     config, config_path, hpa_path = _method_configs(root, method, slo_ms, max_replicas, debug,
                                                   resource_weights, locality_weight, selected_workload(settings),
-                                                  comparison, autoscaler, deschedule_interval, fixed_replicas)
+                                                  comparison, autoscaler, deschedule_interval, fixed_replicas,
+                                                  staircase=settings.get('staircase', False))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -869,10 +880,10 @@ def main(argv=None):
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or face-detection)')
-    parser.add_argument('--scenario', choices=['mobility9', 'scaler-balanced'],
-                        help='mobility9: 9 UEs rotating hotspots; scaler-balanced: balanced 3..24..3 UEs on gnb-3 only')
+    parser.add_argument('--scenario', choices=['mobility9', *SCALER_SCENARIOS],
+                        help='mobility9: 9 UEs rotating hotspots; scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on gnb-3')
     parser.add_argument('--final-hold', action='store_true',
-                        help='extend the final scaler-balanced phase by 360s (420s total) to observe HPA scale-down')
+                        help='extend final scaling phase: +360s for legacy balanced, or to at least 600s for staircase')
     parser.add_argument('--deschedule-interval', type=float,
                         help='seconds between proposed descheduler checks (mobility9 default: 30; otherwise config.yaml)')
     parser.add_argument('--comparison', choices=COMPARISONS, default=None,
@@ -919,19 +930,19 @@ def main(argv=None):
             parser.error('--fixed-replicas requires --scenario mobility9')
         if args.max_replicas is not None:
             parser.error('use --fixed-replicas without --max-replicas')
-    if args.scenario == 'scaler-balanced' and args.comparison not in (None, 'scaling'):
-        parser.error('--scenario scaler-balanced requires --comparison scaling')
-    if args.comparison == 'scaling' and args.scenario not in (None, 'scaler-balanced'):
-        parser.error('--comparison scaling requires --scenario scaler-balanced')
+    if args.scenario in SCALER_SCENARIOS and args.comparison not in (None, 'scaling'):
+        parser.error('scaling scenarios require --comparison scaling')
+    if args.comparison == 'scaling' and args.scenario not in (None, *SCALER_SCENARIOS):
+        parser.error('--comparison scaling requires scaler-balanced or scaler-staircase')
     if args.comparison == 'scaling' and args.scenario is None:
         args.scenario = 'scaler-balanced'
     args.comparison = args.comparison or (
-        'scaling' if args.scenario == 'scaler-balanced' else
+        'scaling' if args.scenario in SCALER_SCENARIOS else
         'placement' if args.scenario else
         'full'
     )
-    if args.final_hold and args.scenario != 'scaler-balanced':
-        parser.error('--final-hold requires --scenario scaler-balanced')
+    if args.final_hold and args.scenario not in SCALER_SCENARIOS:
+        parser.error('--final-hold requires a scaling scenario')
     if args.scenario == 'mobility9':
         if args.debug:
             parser.error('mobility9 uses standard HPA timers; omit --debug')
@@ -941,17 +952,17 @@ def main(argv=None):
             args.slo_ms = 100
         if args.deschedule_interval is None:
             args.deschedule_interval = 30
-    elif args.scenario == 'scaler-balanced':
+    elif args.scenario in SCALER_SCENARIOS:
         if args.debug:
-            parser.error('scaler-balanced uses standard HPA timers; omit --debug')
+            parser.error('scaling scenarios have their own HPA profile; omit --debug')
         if args.autoscaler != 'hpa':
-            parser.error('scaler-balanced requires native HPA (--autoscaler hpa)')
+            parser.error('scaling scenarios require native HPA (--autoscaler hpa)')
         if args.placement_engine != 'go':
-            parser.error('scaler-balanced does not use a custom placement engine; omit --placement-engine python')
+            parser.error('scaling scenarios do not use a custom placement engine; omit --placement-engine python')
         if args.deschedule_interval is not None:
-            parser.error('scaler-balanced does not use the descheduler; omit --deschedule-interval')
+            parser.error('scaling scenarios do not use the descheduler; omit --deschedule-interval')
         if args.resource_weights is not None or args.locality_weight is not None:
-            parser.error('scaler-balanced does not use custom placement scoring')
+            parser.error('scaling scenarios do not use custom placement scoring')
         if args.slo_ms is None:
             args.slo_ms = 100
     if args.deschedule_interval is not None and (not math.isfinite(args.deschedule_interval) or args.deschedule_interval <= 0):
@@ -975,10 +986,12 @@ def main(argv=None):
     settings['max_in_flight_per_ue'] = args.max_in_flight_per_ue
     if args.scenario == 'mobility9':
         settings.update(schedule=MOBILITY9_SCHEDULE, phase_duration=60)
-    elif args.scenario == 'scaler-balanced':
-        settings.update(schedule=SCALER_BALANCED_SCHEDULE, phase_duration=60)
+    elif args.scenario in SCALER_SCENARIOS:
+        settings.update(schedule=SCALER_STAIRCASE_SCHEDULE if args.scenario == 'scaler-staircase' else SCALER_BALANCED_SCHEDULE,
+                        phase_duration=180 if args.scenario == 'scaler-staircase' else 60)
     workload = args.workload if args.workload is not None else selected_workload(settings)
     settings['workload'] = workload
+    settings['staircase'] = args.scenario == 'scaler-staircase'
     if args.workload is not None and args.workload != 'face-detection':
         # Separate config and an explicit SLO prevent accidental reuse of face calibration.
         if args.config == str(ROOT / 'experiments/campaign.yaml') or args.slo_ms is None:
@@ -990,8 +1003,9 @@ def main(argv=None):
     if args.phase_duration is not None:
         settings['phase_duration'] = args.phase_duration
     phases = parse_schedule(settings['schedule']) if 'schedule' in settings else []
-    hold_seconds = FINAL_HOLD_SECONDS if args.final_hold else 0
-    if args.scenario == 'scaler-balanced':
+    hold_seconds = (max(0, 600 - float(settings['phase_duration']))
+                    if args.scenario == 'scaler-staircase' else FINAL_HOLD_SECONDS) if args.final_hold else 0
+    if args.scenario in SCALER_SCENARIOS:
         base_duration = float(settings['phase_duration'])
         settings['phase_durations'] = [base_duration] * (len(phases) - 1) + [base_duration + hold_seconds]
     phase_durations = settings.get('phase_durations') or (
@@ -1042,6 +1056,9 @@ def main(argv=None):
         'phase_duration': settings.get('phase_duration'),
         'long_run': args.long_run,
         'phase_durations_s': phase_durations,
+        'hpa_behavior_profile': 'bounded-staircase' if settings['staircase'] else 'original',
+        'latency_scaling_formula': 'RT/SLO (unchanged; rounding can retain excess replicas)',
+        'analysis_windows': {'whole_phase': True, 'late_phase_seconds': 60, 'steady_state_assumed': False},
         'final_hold_seconds': hold_seconds,
         'node_restriction': SCALER_NODE if args.comparison == 'scaling' else None,
         'hpa_targets': hpa_targets,
@@ -1064,7 +1081,8 @@ def main(argv=None):
         _campaign_manifest(output, args.tc_ms is not None, workload)
         for method in ('baseline', 'proposed'):
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
-                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas)
+                            resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
+                            staircase=settings['staircase'])
         (output / 'plan.yaml').write_text(yaml.safe_dump(shared_metadata | {
             'calibrated': False,
             'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
@@ -1106,7 +1124,7 @@ def main(argv=None):
             print('Mobility scenario: fixed nine UEs; hotspot order gNB-1 -> gNB-2 -> gNB-3 -> gNB-2 -> gNB-1. '
                   f'Descheduler checks every {args.deschedule_interval:g}s; evictions require settled Pods and positive score improvement. '
                   'UE moves use stop-and-reattach, not handover.', flush=True)
-        elif args.scenario == 'scaler-balanced':
+        elif args.scenario in SCALER_SCENARIOS:
             print(f'Scaling scenario: balanced UEs (3..24..3) on {SCALER_NODE} with default-scheduler; '
                   f'CPU HPA (60%) vs latency HPA ({slo_ms:g} ms p90), replicas {min_replicas}..{max_replicas}.', flush=True)
         if args.fixed_replicas is not None:

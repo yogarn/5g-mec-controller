@@ -652,6 +652,29 @@ def test_invalid_arrival_rate_flags_rejected(flags, monkeypatch):
     assert exc.value.code == 2
 
 
+def test_staircase_plan_is_balanced_with_matched_bounded_hpas(tmp_path):
+    out = tmp_path / 'staircase'
+    campaign.main(['--scenario', 'scaler-staircase', '--final-hold', '--slo-ms', '150', '--plan-only', str(out)])
+    plan = yaml.safe_load((out / 'plan.yaml').read_text())
+    assert plan['comparison'] == 'scaling'
+    steps = [list(map(int, s.split(':'))) for s in plan['schedule'].split(',')]
+    assert [s[0] for s in steps] == [3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3]
+    assert all(s[1:] == [s[0] // 3] * 3 for s in steps)
+    assert plan['phase_durations_s'] == [180.0] * 12 + [600.0]
+    assert plan['hpa_behavior_profile'] == 'bounded-staircase'
+    hpas = [yaml.safe_load((out / f'{m}-hpa.yaml').read_text()) for m in ('baseline', 'proposed')]
+    assert hpas[0]['spec']['behavior'] == hpas[1]['spec']['behavior']
+    assert hpas[0]['spec']['behavior']['scaleDown']['tolerance'] == .01
+    assert hpas[0]['spec']['behavior']['scaleUp']['policies'][0]['value'] == 2
+    assert hpas[1]['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
+    assert hpas[1]['spec']['metrics'][0]['external']['target']['value'] == '150m'
+    for m in ('baseline', 'proposed'):
+        dep = next(d for d in yaml.safe_load_all((out / f'{m}-workload.yaml').read_text()) if d['kind'] == 'Deployment')
+        spec = dep['spec']['template']['spec']
+        assert spec['schedulerName'] == 'default-scheduler'
+        assert spec['containers'][0]['resources']['limits'] == {'cpu': '1', 'memory': '512Mi'}
+
+
 def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path):
     out = tmp_path / 'scaler_plan'
     campaign.main(['--comparison', 'scaling', '--scenario', 'scaler-balanced', '--plan-only', str(out)])
