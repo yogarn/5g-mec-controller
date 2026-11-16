@@ -241,3 +241,13 @@ Refactored the controller and experiment harness to follow Kubernetes separation
 - Preserved core's rebuilt pedestrian digest `478371df0a763f4f60b670f9eb800ca8da285667aa6b9b39b00b54c3a3dbae82` in both manifests together with the committed 1 CPU / 512Mi limits. Sync does not deploy workloads or launch experiments.
 - Offline replot of copied scaler_02: phase-2 final-60s p90 baseline 174.48ms vs proposed 134.88ms; both have 100% late-window request coverage. Whole-phase p90 remains 2498.41ms vs 4283.09ms, preserving the transient cost.
 - Validation: 264 regression tests + 23 subtests passed; 11 app/plot tests passed in the dependency-enabled environment. Offline staircase manifests and replot checked; both HPAs accepted by core with server dry-run. No live campaign launched.
+
+
+## 14. Floor-Adjusted Latency Variant (Authorized Trial)
+
+- User authorized implementing the previously discussed floor-adjusted ratio. `ramp` now adds `--latency-floor-ms 130`; direct campaign CLI defaults to 0 (raw formula). Nonzero values are restricted to scaler-staircase, must be whole nonnegative milliseconds, and must be below the SLO.
+- Proposed signal: `max(RT-floor,0)`, target `SLO-floor`; e.g. `ue_p90_excess_latency_130ms_seconds` against `20m` for SLO150ms. Floor130ms is a fixed exploratory reference, not a measured physical floor. Full-latency SLO reporting and CPU baseline60% are unchanged.
+- Campaign startup (not Git sync) merges the floor-specific adapter rule while preserving raw/unrelated rules; saves prior and desired ConfigMaps, restarts/waits for adapter before either method, and attempts rollback if rollout fails. Floor-specific naming allows old raw and other floor rules to coexist. Incomplete/missing windows are not turned into zero. Active proposed telemetry verification checks the selected metric.
+- Existing +2 Pods/30s / -1 Pod/30s damping and matched 60s down stabilization remain. No Python replica writer. This is an exploratory method change, with no guarantee of smoothness or minimum replicas. The floor remains fixed throughout both methods of a campaign.
+- Validation: offline plan renders raw CPU baseline, floor-adjusted proposed target20ms, unchanged SLO150ms, and floor metadata. Kubernetes server dry-run accepted HPA and ConfigMap. Synthetic queries executed read-only against core Prometheus verified RT120/130/140/150/200ms -> excess0/0/10/20/70ms, and absent/incomplete telemetry stays absent. No adapter installation or UE campaign was launched during development.
+- Regression validation: 276 tests and 23 subtests passed, including raw-vs-floor active metric verification, invalid floor rejection, independent floor rule preservation, and failed adapter rollout restoration.

@@ -328,7 +328,8 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 
 Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
 `--scenario scaler-staircase`, 180s phases, final hold, TC 10ms, SLO 150ms,
-5 RPS/UE and max 8 in flight/UE. Both methods use default-scheduler on gnb-3,
+5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
+Both methods use default-scheduler on gnb-3,
 replica bounds 1..24, requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.
 The rebuilt image digest from core is pinned in both manifests.
 
@@ -343,11 +344,10 @@ and original HPA behavior for reproducibility. Mobility is unchanged.
 The staircase gives both HPAs matched behavior: scale up by at most 2 Pods/30s,
 scale down by at most 1 Pod/30s, scale-down stabilization 60s, and scale-down
 tolerance 0.01. This requires Kubernetes support for per-direction HPA tolerance
-(v1.35 cluster used here). CPU baseline still targets 60% of requests. Proposed
-still uses the raw RT/SLO ratio; no floor subtraction is implemented. These
-settings reduce abrupt replica changes but do not guarantee SLO attainment or
-full replica convergence: integer rounding can still retain excess replicas.
-A floor-adjusted method would need a separately justified floor and evaluation.
+(v1.35 cluster used here). CPU baseline still targets 60% of requests. The `ramp` shortcut now opts into the floor-adjusted variant described below;
+direct scenario invocation keeps raw RT/SLO unless `--latency-floor-ms` is set.
+These settings do not guarantee SLO attainment or full replica convergence;
+integer rounding, metric delay, and floor choice remain limitations.
 Do not label this configuration as the unchanged default-HPA comparison.
 
 Plots preserve the full-range `response-time` figure. `response-time-zoom` adds
@@ -364,3 +364,51 @@ resource-window semantics.
 
 Frozen results and `scaler_02` retain their original parameters. This is a new
 exploratory configuration following inspection of those runs; preserve both.
+
+
+## Exploratory floor-adjusted latency HPA
+
+The user authorized trying this variant after examining scaler_02. The `ramp`
+shortcut now supplies `--latency-floor-ms 130`. With SLO 150ms, proposed HPA uses
+`ceil(currentReplicas * max(RT - 130ms, 0) / 20ms)`, subject to the existing
+replica bounds, stabilization, tolerance and rate limits. CPU baseline stays
+at 60% of requests, with the matched staircase rate/stabilization settings.
+Reporting still uses the full response time against 150ms, including failures
+and scheduled-request coverage. No Python replica controller is introduced.
+
+130ms is a fixed exploratory reference below the roughly 140ms low-load p90
+observed in prior runs. It is not a measured physical minimum, an identified
+queueing delay, or a Kubernetes recommendation. The difference is a heuristic
+load-sensitive latency signal. This variant needs validation and independent
+replication; neither smoothness nor eventual minimum replica count is assured.
+An overestimated reference can make the signal zero and encourage excessive
+downscaling. A reference close to the SLO increases sensitivity. Record changes
+as distinct experimental configurations rather than tuning an ongoing run.
+
+`--latency-floor-ms` accepts nonnegative whole milliseconds, requires the
+staircase scenario when nonzero, and must be below the SLO. Use
+`bash experiments/run.sh ramp scaler_floor_01` to try 130ms, or append
+`--latency-floor-ms 0` to retain raw RT/SLO. Direct campaign invocation defaults
+to zero, so legacy and mobility scenarios keep their original formula.
+
+For each nonzero reference the campaign renders a separate adapter metric, e.g.
+`ue_p90_excess_latency_130ms_seconds`, using
+`clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.13, 0)`
+with the existing complete-telemetry-window guard. Missing/incomplete source
+telemetry stays absent, while an observed latency below the reference produces
+a legitimate zero. The HPA target is `20m` seconds for the 130/150ms example.
+
+`--plan-only` writes the proposed HPA, adapter ConfigMap preview and run metadata
+without cluster access. During an actual campaign, after capacity checks and
+before either method starts, the runner appends/updates only the selected
+floor-specific rule in the live ConfigMap and restarts/waits for the adapter.
+Other adapter rules and data keys are preserved; the raw metric stays available.
+The pre-change ConfigMap is saved in `adapter-before.json`, and the desired
+configuration in `floor-adapter-configmap.yaml`. A failed adapter rollout
+attempts to restore the prior config and aborts before UE traffic. Rules for
+previous reference values remain available. The active-telemetry check queries
+the exact floor-specific metric during the proposed run. Syncing Git alone
+neither installs the rule nor restarts the adapter.
+
+Implementation references: [Prometheus clamp_min](https://prometheus.io/docs/prometheus/latest/querying/functions/#clamp_min)
+and [Prometheus Adapter configuration](https://github.com/kubernetes-sigs/prometheus-adapter/blob/master/docs/config.md).
