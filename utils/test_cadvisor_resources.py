@@ -256,7 +256,12 @@ def test_offline_export_saves_metadata_and_records_errors_without_fallback(tmp_p
     assert saved['rate_window_seconds'] == 45.0
     assert saved['freshness_seconds'] == 25.0
     assert saved['source_metadata']['fallback_used'] is False
-    assert set(saved['query_errors']) == {'cpu_seconds_total', 'memory_working_set_bytes', 'scrape_up'}
+    assert set(saved['query_errors']) == {
+        'cpu_seconds_total', 'memory_working_set_bytes',
+        'cpu_cfs_throttled_periods_total', 'cpu_cfs_periods_total',
+        'cpu_cfs_throttled_seconds_total', 'node_cpu_idle_seconds_total',
+        'scrape_up',
+    }
 
     summarize_cadvisor(prom_json, requests, summary, out, metrics_jsonl_path=metrics_jsonl)
     row, = list(csv.DictReader((out / 'resource-by-ramp.csv').open()))
@@ -280,7 +285,7 @@ def test_export_uses_raw_range_vector_query_for_exact_scrape_timestamps(tmp_path
     prom_json = export_prometheus_resources(requests, out, fetch_fn=fake_fetch)
     saved = json.loads(prom_json.read_text())
     assert saved['query_type'] == 'raw_range_vector_at_end'
-    assert len(seen_urls) == 3
+    assert len(seen_urls) == 7
     assert all('/api/v1/query?' in u and '/api/v1/query_range' not in u for u in seen_urls)
     assert saved['queries']['cpu_seconds_total'].endswith('[115s]')
 
@@ -405,3 +410,78 @@ def test_offline_reprocessing_with_cpu_window_override_and_historical_file_compa
     assert row['cpu_complete_samples'] == '12'
     assert row['memory_complete_samples'] == '12'
     assert float(row['cpu_millicores']) == pytest.approx(200.0)
+
+
+def test_throttling_aggregate_ratio_with_reset_and_missing_data(tmp_path):
+    requests = tmp_path / 'requests.jsonl'
+    requests.write_text(
+        json.dumps({'event': 'phase_start', 'phase': 'p1', 'start_time': 100.0}) + '\n'
+        + json.dumps({'event': 'phase_end', 'phase': 'p1', 'end_time': 160.0}) + '\n'
+    )
+    summary = tmp_path / 'summary.csv'
+    summary.write_text('phase\np1\n')
+    metrics_jsonl = tmp_path / 'metrics.jsonl'
+    metrics_jsonl.write_text(
+        json.dumps({'sample_time': 130.0, 'pods': [{'name': 'mec-placement-face-detection-a', 'phase': 'Running'}]}) + '\n'
+    )
+
+    # Container 1: 100->120 throttled (+20), 200->400 periods (+200).
+    # Container 2: reset 50->10 throttled (+10), 300->500 periods (+200).
+    # Aggregate ratio = (20 + 10) / (200 + 200) = 30 / 400 = 0.075 (NOT avg of 0.1 and 0.05).
+    prom_json = tmp_path / 'resources-prometheus.json'
+    prom_json.write_text(json.dumps({
+        'pod_prefix': 'mec-placement-face-detection-',
+        'step_seconds': 5.0,
+        'rate_window_seconds': 45.0,
+        'freshness_seconds': 25.0,
+        'scrape_interval_seconds': 5.0,
+        'results': {
+            'cpu_seconds_total': [],
+            'memory_working_set_bytes': [],
+            'cpu_cfs_throttled_periods_total': [
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-a', 'container': 'app', 'id': 'c1'},
+                 'values': [[105.0, '100'], [155.0, '120']]},
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-b', 'container': 'app', 'id': 'c2'},
+                 'values': [[105.0, '50'], [155.0, '10']]},
+            ],
+            'cpu_cfs_periods_total': [
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-a', 'container': 'app', 'id': 'c1'},
+                 'values': [[105.0, '200'], [155.0, '400']]},
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-b', 'container': 'app', 'id': 'c2'},
+                 'values': [[105.0, '300'], [155.0, '500']]},
+            ],
+            'cpu_cfs_throttled_seconds_total': [
+                {'metric': {'namespace': 'services', 'pod': 'mec-placement-face-detection-a', 'container': 'app', 'id': 'c1'},
+                 'values': [[105.0, '1.0'], [155.0, '2.5']]},
+            ],
+            'node_cpu_idle_seconds_total': [
+                {'metric': {'node': 'gnb-3', 'cpu': '0'}, 'values': [[105.0, '1000.0'], [155.0, '1030.0']]},
+            ],
+            'scrape_up': [],
+        },
+    }))
+    out = tmp_path / 'out_with_thr'
+    summarize_cadvisor(prom_json, requests, summary, out, metrics_jsonl_path=metrics_jsonl)
+    row, = list(csv.DictReader((out / 'resource-by-ramp.csv').open()))
+    assert float(row['throttled_period_ratio']) == pytest.approx(0.075)
+    assert float(row['cfs_throttled_periods']) == pytest.approx(30.0)
+    assert float(row['cfs_periods']) == pytest.approx(400.0)
+    assert float(row['cfs_throttled_seconds']) == pytest.approx(1.5)
+    # 50s elapsed, 30s idle -> 0.40 CPU utilization.
+    assert float(row['node_cpu_max_utilization']) == pytest.approx(0.4)
+    assert json.loads(row['node_cpu_utilization'])['gnb-3'] == pytest.approx(0.4)
+
+    # Missing throttling series must be blank (''), never '0'.
+    prom_missing = tmp_path / 'resources-missing.json'
+    prom_missing.write_text(json.dumps({
+        'pod_prefix': 'mec-placement-face-detection-',
+        'step_seconds': 5.0,
+        'results': {'cpu_seconds_total': [], 'memory_working_set_bytes': [], 'scrape_up': []},
+    }))
+    out_missing = tmp_path / 'out_missing'
+    summarize_cadvisor(prom_missing, requests, summary, out_missing, metrics_jsonl_path=metrics_jsonl)
+    row_m, = list(csv.DictReader((out_missing / 'resource-by-ramp.csv').open()))
+    assert row_m['throttled_period_ratio'] == ''
+    assert row_m['cfs_throttled_seconds'] == ''
+    assert row_m['node_cpu_max_utilization'] == ''
+    assert 'missing_throttling_series' in row_m['missing_reasons']

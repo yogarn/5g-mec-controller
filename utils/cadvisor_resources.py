@@ -33,6 +33,10 @@ def build_queries(namespace='services', pod_prefix='mec-placement-face-detection
     return {
         'cpu_seconds_total': f'container_cpu_usage_seconds_total{{{selector}}}',
         'memory_working_set_bytes': f'container_memory_working_set_bytes{{{selector}}}',
+        'cpu_cfs_throttled_periods_total': f'container_cpu_cfs_throttled_periods_total{{{selector}}}',
+        'cpu_cfs_periods_total': f'container_cpu_cfs_periods_total{{{selector}}}',
+        'cpu_cfs_throttled_seconds_total': f'container_cpu_cfs_throttled_seconds_total{{{selector}}}',
+        'node_cpu_idle_seconds_total': 'node_cpu_seconds_total{mode="idle"}',
         'scrape_up': f'up{{job="{job}"}}',
     }
 
@@ -154,6 +158,48 @@ def _dedupe_series(matrix, pod_prefix):
     return cleaned, pod_of, container_of, duplicates
 
 
+def _counter_delta_in_phase(samples, start, end):
+    """Return counter delta within [start, end] with reset handling, or None if <2 samples."""
+    in_phase = [(ts, val) for ts, val in samples if start <= ts <= end]
+    if len(in_phase) < 2 or in_phase[-1][0] <= in_phase[0][0]:
+        return None
+    delta = 0.0
+    for (_, prev_v), (_, curr_v) in zip(in_phase, in_phase[1:]):
+        if curr_v >= prev_v:
+            delta += curr_v - prev_v
+        else:
+            delta += curr_v
+    return delta
+
+
+def _node_cpu_utilization_in_phase(node_idle_series, start, end):
+    """Compute per-node CPU utilization (0..1) from node_cpu_seconds_total{mode='idle'}."""
+    by_node_cpu = {}
+    for series in node_idle_series or []:
+        metric = series.get('metric') or {}
+        node = metric.get('node') or metric.get('instance') or ''
+        cpu = metric.get('cpu', '0')
+        if not node:
+            continue
+        samples = []
+        for raw_ts, raw_val in series.get('values', []):
+            ts = float(raw_ts)
+            val = float(raw_val)
+            if math.isfinite(val):
+                samples.append((ts, val))
+        samples.sort()
+        in_phase = [(ts, val) for ts, val in samples if start <= ts <= end]
+        if len(in_phase) < 2 or in_phase[-1][0] <= in_phase[0][0]:
+            continue
+        dt = in_phase[-1][0] - in_phase[0][0]
+        delta = _counter_delta_in_phase(samples, start, end)
+        if delta is None or dt <= 0:
+            continue
+        idle_frac = max(0.0, min(1.0, delta / dt))
+        by_node_cpu.setdefault(node, []).append(1.0 - idle_frac)
+    return {node: sum(vals) / len(vals) for node, vals in sorted(by_node_cpu.items()) if vals}
+
+
 def _rate_millicores_at(samples, t_eval, rate_window_s, freshness_s):
     """Compute per-container CPU rate in millicores over [t_eval - rate_window_s, t_eval]."""
     in_window = [(ts, val) for ts, val in samples if t_eval - rate_window_s <= ts <= t_eval]
@@ -223,12 +269,19 @@ def summarize_cadvisor(
 
     cpu_series, _, cpu_container_of, cpu_dups = _dedupe_series(results.get('cpu_seconds_total', []), pod_prefix)
     mem_series, _, mem_container_of, mem_dups = _dedupe_series(results.get('memory_working_set_bytes', []), pod_prefix)
+    thr_periods_series, _, _, _ = _dedupe_series(results.get('cpu_cfs_throttled_periods_total', []), pod_prefix)
+    periods_series, _, _, _ = _dedupe_series(results.get('cpu_cfs_periods_total', []), pod_prefix)
+    thr_seconds_series, _, _, _ = _dedupe_series(results.get('cpu_cfs_throttled_seconds_total', []), pod_prefix)
+    node_idle_series = results.get('node_cpu_idle_seconds_total', [])
     scrape_up_series = results.get('scrape_up', [])
     running_at = _load_running_lookup(metrics_jsonl_path)
 
     fields = [
         'phase', 'resource_source', 'rate_window_seconds', 'freshness_seconds', 'scrape_interval_seconds',
-        'cpu_millicores', 'memory_mib', 'complete_samples',
+        'cpu_millicores', 'memory_mib',
+        'throttled_period_ratio', 'cfs_throttled_periods', 'cfs_periods', 'cfs_throttled_seconds',
+        'node_cpu_max_utilization', 'node_cpu_utilization',
+        'complete_samples',
         'memory_complete_samples', 'cpu_complete_samples',
         'partial_samples', 'memory_partial_samples', 'cpu_partial_samples',
         'missing_samples', 'expected_samples',
@@ -383,6 +436,42 @@ def summarize_cadvisor(
             )
 
             all_times = [v[1] for v in mem_full] + [v[1] for v in cpu_full]
+
+            # Aggregate CFS throttling ratio across container instances in [start, end].
+            thr_p_sum = 0.0
+            per_sum = 0.0
+            matched_thr_instances = 0
+            for ckey in sorted(set(thr_periods_series) & set(periods_series)):
+                tp_delta = _counter_delta_in_phase(thr_periods_series[ckey], start, end)
+                p_delta = _counter_delta_in_phase(periods_series[ckey], start, end)
+                if tp_delta is None or p_delta is None:
+                    continue
+                thr_p_sum += tp_delta
+                per_sum += p_delta
+                matched_thr_instances += 1
+            if matched_thr_instances > 0 and per_sum > 0:
+                thr_ratio_str = f'{thr_p_sum / per_sum:.6f}'
+                thr_p_str = f'{thr_p_sum:g}'
+                per_str = f'{per_sum:g}'
+            else:
+                thr_ratio_str = ''
+                thr_p_str = ''
+                per_str = ''
+                if not thr_periods_series or not periods_series:
+                    reasons.add('missing_throttling_series')
+                else:
+                    reasons.add('missing_throttling_samples')
+
+            thr_sec_deltas = [
+                d for samples in thr_seconds_series.values()
+                if (d := _counter_delta_in_phase(samples, start, end)) is not None
+            ]
+            thr_sec_str = f'{sum(thr_sec_deltas):.6f}' if thr_sec_deltas else ''
+
+            node_cpu = _node_cpu_utilization_in_phase(node_idle_series, start, end)
+            node_cpu_max_str = f'{max(node_cpu.values()):.6f}' if node_cpu else ''
+            node_cpu_json_str = json.dumps(node_cpu, sort_keys=True) if node_cpu else ''
+
             writer.writerow({
                 'phase': phase,
                 'resource_source': RESOURCE_SOURCE,
@@ -391,6 +480,12 @@ def summarize_cadvisor(
                 'scrape_interval_seconds': f'{scrape_interval_s:g}',
                 'cpu_millicores': sum(v[0] for v in cpu_full) / len(cpu_full) if cpu_full else '',
                 'memory_mib': sum(v[0] for v in mem_full) / len(mem_full) if mem_full else '',
+                'throttled_period_ratio': thr_ratio_str,
+                'cfs_throttled_periods': thr_p_str,
+                'cfs_periods': per_str,
+                'cfs_throttled_seconds': thr_sec_str,
+                'node_cpu_max_utilization': node_cpu_max_str,
+                'node_cpu_utilization': node_cpu_json_str,
                 'complete_samples': overall_complete,
                 'memory_complete_samples': len(mem_full),
                 'cpu_complete_samples': len(cpu_full),
