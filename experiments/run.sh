@@ -33,7 +33,7 @@ if [[ "${1:-}" == check ]]; then
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement|scaling] [--scenario mobility9|scaler-balanced] [--final-hold] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
+  echo 'Usage: bash experiments/run.sh setup | check [--workload NAME] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement|scaling] [--scenario mobility9|scaler-balanced] [--final-hold] [--long-run] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--max-replicas COUNT] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"

@@ -854,8 +854,11 @@ def main(argv=None):
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
     parser.add_argument('--debug', action='store_true',
                         help='60s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
-    parser.add_argument('--phase-duration', type=float,
-                        help='traffic seconds per phase (minimum 60; default: campaign config, or 60 with --debug)')
+    duration_options = parser.add_mutually_exclusive_group()
+    duration_options.add_argument('--long-run', action='store_true',
+                                  help='mobility9 only: use 120s phases to observe placement convergence')
+    duration_options.add_argument('--phase-duration', type=float,
+                                  help='traffic seconds per phase (minimum 60; default: campaign config, or 60 with --debug)')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE,
                         help='target request arrival rate per active UE in requests/second (default: 5)')
     parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE,
@@ -866,6 +869,10 @@ def main(argv=None):
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     args = parser.parse_args(argv)
+    if args.long_run:
+        if args.scenario != 'mobility9':
+            parser.error('--long-run requires --scenario mobility9')
+        args.phase_duration = 120
     if args.fixed_replicas is not None:
         if args.fixed_replicas < 1:
             parser.error('--fixed-replicas must be a positive integer')
@@ -994,6 +1001,7 @@ def main(argv=None):
         'slo_ms': slo_ms,
         'schedule': settings.get('schedule'),
         'phase_duration': settings.get('phase_duration'),
+        'long_run': args.long_run,
         'phase_durations_s': phase_durations,
         'final_hold_seconds': hold_seconds,
         'node_restriction': SCALER_NODE if args.comparison == 'scaling' else None,

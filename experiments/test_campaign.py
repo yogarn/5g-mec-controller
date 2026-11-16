@@ -538,6 +538,26 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     assert yaml.safe_load(cm['data']['config.yaml'])['deschedule_interval_seconds'] == 30
 
 
+def test_mobility9_long_run_extends_phases_with_fixed_budget_and_normal_timers(tmp_path):
+    output = tmp_path / 'long-plan'
+    campaign.main(['--scenario', 'mobility9', '--long-run', '--fixed-replicas', '9',
+                   '--tc-ms', '10', '--slo-ms', '150', '--plan-only', str(output)])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    assert plan['long_run'] is True
+    assert plan['phase_durations_s'] == [120.0] * 7
+    assert plan['campaign_settings']['phase_duration'] == 120
+    assert plan['campaign_settings']['schedule'] == campaign.MOBILITY9_SCHEDULE
+    assert plan['slo_ms'] == 150
+    assert plan['tc_ms'] == 10
+    assert plan['replica_bounds'] == {'min': 9, 'max': 9}
+    assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
+    cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
+    assert cfg['deschedule_interval_seconds'] == 30
+    for method in ('baseline', 'proposed'):
+        hpa = yaml.safe_load((output / f'{method}-hpa.yaml').read_text())
+        assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+
+
 def test_mobility9_preserves_explicit_timer_and_slo_overrides(tmp_path):
     output = tmp_path / 'plan'
     campaign.main(['--scenario', 'mobility9', '--deschedule-interval', '45',
@@ -554,6 +574,9 @@ def test_mobility9_preserves_explicit_timer_and_slo_overrides(tmp_path):
     ['--deschedule-interval', '-1'], ['--deschedule-interval', 'inf'],
     ['--scenario', 'mobility9', '--debug'],
     ['--scenario', 'mobility9', '--placement-engine', 'python'],
+    ['--long-run'],
+    ['--scenario', 'scaler-balanced', '--long-run'],
+    ['--scenario', 'mobility9', '--long-run', '--phase-duration', '90'],
 ])
 def test_mobility_rejects_invalid_timing_and_runtime_before_cluster_access(flags, monkeypatch):
     monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))

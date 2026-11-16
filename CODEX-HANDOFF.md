@@ -194,3 +194,9 @@ Refactored the controller and experiment harness to follow Kubernetes separation
    - A `45s` CPU rate window can cross `60s` phase boundaries; resource summaries are averages of valid observations, not exact phase CPU consumption.
    - Assumes K3s API server `nodes/proxy` routes `/api/v1/nodes/<node>/proxy/metrics/cadvisor` with ServiceAccount auth and exposes `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` with `container` and `id`/`container_id` labels.
    - `utils/test_plot_autoscaler.py` was only `py_compile`-checked locally (`matplotlib` is not installed in `/usr/bin/python3`).
+
+## 10. Longer Mobility Convergence Run
+
+- Added `--long-run` for `--scenario mobility9`: seven 120s phases per method, 28 minutes of traffic per pair. Records `long_run` and effective phase durations in plan/campaign metadata; defaults remain 60s without the flag.
+- Mutually exclusive with `--phase-duration`; rejected outside mobility9. Retains the normal HPA and descheduler timers, replica budget, TC and request pacing. Existing plots summarize whole phases; separate first/second-minute analysis is not added.
+- Validation: `python3 -m pytest -q experiments/test_campaign.py` — 95 passed; `bash -n experiments/run.sh` and `git diff --check` passed. No live traffic or deployment changes.

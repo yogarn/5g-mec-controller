@@ -207,6 +207,12 @@ bash experiments/run.sh mobility9_01 --scenario mobility9
 
 This scenario keeps nine UEs active per traffic phase, with splits `3:3:3 → 7:1:1 → 1:7:1 → 1:1:7 → 1:7:1 → 7:1:1 → 3:3:3`. Each phase lasts 60 seconds: seven minutes of traffic per method, fourteen minutes per pair, plus setup, UE reattachment and transfer. Movement means stop-and-reattach rather than seamless handover.
 
+For a longer convergence test, add `--long-run` to use seven **120-second phases** per method (28 minutes of traffic per pair, plus setup and UE switching). This is a shortcut for `--phase-duration 120`; the two flags are mutually exclusive. It retains the normal 30-second descheduler interval and HPA timers. Record the first and second minute separately when assessing initial response versus convergence; the existing phase plots average the full 120 seconds.
+
+```bash
+bash experiments/run.sh mobility9_fixed9_tc10_150ms_long_01 --scenario mobility9 --long-run --fixed-replicas 9 --tc-ms 10 --slo-ms 150
+```
+
 The default comparison is `placement`: both methods use the same native latency HPA at 100 ms. Proposed uses the Go scheduler/descheduler. The descheduler checks every 30 seconds; HPA stabilization and the CPU measurement window retain their normal settings. Override the check interval independently with `--deschedule-interval SECONDS`; `--phase-duration`, `--slo-ms`, and `--locality-weight` remain available. `--debug` is rejected for this scenario to avoid changing other timers.
 
 The shorter descheduler interval gives each hotspot opportunities for eviction, but does not force a move. Pods must be settled, the destination must be feasible, and the score improvement must be positive; PDB rejection also defers eviction. In particular, gNB-1 may lack capacity. Inspect `proposed/controller.log` for `descheduler evicted`, `descheduler noop`, and `descheduler deferred`, alongside placement and latency plots. HPA remains active, so new-Pod scheduling also affects placement; this is a diagnostic of the placement system, not an isolated descheduler-only test. Repeat with reversed hotspot order before treating an observed effect as general.
