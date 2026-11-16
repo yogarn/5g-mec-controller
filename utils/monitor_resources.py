@@ -67,7 +67,7 @@ def quantity(value, kind):
     raise ValueError(f'unsupported {kind} quantity: {value}')
 
 
-def sample(output, namespace='services', app='mec-placement-face-detection'):
+def sample(output, namespace='services', app='mec-placement-face-detection', pods_only=False):
     stop = False
     def request_stop(signum, frame):
         nonlocal stop
@@ -87,13 +87,14 @@ def sample(output, namespace='services', app='mec-placement-face-detection'):
                                  'phase': status.get('phase'),
                                  'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', []))})
                 observation = {'sample_time': time.time(), 'pods': rows, 'metrics': {}}
-                try:
-                    measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
-                    observation['metrics'] = {
-                        m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(app + '-')
-                    }
-                except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
-                    observation['metrics_error'] = str(exc)
+                if not pods_only:
+                    try:
+                        measurements = kubectl(namespace, 'get', '--raw', f'/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods')['items']
+                        observation['metrics'] = {
+                            m['metadata']['name']: m for m in measurements if m['metadata']['name'].startswith(app + '-')
+                        }
+                    except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
+                        observation['metrics_error'] = str(exc)
                 stream.write(json.dumps(observation, separators=(',', ':')) + '\n')
                 stream.flush()
             except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
@@ -357,11 +358,12 @@ def main():
     p = sub.add_parser('sample'); p.add_argument('output')
     p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
     p.add_argument('--app', default='mec-placement-face-detection', help='workload app label and Pod prefix')
+    p.add_argument('--pods-only', action='store_true', help='record Pod lifecycle/placement only without querying Metrics Server')
     p = sub.add_parser('summarize'); p.add_argument('samples'); p.add_argument('requests'); p.add_argument('summary'); p.add_argument('output')
     p.add_argument('--skip-resource-csv', action='store_true', help='skip resource-by-ramp.csv when cAdvisor is the primary resource source')
     args = parser.parse_args()
     if args.action == 'sample':
-        sample(args.output, args.namespace, args.app)
+        sample(args.output, args.namespace, args.app, pods_only=args.pods_only)
     else:
         summarize(args.samples, args.requests, args.summary, args.output, write_resource_csv=not args.skip_resource_csv)
 

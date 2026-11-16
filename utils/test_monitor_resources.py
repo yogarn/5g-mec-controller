@@ -386,3 +386,29 @@ def test_sample_records_pod_inventory_even_when_metrics_server_fails(tmp_path, m
     assert 'metrics_error' in observation
     lookup = _load_running_lookup(output)
     assert lookup(observation['sample_time'] + 1.0) == frozenset({pod_name})
+
+
+def test_sample_pods_only_skips_metrics_server_without_delay(tmp_path, monkeypatch):
+    output = tmp_path / 'metrics.jsonl'
+    monkeypatch.setattr('sys.argv', ['monitor_resources.py', 'sample', str(output), '--pods-only'])
+    handlers = {}
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(monitor_resources.time, 'sleep',
+                        lambda seconds: handlers[monitor_resources.signal.SIGTERM](None, None))
+    pod_name = monitor_resources.PREFIX + 'healthy'
+
+    def check_output(command, *, text, timeout):
+        if '--raw' in command or 'metrics.k8s.io' in ' '.join(command):
+            raise AssertionError('Metrics Server must not be queried in --pods-only mode')
+        return json.dumps({'items': [{
+            'metadata': {'name': pod_name}, 'spec': {'nodeName': 'gnb-3'},
+            'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]},
+        }]})
+
+    monkeypatch.setattr(monitor_resources.subprocess, 'check_output', check_output)
+    monitor_resources.main()
+
+    observation, = [json.loads(line) for line in output.read_text().splitlines()]
+    assert observation['pods'] == [{'name': pod_name, 'node': 'gnb-3', 'phase': 'Running', 'ready': True}]
+    assert observation['metrics'] == {}
+    assert 'metrics_error' not in observation

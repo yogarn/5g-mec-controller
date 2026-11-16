@@ -744,7 +744,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
             if delay is not None:
                 delay.check()
             command([sys.executable, '-m', 'utils.preflight', '--config', config_path])
-            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
+            sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app, '--pods-only'], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(sampler)
             payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
                        'schedule': settings['schedule'], 'duration': settings['phase_duration']}

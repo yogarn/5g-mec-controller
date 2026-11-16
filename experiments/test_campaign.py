@@ -794,6 +794,7 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
     assert not (root / 'proposed' / 'placement-configmap.yaml').exists()
     assert not any('placement-controller' in ' '.join(map(str, c)) for c in kube_calls)
     assert not any('-m controller' in ' '.join(map(str, cmd)) for cmd in popen_cmds)
+    assert any('utils.monitor_resources' in ' '.join(map(str, cmd)) and '--pods-only' in cmd for cmd in popen_cmds)
     assert written_payloads[0]['phase_durations'] == [60.0] * 6 + [420.0]
 
 
