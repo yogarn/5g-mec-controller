@@ -516,3 +516,7 @@ bash experiments/run.sh ramp scaler_floor_min2_01 --rt-target-factor 1.0 --min-r
   controls execution order. Both and provenance (`core_git`, `ue_git`,
   `kubernetes_server_version`, `kube_proxy_mode`, `workload_image`,
   `method_order`) are recorded in `plan.yaml` and `campaign.yaml`.
+- **Failed / incomplete diagnostic attempts (preserved, excluded from summaries):**
+  - `results/b0_smoke_01/smoke_01` failed during UE probing due to a `SplitResult` URL bug (fixed in `c8ba749`; superseded by `results/b0_smoke_02/smoke_01`).
+  - `results/b1_path_01/b1_tc_on`, `b1_tc_on_2`, and `b1_tc_on_3` were incomplete/aborted due to an orchestrator restart and stale `tc` filter cleanup (superseded by `results/b1_path_01/b1_tc_on_4`).
+  - `utils/rebuild_pedestrian.py` updated both `apps/pedestrian-detection/manifest.yaml` and `apps/face-detection/manifest.yaml` when pinning the rebuilt digest (`9f7b907`), while `apps/face-detection/app.py` itself remained unchanged.
