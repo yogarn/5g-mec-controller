@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from experiments import campaign
+from utils.plot_paths import default_csv_dir
 
 PROFILES = {
     'mobility': {
@@ -76,6 +77,7 @@ def smoke_metadata(args, flags):
         'command': [sys.executable, '-u', '-m', 'experiments.campaign', *flags],
         'result_directory': str(campaign.ROOT / 'results' / args.name),
         'plots_directory': str(campaign.ROOT / 'results' / args.name / 'plots'),
+        'csv_directory': str(campaign.ROOT / 'results' / args.name / 'csv'),
         'note': 'Setup, transfer and cleanup vary. Timeout requests graceful cleanup; no forced kill.',
     }
 
@@ -98,7 +100,8 @@ def _interrupt(process):
         pass  # It exited between the timeout check and the stop request.
 
 
-def inspect_outputs(plots):
+def inspect_outputs(plots, csv_dir=None):
+    csv_dir = Path(csv_dir) if csv_dir is not None else default_csv_dir(plots)
     required = {'response-time.png', 'pod-placement.png', 'resource-usage.png', 'slo-violations.png'}
     pngs = sorted(p.name for p in plots.glob('*.png'))
     errors = [f'missing {name}' for name in sorted(required - set(pngs))]
@@ -109,7 +112,10 @@ def inspect_outputs(plots):
         ('resource-windows-15s.csv', ['cpu_millicores', 'memory_mib']),
     ]:
         try:
-            with (plots / name).open(newline='') as stream:
+            path = csv_dir / name
+            if not path.exists():
+                path = plots / name  # Read historical smoke output layouts too.
+            with path.open(newline='') as stream:
                 rows = list(csv.DictReader(stream))
         except (OSError, csv.Error) as exc:
             errors.append(f'{name}: {exc}')
@@ -172,7 +178,7 @@ def supervise(command, status_path, metadata, *, stop_after=STOP_AFTER_SECONDS,
                     _write_status(status_path, record)
                     print('Interrupt forwarded; waiting for cleanup. Do not interrupt again.', flush=True)
         plots = Path(metadata['plots_directory'])
-        pngs, measurements, errors = inspect_outputs(plots)
+        pngs, measurements, errors = inspect_outputs(plots, metadata.get('csv_directory'))
         complete = not errors
         record.update(status=('complete' if code == 0 and complete and reason is None else
                               'timed_out' if reason == 'time_budget' else

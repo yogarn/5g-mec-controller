@@ -103,7 +103,16 @@ def scheduling_delays(directory):
         for pod in rec.get('pods', []):
             key = pod.get('uid') or pod['name']
             saved = pods.setdefault(key, dict(pod, source='sampled-pod-lifecycle'))
-            saved.update({k: v for k, v in pod.items() if v is not None})
+            for key, value in pod.items():
+                if value is None:
+                    continue
+                if key in ('created_at', 'scheduled_at', 'ready_at') and saved.get(key) is not None:
+                    # Startup timing uses the first True condition, not a later
+                    # readiness recovery under load.
+                    if _timestamp(value) < _timestamp(saved[key]):
+                        saved[key] = value
+                else:
+                    saved[key] = value
     after = directory / 'deployments-after.json'
     if after.exists():
         for pod in json.loads(after.read_text()).get('items', []):
@@ -112,11 +121,16 @@ def scheduling_delays(directory):
             fields = pod_timing_fields(pod)
             name = pod['metadata']['name']
             # Filter by names already seen to exclude unrelated workloads.
-            if not any(p.get('name') == name for p in pods.values()):
+            candidates = [p for p in pods.values() if p.get('name') == name and
+                          (not p.get('uid') or p['uid'] == fields.get('uid'))]
+            if not candidates:
                 continue
-            existing = next(p for p in pods.values() if p.get('name') == name)
-            if not existing.get('created_at'):
-                existing.update(fields, source='final-snapshot-survivor')
+            existing = candidates[0]
+            missing = {key: value for key, value in fields.items() if value is not None and existing.get(key) is None}
+            if missing:
+                sampled_creation = bool(existing.get('created_at'))
+                existing.update(missing)
+                existing['source'] = 'sampled-and-final-snapshot' if sampled_creation else 'final-snapshot-survivor'
     output = []
     for pod in pods.values():
         created, scheduled = _timestamp(pod.get('created_at')), _timestamp(pod.get('scheduled_at'))

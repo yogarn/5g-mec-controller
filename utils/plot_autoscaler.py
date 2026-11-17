@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot measured autoscaler comparisons.
 
-Usage: python -m utils.plot_autoscaler RESULTS_DIR OUTPUT_DIR
+Usage: python -m utils.plot_autoscaler RESULTS_DIR OUTPUT_DIR [--csv-dir CSV_DIR]
 
 RESULTS_DIR/{baseline,proposed} must each contain summary.csv, ramp-summary.csv,
 pods-by-ramp.csv, and resource-by-ramp.csv. Placement files must explicitly
@@ -15,6 +15,8 @@ import json
 import math
 from pathlib import Path
 import sys
+import tempfile
+import shutil
 
 import matplotlib.pyplot as plt
 from matplotlib.transforms import ScaledTranslation
@@ -24,6 +26,7 @@ from utils.phase_windows import summarize_windows, write_windows
 from utils.transient_analysis import _percentile
 from utils.resource_windows import build_resource_windows
 from utils.node_windows import build_node_request_windows
+from utils.plot_paths import default_csv_dir as _default_csv_dir
 from utils.control_overhead import (
     scheduling_delays, hpa_action_delays, component_execution_windows, proposed_execution_records,
 )
@@ -36,6 +39,30 @@ ORIGIN_NOTE = "(0,0) is a display origin; dots thereafter summarize measured win
 WINDOW_SECONDS = 15.0
 THESIS_FIG_WIDTH = 7.5
 ALIGNED_TIME_NOTE = "Cumulative traffic elapsed time (s); setup, draining, and reattachment gaps excluded"
+
+
+GENERATED_DATA_FILES = {
+    'window-metrics-15s.csv', 'pod-placement-15s.csv', 'pod-placement-observations.csv',
+    'resource-windows-15s.csv', 'resource-windows-by-node-15s.csv', 'request-windows-by-node-15s.csv',
+    'baseline-phase-windows.csv', 'proposed-phase-windows.csv', 'scheduling-delay.csv',
+    'scheduling-delay-summary.csv', 'hpa-action-delay.csv', 'native-component-execution.csv',
+    'proposed-decision-execution.csv', 'control-overhead-availability.json',
+}
+
+
+def _prepare_csv_dir(output_dir, csv_dir):
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    legacy = [output_dir / name for name in sorted(GENERATED_DATA_FILES) if (output_dir / name).is_file()]
+    if legacy:
+        # Preserve prior derived exports while keeping images and tables separate.
+        backup = Path(tempfile.mkdtemp(prefix='previous-plot-exports-', dir=csv_dir))
+        for source in legacy:
+            shutil.move(str(source), str(backup / source.name))
+
+
+def _node_colors(nodes):
+    palette = plt.get_cmap('tab10' if len(nodes) <= 10 else 'tab20').colors
+    return dict(zip(nodes, palette))
 
 
 def read_rows(path, required):
@@ -514,7 +541,7 @@ def _zoom_axes(fig):
             continue
         values = []
         for line in ax.lines:
-            if line.get_marker() in (None, 'None', '', '^') or line.get_gid() == 'phase-bracket':
+            if line.get_marker() in (None, 'None', '') or line.get_gid() == 'phase-bracket':
                 continue
             ys = list(line.get_ydata())
             xs = list(line.get_xdata())
@@ -740,8 +767,7 @@ def _render_phase_summary_fallbacks(output_dir, phases, summaries, violations, c
     title_suffix = "ready replica counts near phase end" if ready_placements is not None else "total pod counts near phase end (ready counts unavailable)"
     fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.0), sharex=True, sharey=True, layout="constrained")
     fig.suptitle(f"Phase summary: per-node {title_suffix}")
-    palette = plt.get_cmap("tab10").colors
-    colors = dict(zip(nodes, palette))
+    colors = _node_colors(nodes)
     all_counts = []
     widths = ([0.7 * (phase_bounds[p][1] - phase_bounds[p][0]) for p in phases]
               if phase_bounds is not None else [0.7] * len(phases))
@@ -791,7 +817,59 @@ def _render_node_metrics(output_dir, nodes, rows_by_method, phases, decorate, co
     _export_png(fig, output_dir, name)
 
 
-def _render_per_node(args, phases, nodes, windows, phase_bounds, decorate, continuous):
+def _render_unified_nodes(output_dir, nodes, rows_by_method, phases, decorate, continuous,
+                           key, title, ylabel, name, colors, time_key='aligned_end_s', slo_ms=None):
+    fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 7), sharex=True, sharey=True, layout='constrained')
+    markers = ('o', 's', 'D', 'v', '^', 'P', 'X', '*')
+    fig.suptitle(title + '\nNode colors are consistent across methods; common y scale')
+    for ax, method in zip(axes, METHODS):
+        for node_index, node in enumerate(nodes):
+            points = [r for r in rows_by_method[method] if r['node'] == node]
+            groups = [points] if continuous else [[r for r in points if r['phase'] == phase] for phase in phases]
+            finite = any(math.isfinite(r[key]) for r in points)
+            for index, group in enumerate(groups):
+                xs, ys = [], []
+                previous = None
+                for row in group:
+                    when = row[time_key]
+                    if time_key == 'aligned_sample_s' and previous is not None and when - previous > POD_LOOKUP_MAX_AGE_S:
+                        xs.append(math.nan)
+                        ys.append(math.nan)
+                    xs.append(when)
+                    ys.append(row[key])
+                    previous = when
+                ax.plot(xs, ys, color=colors[node], linestyle=STYLES[method], marker=markers[node_index % len(markers)],
+                        markersize=3, linewidth=1.1,
+                        label=(node if finite else f'{node} (no data)') if index == 0 else None)
+        if slo_ms is not None:
+            ax.axhline(slo_ms, color='#555555', linestyle=':', linewidth=1, label=f'SLO ({slo_ms:g} ms)')
+        ax.set(title=METHOD_LABELS[method], ylabel=ylabel)
+        ax.grid(axis='y', linestyle=':')
+        ax.legend(frameon=False, ncols=min(3, len(nodes) + (slo_ms is not None)), fontsize=7)
+    values = [r[key] for rows in rows_by_method.values() for r in rows if math.isfinite(r[key])]
+    maximum = max(values + ([slo_ms] if slo_ms is not None else []), default=0)
+    axes[0].set_ylim(0, max(1, maximum * 1.08))
+    if key in ('pod_count', 'ready_count'):
+        axes[0].yaxis.set_major_locator(MaxNLocator(integer=True))
+    decorate(axes)
+    _export_png(fig, output_dir, name)
+
+
+def _write_unified_csv(csv_dir, name, rows_by_method, key, unit, time_key):
+    rows = [dict(row, method=method, unit=unit) for method in METHODS for row in rows_by_method[method]]
+    if time_key == 'aligned_sample_s':
+        fields = ['method', 'node', 'phase', 'sample_time', 'aligned_sample_s', key, 'unit']
+    else:
+        fields = ['method', 'node', 'phase', 'window_index', 'actual_start_time', 'actual_end_time', 'aligned_end_s', key, 'unit']
+        if key in ('cpu_millicores', 'memory_mib'):
+            fields += ['rate_window_seconds', 'expected_samples', 'cpu_complete_samples', 'memory_complete_samples', 'missing_reasons']
+        else:
+            fields += ['attempts', 'successes', 'failures', 'all_window_attempts', 'unattributed_attempts', 'attribution_percent']
+    write_csv_rows(rows, fields, csv_dir / f'{name}.csv')
+
+
+def _render_per_node(args, phases, nodes, windows, phase_bounds, decorate, continuous, pod_rows):
+    colors = _node_colors(nodes)
     nodes = [node for node in nodes if not node.startswith('<')]
     if not nodes:
         return
@@ -806,11 +884,11 @@ def _render_per_node(args, phases, nodes, windows, phase_bounds, decorate, conti
     write_csv_rows([r for rows in resources.values() for r in rows], base + [
         'cpu_millicores', 'memory_mib', 'rate_window_seconds', 'evaluation_step_seconds',
         'expected_samples', 'cpu_complete_samples', 'memory_complete_samples', 'missing_reasons',
-    ], args.output_dir / 'resource-windows-by-node-15s.csv')
+    ], args.csv_dir / 'resource-windows-by-node-15s.csv')
     write_csv_rows([r for rows in requests.values() for r in rows], base + [
         'attempts', 'successes', 'failures', 'p50_ms', 'p90_ms', 'violation_percent',
         'all_window_attempts', 'unattributed_attempts', 'attribution_percent',
-    ], args.output_dir / 'request-windows-by-node-15s.csv')
+    ], args.csv_dir / 'request-windows-by-node-15s.csv')
     for key, title, ylabel, name in [
         ('cpu_millicores', 'Workload pod CPU by execution node (rolling CPU rate)', 'CPU (millicores)', 'cpu-by-node'),
         ('memory_mib', 'Workload pod working-set memory by execution node', 'Memory (MiB)', 'memory-by-node'),
@@ -821,6 +899,18 @@ def _render_per_node(args, phases, nodes, windows, phase_bounds, decorate, conti
         _render_node_metrics(args.output_dir, nodes, resources if key in ('cpu_millicores', 'memory_mib') else requests,
                              phases, decorate, continuous, key, title, ylabel, name,
                              slo_ms=args.slo_ms if key in ('p90_ms', 'p50_ms') else None)
+        data = resources if key in ('cpu_millicores', 'memory_mib') else requests
+        unified_name = name + '-unified'
+        unit = {'cpu_millicores': 'millicores', 'memory_mib': 'MiB', 'violation_percent': 'percent'}.get(key, 'ms')
+        _write_unified_csv(args.csv_dir, unified_name, data, key, unit, 'aligned_end_s')
+        _render_unified_nodes(args.output_dir, nodes, data, phases, decorate, continuous, key, title,
+                              ylabel, unified_name, colors, slo_ms=args.slo_ms if key in ('p90_ms', 'p50_ms') else None)
+    observations = {method: [r for r in pod_rows if r['method'] == method and r['node'] in nodes] for method in METHODS}
+    for key, title, name in [('pod_count', 'Observed workload pod counts by node', 'pod-count-by-node-unified'),
+                             ('ready_count', 'Observed ready workload pods by node', 'ready-count-by-node-unified')]:
+        _write_unified_csv(args.csv_dir, name, observations, key, 'pods', 'aligned_sample_s')
+        _render_unified_nodes(args.output_dir, nodes, observations, phases, decorate, continuous,
+                              key, title, 'Pods', name, colors, time_key='aligned_sample_s')
 
 
 def _render_overhead_points(output_dir, rows, key, name, title, lower_key=None):
@@ -853,18 +943,20 @@ def _scheduling_summary(rows):
             summary.append(dict(metric=key, method=method, available_pods=len(values), observed_pods=len(cohort),
                                 median_ms=_percentile(values, .5) if values else math.nan,
                                 min_ms=min(values) if values else math.nan, max_ms=max(values) if values else math.nan,
-                                cohort_status='legacy_survivors' if any(r['source'] == 'final-snapshot-survivor' for r in measured)
+                                cohort_status='legacy_survivors' if any('final-snapshot' in r['source'] for r in measured)
                                 else 'incomplete' if len(values) < len(cohort) else 'complete' if values else 'missing'))
     return summary
 
 
-def _render_scheduling_delay(output_dir, rows):
+def _render_scheduling_delay(output_dir, rows, csv_dir=None):
+    csv_dir = Path(csv_dir) if csv_dir is not None else _default_csv_dir(Path(output_dir))
+    csv_dir.mkdir(parents=True, exist_ok=True)
     summary = _scheduling_summary(rows)
     write_csv_rows(summary, ['metric', 'method', 'available_pods', 'observed_pods', 'median_ms',
-                            'min_ms', 'max_ms', 'cohort_status'], output_dir / 'scheduling-delay-summary.csv')
+                            'min_ms', 'max_ms', 'cohort_status'], csv_dir / 'scheduling-delay-summary.csv')
     fig = plt.figure(figsize=(THESIS_FIG_WIDTH, max(9, 4.8 + .23 * (len(rows) + 1))), layout='constrained')
     grid = fig.add_gridspec(3, 1, height_ratios=[1, 1, max(1.5, .14 * len(rows) + .4)])
-    legacy = any(r['source'] == 'final-snapshot-survivor' for r in rows)
+    legacy = any('final-snapshot' in r['source'] for r in rows)
     fig.suptitle('Pod lifecycle delay: median and observed min–max' +
                  ('\nLegacy snapshot: surviving pods only; incomplete comparison' if legacy else ''))
     for index, (key, title) in enumerate([
@@ -876,7 +968,7 @@ def _render_scheduling_delay(output_dir, rows):
         group = [r for r in summary if r['metric'] == key]
         largest = max((r['max_ms'] / 1000 for r in group if math.isfinite(r['max_ms'])), default=0)
         for pos, row in enumerate(group):
-            count = f"{row['available_pods']}/{row['observed_pods']} pods"
+            count = f"timed {row['available_pods']} of {row['observed_pods']} observed pods"
             if not math.isfinite(row['median_ms']):
                 ax.text(.02, pos, f'Not recorded ({count})', va='center', transform=ax.get_yaxis_transform())
                 continue
@@ -898,7 +990,7 @@ def _render_scheduling_delay(output_dir, rows):
         return '—' if not math.isfinite(value) else '0*' if value == 0 else f'{value / 1000:g}'
     table_rows = [[METHOD_LABELS[r['method']], r['pod'].rsplit('-', 1)[-1], r.get('node') or '—',
                    seconds(r['created_to_scheduled_ms']), seconds(r['scheduled_to_ready_ms']),
-                   'Final snapshot' if r['source'] == 'final-snapshot-survivor' else 'Sampled'] for r in rows]
+                   'Final snapshot' if r['source'] == 'final-snapshot-survivor' else 'Sampled + final' if r['source'] == 'sampled-and-final-snapshot' else 'Sampled'] for r in rows]
     if table_rows:
         table = table_ax.table(cellText=table_rows,
                                colLabels=['Method', 'Pod suffix', 'Node', 'Created →\nscheduled (s)', 'Scheduled →\nready (s)', 'Source'],
@@ -936,7 +1028,7 @@ def _render_control_overhead(args):
             captured[name].extend(dict(method=method, **row) for row in rows)
             availability[name][method] = dict(rows=len(rows), measured=sum(
                 row.get('status') in ('measured', 'observed_settled') or 'execution_ms' in row for row in rows))
-        write_csv_rows(captured[name], ['method'] + fields, args.output_dir / f'{name}.csv')
+        write_csv_rows(captured[name], ['method'] + fields, args.csv_dir / f'{name}.csv')
     notes = [
         'Execution time is separate from scheduling/action delay. Empty durations mean unavailable, never zero.',
         'PodCreated to PodScheduled uses API timestamps, including queueing/status propagation; precision is limited by those timestamps.',
@@ -947,7 +1039,7 @@ def _render_control_overhead(args):
         'Native scheduling algorithm and proposed score are different execution scopes; they are not a like-for-like algorithm benchmark.',
         'Old runs do not contain execution metrics. New proposed timing logs require rebuilding/deploying the updated placement-controller image.',
     ]
-    (args.output_dir / 'control-overhead-availability.json').write_text(json.dumps(dict(availability=availability, notes=notes), indent=2) + '\n')
+    (args.csv_dir / 'control-overhead-availability.json').write_text(json.dumps(dict(availability=availability, notes=notes), indent=2) + '\n')
     _render_overhead_points(args.output_dir, captured['hpa-action-delay'], 'scale_to_ready_ms_upper',
                             'hpa-action-delay', 'HPA scale request → settled ready target (polling bounds)', 'scale_to_ready_ms_lower')
     native_names = {
@@ -964,13 +1056,15 @@ def _render_control_overhead(args):
         rows = [r for r in captured['proposed-decision-execution'] if r['operation'] == operation]
         _render_overhead_points(args.output_dir, rows, 'execution_ms', f'proposed-{operation}-execution',
                                'Proposed controller: ' + operation + '\nStage timing only; no equivalent default-scheduler stage is recorded')
-    _render_scheduling_delay(args.output_dir, captured['scheduling-delay'])
+    _render_scheduling_delay(args.output_dir, captured['scheduling-delay'], args.csv_dir)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_dir", type=Path, help="directory containing baseline/ and proposed/ CSV inputs")
-    parser.add_argument("output_dir", type=Path, help="directory for 300 DPI PNG figures and window CSVs")
+    parser.add_argument("output_dir", type=Path, help="directory for 300 DPI PNG figures")
+    parser.add_argument("--csv-dir", type=Path,
+                        help="separate CSV/metadata directory; default: sibling csv for plots, csv-review for plots-review, or OUTPUT_DIR-csv")
     parser.add_argument("--slo-ms", type=float, default=500,
                         help="controller p90 target and recorded request SLO in milliseconds (default: 500)")
     args = parser.parse_args()
@@ -991,6 +1085,10 @@ def main():
         for p in phases
     ]
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.csv_dir = args.csv_dir or _default_csv_dir(args.output_dir)
+    if args.csv_dir.resolve() == args.output_dir.resolve() or args.output_dir.resolve() in args.csv_dir.resolve().parents:
+        parser.error('--csv-dir must be outside the plot directory')
+    _prepare_csv_dir(args.output_dir, args.csv_dir)
     # Remove the retired generated view when replotting an existing directory.
     (args.output_dir / 'late-phase.png').unlink(missing_ok=True)
     (args.output_dir / 'response-time-zoom.png').unlink(missing_ok=True)
@@ -1061,7 +1159,7 @@ def main():
         "slo_met_attempts", "violation_percent",
         "scheduled", "started_slots", "missed_slots", "request_coverage_percent",
     ]
-    write_csv_rows(export_win_rows, win_fields, args.output_dir / "window-metrics-15s.csv")
+    write_csv_rows(export_win_rows, win_fields, args.csv_dir / "window-metrics-15s.csv")
 
     pod_by_phase = {m: {p: [] for p in phases} for m in METHODS}
     export_pod_rows = []
@@ -1088,7 +1186,7 @@ def main():
         "node", "ready_count", "pod_count", "sample_time",
         "sample_age_seconds", "freshness_seconds", "status",
     ]
-    write_csv_rows(export_pod_rows, pod_fields, args.output_dir / "pod-placement-15s.csv")
+    write_csv_rows(export_pod_rows, pod_fields, args.csv_dir / "pod-placement-15s.csv")
 
     def decorate(axes):
         _decorate_time_axes(
@@ -1128,7 +1226,7 @@ def main():
         # Keep phase diagnostic CSVs; every metric now gets an auto-range zoom.
         for method in METHODS:
             write_windows(summarize_windows(args.results_dir / method, args.slo_ms),
-                          args.output_dir / f'{method}-phase-windows.csv')
+                          args.csv_dir / f'{method}-phase-windows.csv')
 
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
         fig.suptitle("SLO violations and request coverage\n" + ORIGIN_NOTE)
@@ -1160,8 +1258,7 @@ def main():
 
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.0), sharex=True, sharey=True, layout="constrained")
         fig.suptitle("Per-node pod counts at recorded observation times (includes unready pods)")
-        palette = plt.get_cmap("tab10").colors
-        colors = dict(zip(nodes, palette))
+        colors = _node_colors(nodes)
         all_ready = []
         snapshot_rows = []
         for ax, method in zip(axes, METHODS):
@@ -1180,7 +1277,7 @@ def main():
             ax.grid(axis="y", linestyle=":")
         write_csv_rows(snapshot_rows, ['method', 'phase', 'sample_time', 'aligned_sample_s',
                                      'node', 'pod_count', 'ready_count'],
-                       args.output_dir / 'pod-placement-observations.csv')
+                       args.csv_dir / 'pod-placement-observations.csv')
         max_ready = max(all_ready) if all_ready else 1
         axes[0].set_ylim(0, max(1, math.ceil(max_ready)) + max(1.5, 0.2 * max_ready))
         axes[0].yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -1200,9 +1297,9 @@ def main():
             'rate_window_seconds', 'freshness_seconds', 'evaluation_step_seconds',
             'cpu_millicores', 'memory_mib', 'expected_samples', 'cpu_complete_samples',
             'memory_complete_samples', 'cpu_coverage_percent', 'memory_coverage_percent', 'missing_reasons',
-        ], args.output_dir / 'resource-windows-15s.csv')
+        ], args.csv_dir / 'resource-windows-15s.csv')
         _render_resource_windows(args.output_dir, phases, resource_rows, decorate, continuous=continuous)
-        _render_per_node(args, phases, nodes, windows_15s, phase_bounds, decorate, continuous)
+        _render_per_node(args, phases, nodes, windows_15s, phase_bounds, decorate, continuous, snapshot_rows)
         _render_control_overhead(args)
         _render_resource_summary(
             args.output_dir, phases, resources, resource_coverage, compact_labels,

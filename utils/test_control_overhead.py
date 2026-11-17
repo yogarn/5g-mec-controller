@@ -113,3 +113,23 @@ def test_native_snapshot_records_process_start_and_filters_raw_metrics(monkeypat
     row = overhead.component_snapshot()
     assert row['process_start_time'] == 123.5
     assert len(row['series']) == 1 and row['series'][0]['value'] == 2
+
+
+def test_startup_delay_keeps_first_ready_timestamp_after_readiness_flaps(tmp_path):
+    base = dict(name='app-a', uid='u', node='n', created_at=100, scheduled_at=101)
+    save(tmp_path/'metrics.jsonl', [dict(sample_time=t, pods=[dict(base, ready_at=ready)])
+                                  for t, ready in [(110, 110), (115, None), (130, 130)]])
+    row = overhead.scheduling_delays(tmp_path)[0]
+    assert row['ready_at'] == 110 and row['scheduled_to_ready_ms'] == 9000
+
+
+def test_final_snapshot_can_fill_missing_fields_without_replacing_sampled_start(tmp_path):
+    save(tmp_path/'metrics.jsonl', [dict(sample_time=101, pods=[dict(name='app-a', uid='u', node='n', created_at=100)])])
+    pod = dict(kind='Pod', metadata=dict(name='app-a', uid='u', creationTimestamp=100), spec=dict(schedulerName='default-scheduler'),
+               status=dict(conditions=[dict(type='PodScheduled', status='True', lastTransitionTime=101),
+                                       dict(type='Ready', status='True', lastTransitionTime=110)]))
+    (tmp_path/'deployments-after.json').write_text(json.dumps(dict(items=[pod])))
+    row = overhead.scheduling_delays(tmp_path)[0]
+    assert row['source'] == 'sampled-and-final-snapshot'
+    assert row['created_at'] == 100 and row['created_to_scheduled_ms'] == 1000
+    assert row['scheduled_to_ready_ms'] == 9000

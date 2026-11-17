@@ -217,3 +217,21 @@ def test_existing_result_or_status_is_never_reused(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         smoke.main(['joint', 'reserved', '--config', str(config)])
     assert status.read_text() == 'keep this'
+
+
+def test_smoke_inspects_new_csv_directory_without_requiring_tables_in_plots(tmp_path):
+    plots, tables = tmp_path/'plots', tmp_path/'csv'
+    plots.mkdir()
+    tables.mkdir()
+    for name in ['response-time', 'resource-usage', 'pod-placement', 'slo-violations']:
+        (plots/f'{name}.png').touch()
+    for name, header, values in [
+        ('window-metrics-15s.csv', 'method,p90_ms', '150'),
+        ('pod-placement-15s.csv', 'method,ready_count', '3'),
+        ('resource-windows-15s.csv', 'method,cpu_millicores,memory_mib', '300,256'),
+    ]:
+        (tables/name).write_text(header+'\n'+''.join(f'{m},{values}\n' for m in ('baseline', 'proposed')))
+    _, counts, errors = smoke.inspect_outputs(plots)
+    assert not errors
+    assert counts['resource-windows-15s.csv:proposed:cpu_millicores'] == 1
+    assert not list(plots.glob('*.csv'))

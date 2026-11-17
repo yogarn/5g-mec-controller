@@ -286,11 +286,17 @@ def test_plot_autoscaler_exports_png_only_at_300_dpi_and_window_csvs(tmp_path, m
         assert xs[:2] == [0, 15] and ys[0] == 0
     assert len(captured_figs['resource-usage']['series']) == 2
     assert len(captured_figs['resource-usage-phase-summary']['series']) == 2
+    assert list(out_dir.glob('*.csv')) == []
+    assert not (out_dir / 'control-overhead-availability.json').exists()
+    assert (tmp_path / 'csv/control-overhead-availability.json').exists()
+    assert (tmp_path / 'csv/cpu-by-node-unified.csv').exists()
     assert list(out_dir.glob('*.pdf')) == []
     pngs = sorted(p.name for p in out_dir.glob('*.png'))
     expected = ['pod-placement', 'resource-usage-phase-summary', 'resource-usage', 'response-time', 'slo-violations',
                 'cpu-by-node', 'memory-by-node', 'response-time-p90-by-node', 'response-time-p50-by-node',
-                'slo-violations-by-node', 'scheduling-delay']
+                'slo-violations-by-node', 'scheduling-delay', 'cpu-by-node-unified', 'memory-by-node-unified',
+                'response-time-p90-by-node-unified', 'response-time-p50-by-node-unified',
+                'slo-violations-by-node-unified', 'pod-count-by-node-unified', 'ready-count-by-node-unified']
     assert pngs == sorted(f'{name}{suffix}.png' for name in expected for suffix in ('', '_zoom'))
     with Image.open(out_dir / 'response-time.png') as img:
         dpi = img.info.get('dpi')
@@ -303,7 +309,7 @@ def test_plot_autoscaler_exports_png_only_at_300_dpi_and_window_csvs(tmp_path, m
     assert [75.0, 90.0] in rt_lines
     assert not any(len(xs) > 2 and xs == [15.0, 30.0, 45.0, 60.0, 75.0, 90.0] for xs in rt_lines)
 
-    with (out_dir / 'window-metrics-15s.csv').open() as s:
+    with (tmp_path / 'csv/window-metrics-15s.csv').open() as s:
         win_rows = list(csv.DictReader(s))
     base_p = [r['phase'] for r in win_rows if r['method'] == 'baseline']
     assert base_p == ['phase_01', 'phase_01', 'phase_02', 'phase_02', 'phase_03', 'phase_03']
@@ -443,8 +449,8 @@ def test_missing_requests_writes_phase_summary_outputs_without_15s_claims(tmp_pa
 
     err = capsys.readouterr().err
     assert 'Skipping 15s detailed plots' in err
-    assert not (out_dir / 'window-metrics-15s.csv').exists()
-    assert not (out_dir / 'pod-placement-15s.csv').exists()
+    assert not (tmp_path / 'csv/window-metrics-15s.csv').exists()
+    assert not (tmp_path / 'csv/pod-placement-15s.csv').exists()
     assert not (out_dir / 'response-time.png').exists()
     assert (out_dir / 'response-time-phase-summary.png').exists()
     assert (out_dir / 'slo-violations-phase-summary.png').exists()
@@ -557,10 +563,99 @@ def test_scheduling_summary_reports_missing_cohort_and_readable_same_second_valu
         assert [ax.get_ylim() for ax in fig.axes] == limits
         plt.close(fig)
     monkeypatch.setattr(plot_autoscaler, '_export_png', capture)
-    plot_autoscaler._render_scheduling_delay(tmp_path, rows)
+    plot_autoscaler._render_scheduling_delay(tmp_path / 'plots', rows, tmp_path / 'csv')
     assert any('Same reported second' in label for label in captured['labels'])
-    assert any('1/2 pods' in label for label in captured['labels'])
+    assert any('timed 1 of 2 observed pods' in label for label in captured['labels'])
     assert captured['bars'] == [0, 1, 10, 12]  # seconds, not unlabelled millisecond dots
     assert '—' in captured['table'] and 'Final snapshot' in captured['table']
-    with (tmp_path/'scheduling-delay-summary.csv').open() as stream:
+    with (tmp_path/'csv/scheduling-delay-summary.csv').open() as stream:
         assert len(list(csv.DictReader(stream))) == 4
+
+
+def test_unified_node_panels_share_colors_and_fit_all_values_without_merging_individuals(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    from utils import plot_autoscaler
+    nodes = ['a', 'b']
+    colors = plot_autoscaler._node_colors(nodes)
+    rows = {method: [dict(node=node, phase='p', aligned_end_s=15, cpu_millicores=value)
+                     for node, value in zip(nodes, values)]
+            for method, values in [('baseline', [2, 3]), ('proposed', [4, 500])]}
+    captured = {}
+    def capture(fig, directory, name):
+        captured['name'] = name
+        captured['titles'] = [ax.get_title() for ax in fig.axes]
+        captured['colors'] = [{line.get_label(): line.get_color() for line in ax.lines} for ax in fig.axes]
+        assert len(fig.axes) == 2
+        assert all(ax.get_ylim()[0] == 0 and ax.get_ylim()[1] > 500 for ax in fig.axes)
+        plot_autoscaler._zoom_axes(fig)
+        assert all(ax.get_ylim()[1] > 500 for ax in fig.axes)
+        plt.close(fig)
+    monkeypatch.setattr(plot_autoscaler, '_export_png', capture)
+    plot_autoscaler._render_unified_nodes(tmp_path, nodes, rows, ['p'], lambda axes: None, True,
+                                          'cpu_millicores', 'CPU', 'millicores', 'cpu-by-node-unified', colors)
+    assert captured['name'] == 'cpu-by-node-unified'
+    assert captured['titles'] == ['Baseline', 'Proposed']
+    assert captured['colors'] == [colors, colors]
+
+
+def test_unified_pod_lines_keep_actual_times_and_break_across_missing_observations(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    from utils import plot_autoscaler
+    rows = {method: [dict(node='a', phase='p', aligned_sample_s=t, pod_count=value)
+                     for t, value in [(1, 3), (6, 4), (25, 5)]] for method in ('baseline', 'proposed')}
+    def capture(fig, directory, name):
+        line = fig.axes[0].lines[0]
+        xs, ys = list(line.get_xdata()), list(line.get_ydata())
+        assert xs[:2] == [1, 6] and xs[-1] == 25
+        assert math.isnan(xs[2]) and math.isnan(ys[2])
+        assert [y for y in ys if math.isfinite(y)] == [3, 4, 5]
+        plt.close(fig)
+    monkeypatch.setattr(plot_autoscaler, '_export_png', capture)
+    plot_autoscaler._render_unified_nodes(tmp_path, ['a'], rows, ['p'], lambda axes: None, True,
+                                          'pod_count', 'Pods', 'Pods', 'pods-unified', {'a': 'blue'}, time_key='aligned_sample_s')
+
+
+def test_generated_csvs_move_out_of_plot_folder_without_losing_prior_exports(tmp_path):
+    from utils import plot_autoscaler
+    plots, data = tmp_path/'plots-review', tmp_path/'csv-review'
+    plots.mkdir()
+    data.mkdir()
+    (plots/'window-metrics-15s.csv').write_text('old data')
+    (plots/'user-notes.csv').write_text('user data')
+    (data/'window-metrics-15s.csv').write_text('current data')
+    assert plot_autoscaler._default_csv_dir(plots) == data
+    plot_autoscaler._prepare_csv_dir(plots, data)
+    assert not (plots/'window-metrics-15s.csv').exists()
+    assert (plots/'user-notes.csv').read_text() == 'user data'
+    assert (data/'window-metrics-15s.csv').read_text() == 'current data'
+    backups = list(data.glob('previous-plot-exports-*/window-metrics-15s.csv'))
+    assert len(backups) == 1 and backups[0].read_text() == 'old data'
+
+
+def test_zoom_includes_triangle_marker_measurements():
+    import matplotlib.pyplot as plt
+    from utils.plot_autoscaler import _zoom_axes
+    fig, ax = plt.subplots()
+    ax.plot([1, 2], [100, 500], marker='^')
+    _zoom_axes(fig)
+    assert ax.get_ylim()[1] > 500
+    plt.close(fig)
+
+
+def test_hpa_delay_plot_requires_an_observed_completed_action(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    from utils import plot_autoscaler
+    captured = []
+    def capture(fig, directory, name):
+        captured.append(name)
+        assert any(list(line.get_ydata()) == [6000] for line in fig.axes[0].lines)
+        plt.close(fig)
+    monkeypatch.setattr(plot_autoscaler, '_export_png', capture)
+    incomplete = [dict(method='baseline', scale_to_ready_ms_upper=math.nan, scale_to_ready_ms_lower=math.nan)]
+    plot_autoscaler._render_overhead_points(tmp_path, incomplete, 'scale_to_ready_ms_upper',
+                                           'hpa-action-delay', 'HPA', 'scale_to_ready_ms_lower')
+    assert captured == []
+    measured = incomplete + [dict(method='proposed', scale_to_ready_ms_upper=6000, scale_to_ready_ms_lower=1000)]
+    plot_autoscaler._render_overhead_points(tmp_path, measured, 'scale_to_ready_ms_upper',
+                                           'hpa-action-delay', 'HPA', 'scale_to_ready_ms_lower')
+    assert captured == ['hpa-action-delay']

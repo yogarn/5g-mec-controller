@@ -656,6 +656,27 @@ windows remain gaps and outliers are not clipped. Stacked placement bars keep
 a zero baseline. Per-node panels use common scales. The former fixed 0–300ms
 `response-time-zoom.png` view is retired.
 
+CSV and metadata exports are separate from images. `plots/` uses sibling `csv/`;
+`plots-review/` uses sibling `csv-review/`. Other image directory names use
+`<image-directory>-csv/`. Override with `--csv-dir PATH` outside the plot directory.
+When replotting an old layout, existing generated CSV/metadata files are preserved
+under `previous-plot-exports-*` inside the CSV directory before fresh exports are
+written. Raw method measurements are unchanged. Smoke verification reads the new
+CSV location and retains support for historical layouts.
+
+Separate unified-node figures contain two panels: baseline and proposed, with
+one colored/marked line per node, consistent colors and a shared y scale:
+
+- `cpu-by-node-unified.png` and `memory-by-node-unified.png`;
+- `response-time-p50-by-node-unified.png` and `response-time-p90-by-node-unified.png`;
+- `slo-violations-by-node-unified.png`;
+- `pod-count-by-node-unified.png` and `ready-count-by-node-unified.png`.
+
+Each has a `_zoom` version and its own identically named CSV in the CSV directory.
+These are additional files; individual-node figures stay separate. Resource,
+request and SLO traces retain 15s reporting windows. Pod/ready-count traces use
+actual observation timestamps and break across stale observation gaps.
+
 Per-node outputs include `cpu-by-node`, `memory-by-node`,
 `response-time-p50-by-node`, `response-time-p90-by-node`, and
 `slo-violations-by-node` (each with a `_zoom` copy). Resources are workload pod
@@ -683,8 +704,11 @@ Control overhead is recorded separately:
   not algorithm execution time. The scheduling-delay figure shows labelled
   median bars and observed min–max whiskers in seconds, plus a per-pod table.
   `scheduling-delay-summary.csv` records summary values and available/observed
-  pod counts; the raw delay CSV retains milliseconds. Legacy `deployments-after.json` can recover
-  timestamps only for surviving pods; those rows are marked explicitly.
+  pod counts (timed pods / distinct observed pod identities, not replica count);
+  the raw delay CSV retains milliseconds. Startup delay uses the first sampled
+  True Ready timestamp, so later readiness recovery does not inflate startup time. Legacy `deployments-after.json` can recover
+  timestamps only for surviving pods; those rows and partial records filled from
+  that snapshot are marked explicitly.
 - `hpa-action-delay.csv` uses HPA `lastScaleTime`, desired replicas and the
   sampled active/ready pod count to bound scale-request-to-ready delay. Polling
   sets the bounds. Superseded, unfinished and pre-recording actions stay missing.
