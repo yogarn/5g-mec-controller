@@ -697,8 +697,9 @@ Control overhead is recorded separately:
 - The Go controller logs monotonic timers for `scheduler_snapshot` (telemetry/API
   reads), `scheduler_score` (ScoreCandidateNode only), `scheduler_bind` (Binding
   API call), and `descheduler_score` (SelectDescheduleCandidate only). These export
-  to `proposed-decision-execution.csv`. **Rebuild and deploy the controller image
-  for the new timers to run.** Native scheduler algorithm time and proposed score
+  to `proposed-decision-execution.csv`. `placement/deploy.yaml` pins the timing
+  release built from source commit `74c8752`; rebuild/redeploy after future timer
+  changes. Native scheduler algorithm time and proposed score
   time have different scopes; they do not establish a matched algorithm benchmark.
 
 Available HPA action and execution measurements get regular and `_zoom` figures.

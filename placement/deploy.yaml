@@ -105,9 +105,8 @@ spec:
       serviceAccountName: placement-controller
       containers:
         - name: placement-controller
-          # For immutable releases, pin 10.34.211.140:30500/placement-controller@sha256:<digest>.
-          # Always pull when using mutable tags so rebuilt images never reuse cached node layers.
-          image: 10.34.211.140:30500/placement-controller:latest
+          # Timing-instrumented release built from source commit 74c8752.
+          image: 10.34.211.140:30500/placement-controller@sha256:e4d86ab17e653f2e0bcb361ed031ff922a9cef6301b7a95d9070e4dc3d2d69d9
           imagePullPolicy: Always
           args:
             - --config=/etc/placement/config.yaml
