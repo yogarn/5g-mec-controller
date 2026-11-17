@@ -9,15 +9,15 @@ has already finished; mobility has seven phases, scaling and joint have thirteen
 | Phase | Mobility | Scaling (`ramp`) | Joint (`full`) |
 |---|---|---|---|
 | 1 | 9 (7:1:1) | 3 (1:1:1) | 3 (1:1:1) |
-| 2 | 9 (5:3:1) | 6 (2:2:2) | 9 (7:1:1) |
-| 3 | 9 (3:5:1) | 9 (3:3:3) | 15 (6:6:3) |
-| 4 | 9 (1:7:1) | 12 (4:4:4) | 15 (3:9:3) |
-| 5 | 9 (1:5:3) | 15 (5:5:5) | 24 (3:15:6) |
-| 6 | 9 (1:3:5) | 18 (6:6:6) | 24 (3:9:12) |
-| 7 | 9 (1:1:7) | 24 (8:8:8) | 24 (1:1:22) |
-| 8 | — | 18 (6:6:6) | 18 (1:2:15) |
-| 9 | — | 15 (5:5:5) | 15 (1:2:12) |
-| 10 | — | 12 (4:4:4) | 12 (1:2:9) |
+| 2 | 9 (5:3:1) | 6 (2:2:2) | 6 (4:1:1) |
+| 3 | 9 (3:5:1) | 9 (3:3:3) | 9 (6:2:1) |
+| 4 | 9 (1:7:1) | 12 (4:4:4) | 12 (6:4:2) |
+| 5 | 9 (1:5:3) | 15 (5:5:5) | 15 (6:6:3) |
+| 6 | 9 (1:3:5) | 18 (6:6:6) | 18 (5:8:5) |
+| 7 | 9 (1:1:7) | 24 (8:8:8) | 24 (4:12:8) |
+| 8 | — | 18 (6:6:6) | 18 (2:8:8) |
+| 9 | — | 15 (5:5:5) | 15 (1:5:9) |
+| 10 | — | 12 (4:4:4) | 12 (1:3:8) |
 | 11 | — | 9 (3:3:3) | 9 (1:2:6) |
 | 12 | — | 6 (2:2:2) | 6 (1:1:4) |
 | 13 | — | 3 (1:1:1) | 3 (1:1:1) |
@@ -27,9 +27,9 @@ These totals exclude setup, transfer and cleanup. The default method order is
 baseline then proposed; `--method-order` can override it. Distributions are UE
 attachments: scaling still pins application pods to gNB-3 for both methods.
 The schedules are preserved in full; no smoke schedule override is applied.
-Joint moves the hotspot gNB-1 → gNB-2 → gNB-3 as load grows, then reduces
-load while keeping the hotspot at gNB-3 until balanced recovery. Load and
-distribution can change together; this measures the combined system response.
+Joint uses the same symmetric total-UE curve as scaling: six transitions up
+to 24 UEs and six down to 3. The hotspot moves from gNB-1 during ramp-up,
+through gNB-2 near the peak, to gNB-3 during ramp-down, then balanced recovery. Load and distribution can change together; this measures the combined system response.
 
 ## Run an experiment
 
@@ -181,8 +181,8 @@ The controller computes `ceil(current replicas × all-attempt p90 / target)`, wi
 The objective is **all-attempt p90 <=150 ms** by default, not a p95 objective. Per-attempt violation rates and p95 remain supplementary diagnostics.
 
 Each full joint phase generates traffic for **120 seconds**. The 13-phase
-schedule combines changing load with a hotspot moving from gNB-1 through gNB-2
-to gNB-3, followed by declining load and balanced recovery. Traffic takes
+schedule combines a symmetric load ramp with a hotspot moving from gNB-1
+through gNB-2 near the peak to gNB-3 during ramp-down, then balanced recovery. Traffic takes
 **26 minutes per method**, or **52 minutes per paired campaign**, plus setup
 and transfer. Both methods receive the same requested schedule.
 
@@ -191,15 +191,15 @@ this as a transient workload experiment. The schedule is `total:gnb1:gnb2:gnb3`:
 
 ```text
 3:1:1:1
-9:7:1:1
+6:4:1:1
+9:6:2:1
+12:6:4:2
 15:6:6:3
-15:3:9:3
-24:3:15:6
-24:3:9:12
-24:1:1:22
-18:1:2:15
-15:1:2:12
-12:1:2:9
+18:5:8:5
+24:4:12:8
+18:2:8:8
+15:1:5:9
+12:1:3:8
 9:1:2:6
 6:1:1:4
 3:1:1:1
