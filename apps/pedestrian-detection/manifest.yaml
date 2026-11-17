@@ -67,6 +67,8 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 10
         env:
+        - name: HTTP_THREADS
+          value: '5'
         - name: ORT_THREADS
           value: '1'
         - name: HEALTH_PORT

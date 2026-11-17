@@ -107,3 +107,20 @@ def test_foreign_source_rule_is_not_removed():
         with pytest.raises(RuntimeError, match='ambiguous'):
             ue._clean_ue_rules({'10.0.0.2'})
         run.assert_not_called()
+
+
+def test_recovery_includes_continuous_subscriber_journals(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    children = []
+    for name in ['ue-000', 'ue-001']:
+        directory = tmp_path / name
+        directory.mkdir()
+        journal = directory / 'lifecycle.jsonl'
+        journal.touch()
+        children.append(journal)
+    cleaned = []
+    monkeypatch.setattr(ue, '_require_root', lambda: None)
+    monkeypatch.setattr(ue, '_lock', nullcontext)
+    monkeypatch.setattr(ue, '_cleanup', cleaned.append)
+    ue.recover_owned_ues(tmp_path)
+    assert cleaned == [*children, tmp_path / 'lifecycle.jsonl']

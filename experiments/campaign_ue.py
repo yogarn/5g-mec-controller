@@ -83,6 +83,7 @@ def run(settings):
             '--site-urls', json.dumps(settings['site_urls']), '--image', settings['image'],
             '--ue-config', settings['inventory'], '--nr-ue', settings['nr_ue'],
             '--phase-schedule', settings['schedule'], '--phase-duration', str(settings['duration']),
+            '--phase-transition', settings.get('phase_transition', 'continuous'),
             '--rps-per-ue', str(settings.get('rps_per_ue', 5.0)),
             '--max-in-flight-per-ue', str(settings.get('max_in_flight_per_ue', 8)),
             '--telemetry-url', settings['telemetry_url'], '--telemetry-token-file', settings['token'],

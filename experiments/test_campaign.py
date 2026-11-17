@@ -455,7 +455,7 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         if kind == 'deployment' and name == 'placement-controller' and namespace == 'placement':
             return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
         if kind == 'deployment' and namespace == campaign.NAMESPACE:
-            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+            return {'spec': {'replicas': 3}, 'status': {'readyReplicas': 3}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30080}]}}
         raise AssertionError(f'unexpected get {kind} {name} {namespace}')
@@ -517,6 +517,16 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     assert 'scheduler bound pod=test' in (run_root / 'proposed' / 'controller.log').read_text()
 
 
+@pytest.mark.parametrize('transition', ['continuous', 'restart'])
+def test_phase_transition_mode_is_recorded_and_forwarded(tmp_path, transition):
+    output = tmp_path / transition
+    campaign.main(['--scenario', 'mobility9', '--fixed-replicas', '6',
+                   '--phase-transition', transition, '--plan-only', str(output)])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    assert plan['phase_transition'] == transition
+    assert plan['campaign_settings']['phase_transition'] == transition
+
+
 def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     output = tmp_path / 'mobility-plan'
@@ -524,9 +534,18 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['comparison'] == 'placement'
     assert plan['slo_ms'] == 100
+    assert plan['mobility_direction'] == 'forward'
+    expected_schedule = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
+    assert plan['schedule'] == expected_schedule
+    assert plan['phase_duration'] == 120
+    assert plan['phase_durations_s'] == [120.0] * 7
+    parsed = campaign.parse_schedule(plan['schedule'])
+    assert len(parsed) == 7
+    assert all(p['workload_ue'] == 9 and (p['gnb1_ues'] + p['gnb2_ues'] + p['gnb3_ues']) == 9 for p in parsed)
     settings = plan['campaign_settings']
-    assert settings['phase_duration'] == 60
-    assert settings['schedule'] == '9:3:3:3,9:7:1:1,9:1:7:1,9:1:1:7,9:1:7:1,9:7:1:1,9:3:3:3'
+    assert settings['phase_duration'] == 120
+    assert settings['schedule'] == expected_schedule
+    assert settings['mobility_direction'] == 'forward'
     baseline = yaml.safe_load((output / 'baseline-hpa.yaml').read_text())
     proposed = yaml.safe_load((output / 'proposed-hpa.yaml').read_text())
     assert baseline['spec'] == proposed['spec']
@@ -540,12 +559,39 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     assert yaml.safe_load(cm['data']['config.yaml'])['deschedule_interval_seconds'] == 30
 
 
+def test_mobility9_reverse_direction_reverses_schedule_and_records_metadata(tmp_path):
+    output = tmp_path / 'reverse-plan'
+    campaign.main([
+        '--scenario', 'mobility9', '--mobility-direction', 'reverse',
+        '--fixed-replicas', '6', '--phase-duration', '90',
+        '--rps-per-ue', '4', '--max-in-flight-per-ue', '6',
+        '--plan-only', str(output),
+    ])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    expected_reverse = '9:1:1:7,9:1:3:5,9:1:5:3,9:1:7:1,9:3:5:1,9:5:3:1,9:7:1:1'
+    assert plan['mobility_direction'] == 'reverse'
+    assert plan['schedule'] == expected_reverse
+    assert plan['schedule'].split(',') == list(reversed(campaign.MOBILITY9_SCHEDULE.split(',')))
+    assert plan['phase_duration'] == 90
+    assert plan['phase_durations_s'] == [90.0] * 7
+    assert plan['fixed_replicas'] == 6
+    assert plan['replica_bounds'] == {'min': 6, 'max': 6}
+    assert plan['pacing'] == {'rps_per_ue': 4.0, 'max_in_flight_per_ue': 6}
+    parsed = campaign.parse_schedule(plan['schedule'])
+    assert len(parsed) == 7
+    assert all(p['workload_ue'] == 9 and (p['gnb1_ues'] + p['gnb2_ues'] + p['gnb3_ues']) == 9 for p in parsed)
+    assert plan['campaign_settings']['mobility_direction'] == 'reverse'
+    assert plan['campaign_settings']['schedule'] == expected_reverse
+    assert plan['campaign_settings']['phase_duration'] == 90
+
+
 def test_mobility9_long_run_extends_phases_with_fixed_budget_and_normal_timers(tmp_path):
     output = tmp_path / 'long-plan'
     campaign.main(['--scenario', 'mobility9', '--long-run', '--fixed-replicas', '9',
                    '--tc-ms', '10', '--slo-ms', '150', '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['long_run'] is True
+    assert plan['mobility_direction'] == 'forward'
     assert plan['phase_durations_s'] == [120.0] * 7
     assert plan['campaign_settings']['phase_duration'] == 120
     assert plan['campaign_settings']['schedule'] == campaign.MOBILITY9_SCHEDULE
@@ -566,6 +612,7 @@ def test_mobility9_preserves_explicit_timer_and_slo_overrides(tmp_path):
                    '--phase-duration', '90', '--slo-ms', '150', '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['campaign_settings']['phase_duration'] == 90
+    assert plan['phase_durations_s'] == [90.0] * 7
     assert plan['slo_ms'] == 150
     cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
     assert cfg['deschedule_interval_seconds'] == 45
@@ -579,6 +626,9 @@ def test_mobility9_preserves_explicit_timer_and_slo_overrides(tmp_path):
     ['--long-run'],
     ['--scenario', 'scaler-balanced', '--long-run'],
     ['--scenario', 'mobility9', '--long-run', '--phase-duration', '90'],
+    ['--mobility-direction', 'reverse'],
+    ['--scenario', 'scaler-balanced', '--mobility-direction', 'reverse'],
+    ['--scenario', 'mobility9', '--mobility-direction', 'sideways'],
 ])
 def test_mobility_rejects_invalid_timing_and_runtime_before_cluster_access(flags, monkeypatch):
     monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
@@ -593,6 +643,7 @@ def test_fixed_mobility_plan_clamps_both_deployments_and_hpas_and_enables_tc(tmp
                    '--tc-ms', '10', '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['fixed_replicas'] == 6
+    assert plan['replica_bounds'] == {'min': 6, 'max': 6}
     for method, scheduler in [('baseline', 'default-scheduler'), ('proposed', 'mec-placement-scheduler')]:
         docs = list(yaml.safe_load_all((output / f'{method}-workload.yaml').read_text()))
         dep = next(d for d in docs if d and d['kind'] == 'Deployment')
@@ -603,7 +654,8 @@ def test_fixed_mobility_plan_clamps_both_deployments_and_hpas_and_enables_tc(tmp
         assert hpa['spec']['minReplicas'] == hpa['spec']['maxReplicas'] == 6
         cfg = yaml.safe_load((output / f'{method}-controller.yaml').read_text())
         assert cfg['min_replicas'] == cfg['max_replicas'] == 6
-    assert plan['campaign_settings']['phase_duration'] == 60
+    assert plan['campaign_settings']['phase_duration'] == 120
+    assert plan['phase_durations_s'] == [120.0] * 7
 
 
 @pytest.mark.parametrize('flags', [
@@ -699,19 +751,21 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
         }
     }
     for dep in (base_dep, prop_dep):
-        assert dep['spec']['replicas'] == 1
+        assert dep['spec']['replicas'] == 3
         assert dep['spec']['template']['spec']['schedulerName'] == 'default-scheduler'
         assert dep['spec']['template']['spec']['affinity'] == expected_affinity
+        env = {e['name']: e.get('value') for e in dep['spec']['template']['spec']['containers'][0]['env']}
+        assert env['HTTP_THREADS'] == '5'
 
     base_hpa = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())
     prop_hpa = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
-    assert base_hpa['spec']['minReplicas'] == 1
+    assert base_hpa['spec']['minReplicas'] == 3
     assert base_hpa['spec']['maxReplicas'] == 24
     assert base_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
     assert base_hpa['spec']['metrics'][0]['resource']['name'] == 'cpu'
     assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
 
-    assert prop_hpa['spec']['minReplicas'] == 1
+    assert prop_hpa['spec']['minReplicas'] == 3
     assert prop_hpa['spec']['maxReplicas'] == 24
     assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
     assert prop_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
@@ -720,11 +774,12 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     assert plan['comparison'] == 'scaling'
     assert plan['scenario'] == 'scaler-balanced'
+    assert plan['http_threads'] == 5
     assert plan['schedule'] == '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
     assert plan['phase_durations_s'] == [60.0] * 7
     assert plan['final_hold_seconds'] == 0
     assert plan['node_restriction'] == 'gnb-3'
-    assert plan['replica_bounds'] == {'min': 1, 'max': 24}
+    assert plan['replica_bounds'] == {'min': 3, 'max': 24}
     assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
     assert plan['hpa_targets'] == {
         'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
@@ -750,7 +805,7 @@ def test_scaler_balanced_final_hold_and_overrides(tmp_path):
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     assert plan['phase_durations_s'] == [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 420.0]
     assert plan['final_hold_seconds'] == 360
-    assert plan['replica_bounds'] == {'min': 1, 'max': 12}
+    assert plan['replica_bounds'] == {'min': 3, 'max': 12}
     assert plan['tc_ms'] == 15.0
     assert plan['pacing'] == {'rps_per_ue': 4.0, 'max_in_flight_per_ue': 6}
     assert yaml.safe_load((out / 'baseline-hpa.yaml').read_text())['spec']['maxReplicas'] == 12
@@ -788,7 +843,7 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
         if namespace == 'placement' and name == 'prometheus-adapter':
             return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
         if kind == 'deployment' and namespace == campaign.NAMESPACE:
-            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+            return {'spec': {'replicas': 3}, 'status': {'readyReplicas': 3}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}}
         raise AssertionError(f'unexpected get({kind}, {name}, {namespace})')
@@ -1028,7 +1083,7 @@ def test_run_method_collects_filtered_events_even_on_failure(tmp_path, monkeypat
         raise AssertionError(f'unexpected kube call: {args}')
 
     monkeypatch.setattr(campaign, 'kube', fake_kube)
-    monkeypatch.setattr(campaign, 'get', lambda *a, **kw: {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}, 'status': {'readyReplicas': 1}})
+    monkeypatch.setattr(campaign, 'get', lambda *a, **kw: {'spec': {'ports': [{'nodePort': 30000}], 'externalTrafficPolicy': 'Local'}, 'status': {'readyReplicas': 3}})
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'active_telemetry', lambda *a, **kw: True)

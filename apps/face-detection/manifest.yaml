@@ -43,6 +43,8 @@ spec:
         image: 10.34.211.140:30500/pedestrian-detection@sha256:44878a87af1976556d975a1748ffc730300570a98e6e692c42db6f346afe8abc
         imagePullPolicy: IfNotPresent
         env:
+        - name: HTTP_THREADS
+          value: '5'
         - name: ORT_THREADS
           value: '1'
         - name: HEALTH_PORT

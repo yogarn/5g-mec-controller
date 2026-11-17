@@ -17,9 +17,17 @@ resources and UE traffic. `--plan-only` is the offline exception.
 - `GET /health`: succeeds only after model loading and a warm-up inference.
 - Fixed 320x320 FP32 model, RGB letterboxing, COCO class 0, confidence 0.25,
   NMS IoU 0.45. These are initial reproducible settings, not calibrated optima.
-- One Gunicorn worker, one request thread, one ORT inference thread by default.
-  This bounds per-Pod parallelism and avoids an unbounded CPU thread pool.
-  Calibrate `ORT_THREADS` before deciding whether one or two is appropriate.
+- Newly built images use one Gunicorn process with five HTTP threads by default
+  (`HTTP_THREADS=5`, `gthread`). Five HTTP threads allow overlapping request I/O
+  (uploads and decoding) rather than assigning one Pod per UE or matching 5 RPS
+  one-for-one; the application lock still permits only one inference at a time,
+  using one ORT inference thread (`ORT_THREADS=1`).
+  The dedicated health listener remains independent of the request thread pool.
+  `HTTP_THREADS=1` selects the previous synchronous single-request mode. Values
+  must be positive integers. Calibrate HTTP concurrency separately from
+  `ORT_THREADS`; five HTTP threads are an initial setting, not a measured optimum.
+  Gunicorn's thread behavior is documented at
+  https://gunicorn.org/reference/settings/#threads.
 - Startup never downloads a model; missing/incompatible weights stop startup.
 - Four-MiB request limit and 16-megapixel decoded-image limit.
 - Resource requests are 500m CPU / 256Mi memory; limits are 1 CPU / 512Mi
@@ -29,6 +37,14 @@ resources and UE traffic. `--plan-only` is the offline exception.
   inference, and postprocessing. It excludes network and WSGI admission wait;
   **do not call client time minus processing_ms propagation delay**. That residual
   also contains transfer, queueing, and protocol overhead.
+
+The checked-in digest-pinned manifests still select the existing image. Changing
+this source does not update running Pods. Build and validate a new immutable image
+before pinning it for a new experiment. Use the same image and `HTTP_THREADS` value
+for baseline and proposed, record both in the run configuration, and keep earlier
+single-thread results as a separate application configuration. Increasing HTTP
+concurrency can increase decoding memory and CPU use; performance and memory
+within the existing Pod limits still require measurement.
 
 ## Export locally
 

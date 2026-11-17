@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a closed-loop face-detection ramp using owned UERANSIM sessions."""
+"""Run fixed-rate UE traffic with journalled UERANSIM sessions."""
 import argparse
 import hashlib
 import json
@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from benchmark.client import attempt, parse_schedule
 from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, telemetry_config
 from utils import defaults
-from utils.ue_lifecycle import OwnedUELifecycle
+from utils.ue_lifecycle import OwnedUELifecycle, ContinuousUELifecycle
 
 DEFAULT_RPS_PER_UE = 5.0
 DEFAULT_MAX_IN_FLIGHT_PER_UE = 8
@@ -232,6 +232,9 @@ def parse_phase_durations(text, count, default):
 
 
 def run(args):
+    transition = getattr(args, 'phase_transition', 'restart')
+    if transition not in ('continuous', 'restart'):
+        raise ValueError('phase_transition must be continuous or restart')
     phases = parse_schedule(args.phase_schedule)
     if any(phase['workload_ue'] > 50 for phase in phases):
         raise ValueError('at most 50 UEs are supported')
@@ -281,7 +284,9 @@ def run(args):
                 'max_in_flight_per_ue': max_in_flight_per_ue,
                 'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
-                'workload': 'open-loop-fixed-rate', 'switching': 'stop-and-reattach; not handover'}
+                'workload': 'open-loop-fixed-rate', 'phase_transition': transition,
+                'switching': ('continuous-unaffected; moving UEs stop-and-reattach; not handover'
+                              if transition == 'continuous' else 'stop-and-reattach; not handover')}
     metadata['images'] = [{key: image[key] for key in ('filename', 'sha256', 'bytes')} for image in images]
     metadata['image_assignments'] = [
         {'ue_index': index, 'image_index': image_index, 'filename': images[image_index]['filename']}
@@ -293,8 +298,34 @@ def run(args):
     with (out / 'requests.jsonl').open('x', encoding='utf-8') as output:
         def emit(record):
             with lock:
+                if record.get('event', '').startswith('ue_transition_'):
+                    with (out / 'ue-transitions.jsonl').open('a', encoding='utf-8') as transitions:
+                        transitions.write(json.dumps(record, allow_nan=False) + '\n')
+                    return
                 output.write(json.dumps(record, allow_nan=False) + '\n')
                 output.flush()
+
+        if transition == 'continuous':
+            from utils.continuous_traffic import run_continuous_phases
+            lifecycle = ContinuousUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
+            def initial_probe(sessions):
+                if getattr(args, 'probe_service_path', False):
+                    groups = [(f'gnb-{site + 1}', [s for s in sessions.values() if s['site'] == site])
+                              for site in range(3)]
+                    probes = probe_registered_service_paths(groups, urls, args.timeout)
+                    (out / 'service-path-probes.json').write_text(json.dumps({'initial': probes}, indent=2) + '\n')
+            try:
+                run_continuous_phases(
+                    phases, phase_durations, lifecycle, images, assignments, urls,
+                    float(rps_per_ue), max_in_flight_per_ue,
+                    lambda url, image, source, publisher: request_with_telemetry(
+                        attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout),
+                    emit, publisher_factory=(lambda ip: TelemetryPublisher(telemetry, [ip])) if telemetry else None,
+                    initial_probe=initial_probe)
+            finally:
+                lifecycle.close()
+            print(f"Results: {out / 'requests.jsonl'}")
+            return
 
         lifecycle = OwnedUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
         try:
@@ -379,6 +410,8 @@ def main(argv=None):
     parser.add_argument('--phase-schedule', default=defaults.SCHEDULE, help='Ordered total:gnb1:gnb2:gnb3 counts, comma separated')
     parser.add_argument('--phase-duration', type=float, default=defaults.PHASE_DURATION, help='Request-generation seconds per phase')
     parser.add_argument('--phase-durations', default=None, help='Comma-separated request-generation seconds per phase; overrides --phase-duration')
+    parser.add_argument('--phase-transition', choices=('continuous', 'restart'), default='continuous',
+                        help='continuous keeps unchanged UEs sending; restart reproduces legacy full reattachment')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE, help='Target arrival rate per active UE in requests/second')
     parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE, help='Maximum concurrent in-flight requests per UE')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')

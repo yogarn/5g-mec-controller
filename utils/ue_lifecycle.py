@@ -117,11 +117,11 @@ def _load_config(path):
     return subscribers
 
 
-def _other_ues():
+def _other_ues(owned_pids=()):
     for entry in Path('/proc').iterdir():
         if entry.name.isdigit():
             try:
-                if (entry / 'comm').read_text().strip() == 'nr-ue':
+                if int(entry.name) not in owned_pids and (entry / 'comm').read_text().strip() == 'nr-ue':
                     return True
             except (FileNotFoundError, ProcessLookupError):
                 pass
@@ -272,24 +272,31 @@ def _cleanup(journal):
 def recover_owned_ues(state_dir):
     _require_root()
     with _lock():
+        # Continuous runs use one independently recoverable journal per subscriber.
+        for child in sorted(Path(state_dir).glob('ue-[0-9][0-9][0-9]/lifecycle.jsonl')):
+            _cleanup(child)
         _cleanup(Path(state_dir) / 'lifecycle.jsonl')
 
 
 class OwnedUELifecycle:
-    def __init__(self, state_dir: Path, config_file: Path, binary: Path):
+    def __init__(self, state_dir: Path, config_file: Path, binary: Path, *,
+                 _shared_lock=None, _subscribers=None, _allowed_pids=None):
         _require_root()
-        self.subscribers = _load_config(config_file)
+        self.subscribers = _load_config(config_file) if _subscribers is None else _subscribers
         self.binary = Path(binary).resolve(strict=True)
         if not self.binary.is_file() or not os.access(self.binary, os.X_OK):
             raise ValueError('binary must be an executable file')
-        self.lock = _lock()
+        self._owns_lock = _shared_lock is None
+        self.lock = _lock() if self._owns_lock else _shared_lock
+        self._allowed_pids = _allowed_pids
         try:
             self.state_dir = Path(state_dir)
             self.state_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
             self.journal = self.state_dir / 'lifecycle.jsonl'
             _record(self.journal, 'created', launch_protocol=_PROTOCOL)
         except BaseException:
-            self.lock.close()
+            if self._owns_lock:
+                self.lock.close()
             raise
         self.closed = False
         self.processes = []
@@ -303,7 +310,7 @@ class OwnedUELifecycle:
         for process in self.processes:
             process.wait()
         self.processes.clear()
-        if _other_ues():
+        if (_other_ues(self._allowed_pids()) if self._allowed_pids else _other_ues()):
             raise RuntimeError('existing nr-ue process prevents exclusive ownership')
         chosen = [sites[0 if i < n1 else 1 if i < n1 + n2 else 2]
                   for i, sites in enumerate(self.subscribers[:total])]
@@ -395,6 +402,107 @@ class OwnedUELifecycle:
             for process in self.processes:
                 process.wait()
             self.processes.clear()
+        finally:
+            self.closed = True
+            if self._owns_lock:
+                self.lock.close()
+
+
+def plan_assignments(previous, counts):
+    """Keep the same subscribers at their sites whenever the target permits it."""
+    if len(counts) != 3 or any(type(n) is not int or n < 0 for n in counts) or sum(counts) < 1:
+        raise ValueError('expected three nonnegative UE counts with a positive total')
+    remaining = list(counts)
+    target = {}
+    for index in range(sum(counts)):
+        site = previous.get(index)
+        if site is not None and remaining[site] > 0:
+            target[index] = site
+            remaining[site] -= 1
+    for index in range(sum(counts)):
+        if index not in target:
+            site = next(s for s, n in enumerate(remaining) if n)
+            target[index] = site
+            remaining[site] -= 1
+    return target
+
+
+class ContinuousUELifecycle:
+    """Own one lock and per-subscriber sessions; never restart an unchanged UE."""
+
+    def __init__(self, state_dir, config_file, binary):
+        _require_root()
+        self.subscribers = _load_config(config_file)
+        self.binary = Path(binary).resolve(strict=True)
+        self.config_file = config_file
+        self.lock = _lock()
+        self.children = {}
+        self.assignments = {}
+        self.sessions = {}
+        self.closed = False
+        self.state_dir = Path(state_dir)
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+            self.journal = self.state_dir / 'lifecycle.jsonl'
+            _record(self.journal, 'created', launch_protocol=_PROTOCOL)
+        except BaseException:
+            self.lock.close()
+            raise
+
+    def _owned_pids(self):
+        return {p.pid for child in self.children.values() for p in child.processes}
+
+    def reconcile(self, target, before_change=lambda index: None, after_change=lambda index, session: None):
+        if self.closed:
+            raise RuntimeError('lifecycle is closed')
+        if set(target) != set(range(len(target))) or len(target) > len(self.subscribers) or any(s not in (0, 1, 2) for s in target.values()):
+            raise ValueError('invalid subscriber assignment')
+        changed = sorted(i for i in set(self.assignments) | set(target)
+                         if self.assignments.get(i) != target.get(i))
+        # Drain only affected subscribers; all other pacers remain active.
+        for index in changed:
+            before_change(index)
+        for index in changed:
+            child = self.children.get(index)
+            if index not in target:
+                if child is not None:
+                    _cleanup(child.journal)
+                    for proc in child.processes:
+                        proc.wait()
+                    child.processes.clear()
+                self.sessions.pop(index, None)
+                self.assignments.pop(index, None)
+                after_change(index, None)
+                continue
+            if child is None:
+                child = OwnedUELifecycle(
+                    self.state_dir / f'ue-{index:03d}', self.config_file, self.binary,
+                    _shared_lock=self.lock, _subscribers=[self.subscribers[index]],
+                    _allowed_pids=self._owned_pids)
+                self.children[index] = child
+            site = target[index]
+            split = [0, 0, 0]
+            split[site] = 1
+            attached = child.switch_counts(1, *split)[site][0]
+            self.sessions[index] = {**attached, 'site': site, 'ue_index': index}
+            self.assignments[index] = site
+            after_change(index, self.sessions[index])
+        _record(self.journal, 'ready', assignments=self.assignments)
+        return dict(self.sessions)
+
+    def close(self):
+        if self.closed:
+            return
+        errors = []
+        try:
+            for child in self.children.values():
+                try:
+                    child.close()
+                except Exception as exc:
+                    errors.append(str(exc))
+            if errors:
+                raise RuntimeError('continuous UE cleanup failed: ' + '; '.join(errors))
+            _cleanup(self.journal)
         finally:
             self.closed = True
             self.lock.close()

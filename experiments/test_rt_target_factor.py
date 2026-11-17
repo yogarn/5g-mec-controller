@@ -66,7 +66,7 @@ def test_raw_mode_slo_150_factor_095(tmp_path):
     assert '* 1000' in rules[-1]['metricsQuery']
     assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
     assert base['spec']['behavior'] == prop['spec']['behavior']
-    assert base['spec']['minReplicas'] == prop['spec']['minReplicas'] == 1
+    assert base['spec']['minReplicas'] == prop['spec']['minReplicas'] == 3
     assert base['spec']['maxReplicas'] == prop['spec']['maxReplicas'] == 24
 
 
@@ -300,7 +300,7 @@ def test_run_method_forwards_reporting_slo_to_summarize(tmp_path, monkeypatch):
 
     def fake_get(kind, name, namespace=campaign.NAMESPACE):
         if kind == 'deployment' and namespace == campaign.NAMESPACE:
-            return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
+            return {'spec': {'replicas': 3}, 'status': {'readyReplicas': 3}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30080}]}}
         raise AssertionError(f'unexpected get {kind} {name} {namespace}')

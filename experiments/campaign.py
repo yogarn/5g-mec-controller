@@ -32,12 +32,12 @@ ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
-MOBILITY9_SCHEDULE = '9:3:3:3,9:7:1:1,9:1:7:1,9:1:1:7,9:1:7:1,9:7:1:1,9:3:3:3'
+MOBILITY9_SCHEDULE = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
 SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
 SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
 SCALER_SCENARIOS = ('scaler-balanced', 'scaler-staircase')
 SCALER_NODE = 'gnb-3'
-SCALER_MIN_REPLICAS = 1
+SCALER_MIN_REPLICAS = 3
 SCALER_DEFAULT_MAX_REPLICAS = 24
 FINAL_HOLD_SECONDS = 360
 COMPARISONS = ('full', 'placement', 'scaling')
@@ -61,6 +61,17 @@ def workload_identity(workload='face-detection'):
 def workload_manifest(workload='face-detection'):
     workload_identity(workload)
     return ROOT / 'apps' / workload / 'manifest.yaml'
+
+
+def _workload_http_threads(workload='face-detection'):
+    """Return configured HTTP_THREADS from the workload Deployment env, if set."""
+    for doc in yaml.safe_load_all(workload_manifest(workload).read_text()):
+        if doc and doc.get('kind') == 'Deployment':
+            for container in doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', []):
+                for entry in container.get('env') or []:
+                    if entry.get('name') == 'HTTP_THREADS' and entry.get('value') is not None:
+                        return int(entry['value'])
+    return None
 
 
 def selected_workload(settings):
@@ -1005,7 +1016,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                     hpa_sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'hpa-sample', str(output / 'hpa-status.jsonl'), '--namespace', NAMESPACE, '--hpa', f'{app}-{method}'], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
                     processes.append(hpa_sampler)
                 payload = remote_settings(settings) | {'campaign': campaign, 'method': method, 'site_urls': site_urls,
-                           'schedule': settings['schedule'], 'duration': settings['phase_duration']}
+                           'schedule': settings['schedule'], 'duration': settings['phase_duration'],
+                           'phase_transition': settings.get('phase_transition', 'continuous')}
                 if settings.get('phase_durations'):
                     payload['phase_durations'] = settings['phase_durations']
                 ue = subprocess.Popen(remote(settings, ['sudo', '-n', '.venv/bin/python', '-u', '-m', 'experiments.campaign_ue', 'run']), stdin=subprocess.PIPE, stdout=runner_log, stderr=subprocess.STDOUT, text=True, start_new_session=True)
@@ -1131,7 +1143,13 @@ def main(argv=None):
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or face-detection)')
     parser.add_argument('--scenario', choices=['mobility9', *SCALER_SCENARIOS],
-                        help='mobility9: 9 UEs rotating hotspots; scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on gnb-3')
+                        help='mobility9: 9 UEs shifting across gNBs (7 phases); scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on gnb-3')
+    parser.add_argument('--mobility-direction', choices=('forward', 'reverse'), default=None,
+                        help='mobility9 only: UE hotspot trajectory direction (forward or reverse; default: forward)')
+    parser.add_argument('--phase-transition', choices=('continuous', 'restart'), default='continuous',
+                        help='continuous preserves unaffected UE traffic at phase boundaries; restart reproduces legacy runs')
+    parser.add_argument('--phase-schedule',
+                        help='override the scenario with explicit total:gnb1:gnb2:gnb3 phases (recorded in metadata)')
     parser.add_argument('--final-hold', action='store_true',
                         help='extend final scaling phase: +360s for legacy balanced, or to at least 600s for staircase')
     parser.add_argument('--deschedule-interval', type=float,
@@ -1156,7 +1174,7 @@ def main(argv=None):
     parser.add_argument('--fixed-replicas', type=int,
                         help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
     parser.add_argument('--min-replicas', type=int,
-                        help='shared baseline HPA and proposed minimum and initial replica count (default: 1 for scaling, config.yaml otherwise)')
+                        help='shared baseline HPA and proposed minimum and initial replica count (default: 3 for scaling, config.yaml otherwise)')
     parser.add_argument('--max-replicas', type=int,
                         help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
     parser.add_argument('--scale-down-stabilization-seconds', type=int,
@@ -1172,9 +1190,9 @@ def main(argv=None):
                         help='60s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
     duration_options = parser.add_mutually_exclusive_group()
     duration_options.add_argument('--long-run', action='store_true',
-                                  help='mobility9 only: use 120s phases to observe placement convergence')
+                                  help='mobility9 only: use 120s phases (default for mobility9; kept for compatibility)')
     duration_options.add_argument('--phase-duration', type=float,
-                                  help='traffic seconds per phase (minimum 60; default: campaign config, or 60 with --debug)')
+                                  help='traffic seconds per phase (minimum 60; default: 120 for mobility9, campaign config otherwise, or 60 with --debug)')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE,
                         help='target request arrival rate per active UE in requests/second (default: 5)')
     parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE,
@@ -1189,6 +1207,9 @@ def main(argv=None):
         if args.scenario != 'mobility9':
             parser.error('--long-run requires --scenario mobility9')
         args.phase_duration = 120
+    if args.mobility_direction is not None and args.scenario != 'mobility9':
+        parser.error('--mobility-direction requires --scenario mobility9')
+    mobility_direction = (args.mobility_direction or 'forward') if args.scenario == 'mobility9' else None
     if args.fixed_replicas is not None:
         if args.fixed_replicas < 1:
             parser.error('--fixed-replicas must be a positive integer')
@@ -1270,11 +1291,23 @@ def main(argv=None):
     settings = load(args.config)
     settings['rps_per_ue'] = float(args.rps_per_ue)
     settings['max_in_flight_per_ue'] = args.max_in_flight_per_ue
+    settings['phase_transition'] = args.phase_transition
     if args.scenario == 'mobility9':
-        settings.update(schedule=MOBILITY9_SCHEDULE, phase_duration=60)
+        mobility_phases = (args.phase_schedule or MOBILITY9_SCHEDULE).split(',')
+        if mobility_direction == 'reverse':
+            mobility_phases = list(reversed(mobility_phases))
+        settings.update(
+            schedule=','.join(mobility_phases),
+            phase_duration=120,
+            mobility_direction=mobility_direction,
+        )
     elif args.scenario in SCALER_SCENARIOS:
         settings.update(schedule=SCALER_STAIRCASE_SCHEDULE if args.scenario == 'scaler-staircase' else SCALER_BALANCED_SCHEDULE,
                         phase_duration=60)
+    if args.phase_schedule is not None:
+        parse_schedule(args.phase_schedule)
+        if args.scenario != 'mobility9':
+            settings['schedule'] = args.phase_schedule
     workload = args.workload if args.workload is not None else selected_workload(settings)
     settings['workload'] = workload
     settings['staircase'] = args.scenario == 'scaler-staircase'
@@ -1415,8 +1448,11 @@ def main(argv=None):
     }
     shared_metadata = {
         'workload': workload,
+        'http_threads': _workload_http_threads(workload),
+        'phase_transition': args.phase_transition,
         'comparison': args.comparison,
         'scenario': args.scenario,
+        'mobility_direction': mobility_direction,
         'fixed_replicas': args.fixed_replicas,
         'deschedule_interval_seconds': args.deschedule_interval,
         'autoscaler': args.autoscaler,
@@ -1515,15 +1551,17 @@ def main(argv=None):
             print(f'Proposed scoring: resource weights={resource_weights}; '
                   f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
         if args.scenario == 'mobility9':
-            print('Mobility scenario: fixed nine UEs; hotspot order gNB-1 -> gNB-2 -> gNB-3 -> gNB-2 -> gNB-1. '
+            trajectory = ' -> '.join(':'.join(str(p[f'gnb{s}_ues']) for s in (1, 2, 3)) for p in phases)
+            print(f'Mobility scenario ({mobility_direction}): UE splits {trajectory}. '
                   f'Descheduler checks every {args.deschedule_interval:g}s; evictions require settled Pods and positive score improvement. '
-                  'UE moves use stop-and-reattach, not handover.', flush=True)
+                  'UE moves use stop-and-reattach, not seamless handover.', flush=True)
         elif args.scenario in SCALER_SCENARIOS:
             target_desc = (f'internal scaling target {internal_target_ms:g} ms p90 = {slo_ms:g} ms * {args.rt_target_factor:g}; '
                            f'reporting SLO {slo_ms:g} ms'
                            if args.rt_target_factor != 1.0
                            else f'scaling target {internal_target_ms:g} ms p90; reporting SLO {slo_ms:g} ms')
-            print(f'Scaling scenario: balanced UEs (3..24..3) on {SCALER_NODE} with default-scheduler; '
+            ue_counts = ' -> '.join(str(p['workload_ue']) for p in phases)
+            print(f'Scaling scenario: UE counts {ue_counts}; workload on {SCALER_NODE} with default-scheduler; '
                   f'CPU HPA (60%) vs latency HPA ({target_desc}), replicas {min_replicas}..{max_replicas}.', flush=True)
         if args.fixed_replicas is not None:
             print(f'Fixed placement experiment: {args.fixed_replicas} replicas per method; '

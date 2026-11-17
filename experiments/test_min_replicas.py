@@ -25,11 +25,16 @@ def test_omitted_min_replicas_preserves_defaults(tmp_path):
     prop_dep = next(d for d in yaml.safe_load_all((out / 'proposed-workload.yaml').read_text())
                     if d and d.get('kind') == 'Deployment')
 
-    assert plan['replica_bounds'] == {'min': 1, 'max': 24}
-    assert base_hpa['spec']['minReplicas'] == 1
-    assert prop_hpa['spec']['minReplicas'] == 1
-    assert base_dep['spec']['replicas'] == 1
-    assert prop_dep['spec']['replicas'] == 1
+    assert plan['replica_bounds'] == {'min': 3, 'max': 24}
+    assert plan['http_threads'] == 5
+    assert base_hpa['spec']['minReplicas'] == 3
+    assert prop_hpa['spec']['minReplicas'] == 3
+    assert base_dep['spec']['replicas'] == 3
+    assert prop_dep['spec']['replicas'] == 3
+    for dep in (base_dep, prop_dep):
+        env = {e['name']: e.get('value') for e in dep['spec']['template']['spec']['containers'][0]['env']}
+        assert env['HTTP_THREADS'] == '5'
+        assert env['ORT_THREADS'] == '1'
 
 
 def test_min_replicas_2_applies_to_both_methods_and_preserves_scaling_semantics(tmp_path):

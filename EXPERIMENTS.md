@@ -205,12 +205,18 @@ Run from core with a new result name:
 bash experiments/run.sh mobility9_01 --scenario mobility9
 ```
 
-This scenario keeps nine UEs active per traffic phase, with splits `3:3:3 → 7:1:1 → 1:7:1 → 1:1:7 → 1:7:1 → 7:1:1 → 3:3:3`. Each phase lasts 60 seconds: seven minutes of traffic per method, fourteen minutes per pair, plus setup, UE reattachment and transfer. Movement means stop-and-reattach rather than seamless handover.
+This scenario keeps nine UEs active per traffic phase across seven phases (`9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7`, i.e., `7:1:1 → 5:3:1 → 3:5:1 → 1:7:1 → 1:5:3 → 1:3:5 → 1:1:7`). Use `--mobility-direction forward` (default) or `--mobility-direction reverse` (`1:1:7 → 1:3:5 → 1:5:3 → 1:7:1 → 3:5:1 → 5:3:1 → 7:1:1`). Each phase lasts **120 seconds** by default: 14 minutes of traffic per method, 28 minutes per pair, plus setup, UE reattachment, and transfer.
 
-For a longer convergence test, add `--long-run` to use seven **120-second phases** per method (28 minutes of traffic per pair, plus setup and UE switching). This is a shortcut for `--phase-duration 120`; the two flags are mutually exclusive. It retains the normal 30-second descheduler interval and HPA timers. Record the first and second minute separately when assessing initial response versus convergence; the existing phase plots average the full 120 seconds.
+New campaigns default to `--phase-transition continuous`: phase boundaries are fixed traffic-clock times. UEs whose site is unchanged keep sending, while only moving UEs drain their own in-flight requests and stop/reattach. Added UEs join after attachment; removed UEs stop. This is not seamless handover. Use `--phase-transition restart` to reproduce the earlier full-pool stop-and-reattach condition. Campaign metadata records `mobility_direction`, effective `schedule`, `phase_durations_s`, replica settings (`fixed_replicas`, `replica_bounds`), and `pacing`, while request logs and UE lifecycle journals preserve `phase_start`/`phase_end` transition timestamps, request coverage, and missed-slot accounting so reattachment gaps remain distinguishable from application performance.
+
+Override the phase duration with `--phase-duration SECONDS` (minimum `60`), or pass `--long-run` for explicit 120-second phases (mutually exclusive with `--phase-duration`; kept for compatibility). Both retain the normal 30-second descheduler interval and HPA timers. Record the first and second minute separately when assessing initial response versus convergence; the existing phase plots average the full 120 seconds.
 
 ```bash
-bash experiments/run.sh mobility9_fixed9_tc10_150ms_long_01 --scenario mobility9 --long-run --fixed-replicas 9 --tc-ms 10 --slo-ms 150
+# Default forward 120s mobility9 run with fixed replicas and traffic shaping:
+bash experiments/run.sh mobility9_fixed9_tc10_150ms_01 --scenario mobility9 --fixed-replicas 9 --tc-ms 10 --slo-ms 150
+
+# Reverse trajectory with explicit 90s phase duration:
+bash experiments/run.sh mobility9_rev_fixed6_tc10_01 --scenario mobility9 --mobility-direction reverse --fixed-replicas 6 --phase-duration 90 --tc-ms 10
 ```
 
 The default comparison is `placement`: both methods use the same native latency HPA at 100 ms. Proposed uses the Go scheduler/descheduler. The descheduler checks every 30 seconds; HPA stabilization and the CPU measurement window retain their normal settings. Override the check interval independently with `--deschedule-interval SECONDS`; `--phase-duration`, `--slo-ms`, and `--locality-weight` remain available. `--debug` is rejected for this scenario to avoid changing other timers.
@@ -229,13 +235,13 @@ For a placement comparison at a fixed replica budget with inter-node traffic sha
 bash experiments/run.sh mobility9_fixed6_tc10_01 --scenario mobility9 --fixed-replicas 6 --tc-ms 10
 ```
 
-`--fixed-replicas 6` sets both methods' initial Deployment replicas and HPA minimum/maximum to six. HPA cannot change this budget; an eviction can temporarily reduce the number of ready Pods while the ReplicaSet creates a replacement. The scenario retains nine UEs, 60-second phases, 30-second descheduler checks and the 100 ms reporting objective. Do not combine `--fixed-replicas` with `--max-replicas`.
+`--fixed-replicas 6` sets both methods' initial Deployment replicas and HPA minimum/maximum to six. HPA cannot change this budget; an eviction can temporarily reduce the number of ready Pods while the ReplicaSet creates a replacement. The scenario retains nine UEs, 120-second default phases, 30-second descheduler checks and the 100 ms reporting objective. Do not combine `--fixed-replicas` with `--max-replicas`.
 
 `--tc-ms 10` adds 10 ms one-way delay on the selected inter-node workload interfaces in both directions (about 20 ms added RTT per shaped round trip). Same-node traffic is not delayed by this rule. Both methods use the reserved workload pool, and campaign cleanup removes its shaping filters. Use a fresh result name for each run; remove `--tc-ms` for a separate unshaped comparison.
 
 ## Fixed arrival-rate load generation & calibration
 
-All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, `--fixed-replicas`, and `utils/fixed_replica_harness.py`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and bounded in-flight concurrency (`--max-in-flight-per-ue`, default `8`). If concurrency is saturated or the pacer lags past a slot boundary, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. At phase end, new scheduling stops and all in-flight requests drain to completion before UEs reattach.
+All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, `--fixed-replicas`, and `utils/fixed_replica_harness.py`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and bounded in-flight concurrency (`--max-in-flight-per-ue`, default `8`). If concurrency is saturated or the pacer lags past a slot boundary, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. With the default `--phase-transition continuous`, unchanged UEs retain their sessions and request pacing across boundaries. Only moved/removed UEs pause and drain their own requests; their unavailable scheduled slots are counted as missed. New UEs attach without stopping existing traffic. `--phase-transition restart` retains the legacy global stop, drain, and reattachment behavior.
 
 Treat the default `--rps-per-ue 5` as an **initial rate requiring calibration, not proven capacity** (`3` UEs = `15` RPS, `9` UEs = `45` RPS, `15` UEs = `75` RPS, `24` UEs = `120` RPS). Calibrate single-replica and multi-replica capacity before full comparisons:
 
@@ -253,7 +259,7 @@ bash experiments/run.sh mobility9_5rps_01 --scenario mobility9 --rps-per-ue 5 --
 bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-replicas 6 --rps-per-ue 5 --max-in-flight-per-ue 8
 ```
 
-`utils/summarize.py` writes `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` across `summary.csv` (by phase), `summary-sites.csv` (by phase and gNB site), and `summary-ues.csv` (by phase and UE). `utils/plot_autoscaler.py` plots request coverage alongside SLO violations in `slo-violations.{png,pdf}`.
+`utils/summarize.py` writes `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` across `summary.csv` (by phase), `summary-sites.csv` (by phase and gNB site), and `summary-ues.csv` (by phase and UE). `utils/plot_autoscaler.py` exports 300 DPI PNG figures only (no PDFs) on an aligned cumulative traffic-time axis with seconds ticks followed by phase brackets and UE-distribution labels below the plots (excluding setup, draining, and stop-and-reattach gaps), computing 15-second reporting windows (`[0, 15), [15, 30), ...`, plus partial final windows) from raw `requests.jsonl` and `metrics.jsonl`, and writes `window-metrics-15s.csv`, `pod-placement-15s.csv`, `slo-violations.png` (lines with small markers for SLO violations (%) and request coverage), `response-time.png`, `response-time-zoom.png`, and `pod-placement.png` (stacked bars of per-node ready replicas at each 15-second window end, with freshness enforcement; bar widths provide visual spacing, not interval-average counts).
 
 ### Short calibration command
 
@@ -261,7 +267,7 @@ On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one 
 
 ## Scaler-only balanced scenario (`scaler-balanced`)
 
-Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`60%` target) against native latency HPA (`100` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `1..24` replica bounds (override with `--max-replicas`), 60-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
+Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`60%` target) against native latency HPA (`100` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 60-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
 
 ```bash
 # Offline preview (no cluster or network access):
@@ -277,7 +283,7 @@ bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balance
 
 - **What CPU and memory numbers measure:** `cpu_millicores` is the sum of container CPU usage averages over each Pod's Metrics Server reporting window, and `memory_mib` is the sum of container memory working sets, averaged across **complete simultaneous rounds** in each phase. A round groups per-Pod metric timestamps within `10` seconds of each other, requires consistent CPU windows (`<= 5s` spread), and requires an exact match to the active `Running` Pod set observed near the round (`<= 8s` age).
 - **Incomplete, skewed, or missing observations:** Skewed Pod timestamps (`> 10s` apart) are never combined into a simultaneous total. Rounds missing one or more running Pods are recorded separately as `partial_samples` (and `partial_cpu_millicores` / `partial_memory_mib`, never mixed into total `cpu_millicores` / `memory_mib`). Rounds with churn/window mismatches are counted in `rejected_samples`. Phases with zero complete rounds leave `cpu_millicores` and `memory_mib` blank (`missing`), never zero-filled or interpolated.
-- **Coverage & plots:** `resource-by-ramp.csv` exports `complete_samples`, `partial_samples`, `rejected_samples`, `missing_samples`, `round_completeness_ratio` (complete among observed rounds), `availability_ratio` (non-empty metric observations over total valid + error observations), `coverage_ratio`, `completeness_status`, and `missing_reasons`. Rounds whose Pod membership changes across their `[min_t, max_t]` interval are rejected (`pod_membership_changed_within_round`). `utils/plot_autoscaler.py` plots `resource-usage.{png,pdf}` with a dedicated resource-coverage bar panel and missing/partial annotations so churn-induced gaps are never presented as unbiased full-phase means. Metrics Server scrapes asynchronously (~15–30s windows), so rapid Pod replacement churn can still yield gaps; those gaps are retained rather than fabricated.
+- **Coverage & plots:** `resource-by-ramp.csv` exports `complete_samples`, `partial_samples`, `rejected_samples`, `missing_samples`, `round_completeness_ratio` (complete among observed rounds), `availability_ratio` (non-empty metric observations over total valid + error observations), `coverage_ratio`, `completeness_status`, and `missing_reasons`. Rounds whose Pod membership changes across their `[min_t, max_t]` interval are rejected (`pod_membership_changed_within_round`). `utils/plot_autoscaler.py` plots `resource-usage.png` (300 DPI) with a dedicated resource-coverage bar panel and missing/partial annotations so churn-induced gaps are never presented as unbiased full-phase means. Metrics Server scrapes asynchronously (~15–30s windows), so rapid Pod replacement churn can still yield gaps; those gaps are retained rather than fabricated.
 
 ## Prometheus/cAdvisor resource monitoring (`utils/cadvisor_resources.py`)
 
@@ -330,8 +336,13 @@ Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now sele
 `--scenario scaler-staircase`, 60s phases, no extra final hold, TC 10ms, SLO 150ms,
 5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
 Both methods use default-scheduler on gnb-3,
-replica bounds 1..24, requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.
-The rebuilt image digest from core is pinned in both manifests.
+replica bounds 3..24, `HTTP_THREADS=5` (explicitly set for both methods),
+requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.
+The rebuilt image digest from core is pinned in both manifests; note that the
+currently pinned digest remains single-threaded until the updated source is
+built, pushed, and validated (setting `HTTP_THREADS=5` in the manifest alone
+does not upgrade an existing image). Keep historical min-1 / single-threaded
+results unchanged as a separate application/experiment configuration.
 
 UE steps are 3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3, equally divided
 between the three gNBs. All thirteen phases last 60s by default (13 minutes of
@@ -477,13 +488,15 @@ replica count for both baseline and proposed methods:
 - Before starting each method's traffic, the runner waits for the Deployment
   rollout and verifies `readyReplicas >= min_replicas` (aborting on timeout).
 - Cannot be combined with `--fixed-replicas` and must not exceed the effective
-  `--max-replicas`. The `ramp` preset retains its default minimum (`1`) unless
-  `--min-replicas` is passed explicitly.
-- **Interpretation boundary:** This is a **shared minimum-capacity experiment**
-  (for example, starting both CPU and RT autoscalers at 2 pods while keeping
-  proposed scaling purely RT-driven with `--rt-target-factor 1.0`). Do not
-  interpret results from `--min-replicas > 1` as evidence of proactive RT
-  scaling.
+  `--max-replicas`. Scaling comparisons (`scaler-balanced`, `scaler-staircase`,
+  and the `ramp` preset) default to a shared minimum and initial replica count
+  of `3` unless `--min-replicas` is passed explicitly.
+- **Rationale and interpretation boundary:** Three replicas provide initial
+  processing capacity for both CPU and RT autoscalers, while five HTTP threads
+  (`HTTP_THREADS=5`) allow overlapping request I/O (not because 5 RPS requires
+  five threads, and not per-UE Pod assignment). Do not interpret results from
+  `--min-replicas > 1` (including the default `3`) as evidence of proactive RT
+  scaling. Keep historical min-1 / single-threaded results separate.
 
 Example commands:
 
@@ -521,3 +534,76 @@ bash experiments/run.sh ramp scaler_floor_min2_01 --rt-target-factor 1.0 --min-r
   - `results/b0_smoke_03/smoke_01` (`--duration 30` rejected by `utils.experiment`) and `results/b0_smoke_03/smoke_02` (UE `172.16.50.251` cell-barred on `gnb1` after `core-5g`/`amf-0` `03:50Z` restart; `gnb1` `ueransim-gnb.service` requires manual sudo restart) failed before traffic.
   - `results/b1_path_01/b1_tc_on`, `b1_tc_on_2`, and `b1_tc_on_3` were incomplete/aborted due to an orchestrator restart and stale `tc` filter cleanup (superseded by `results/b1_path_01/b1_tc_on_4`).
   - `utils/rebuild_pedestrian.py` updated both `apps/pedestrian-detection/manifest.yaml` and `apps/face-detection/manifest.yaml` when pinning the rebuilt digest (`9f7b907`), while `apps/face-detection/app.py` itself remained unchanged.
+
+
+## Continuous phase transitions and 15-second resource reporting
+
+New campaigns and the direct UE CLI default to `--phase-transition continuous` for both methods. Both mode and effective schedule are recorded in campaign/run metadata. This changes the experiment condition: do not pool these runs with historical `restart` runs. Per-subscriber sessions retain the same UE identity, source binding, and image assignment when their attachment is unchanged. A persistent pacer keeps their bounded request concurrency across phase boundaries; only changed subscribers drain and reattach. Slot offsets are phase-relative and deterministic; omitted slots are counted without catch-up bursts.
+
+`ue-transitions.jsonl` records transition start/end times, UE index, phase, site, and the new source/interface. `requests.jsonl` retains actual request timestamps, planned phase membership, per-UE accounting, and `transition_missed` counters in phase-end records. In continuous mode `phase_end.end_time` is the scheduled generation cutoff; `drain_completed_time` separately records when its request cohort finished. Old requests can finish after the next phase starts. The summarizer accepts this interleaving and still validates attempt order and counts for each phase. All phase traffic time, including moving-UE interruptions, remains on the continuous-mode plotting axis. Consecutive measured windows connect across phase markers only in continuous mode; missing measurements still break the line. Legacy restart runs retain their phase breaks. Initial attachment and final drain are outside that axis.
+
+The continuous lifecycle uses one exclusive pool lock and one ownership journal per subscriber under `owned_ues/ue-NNN/`. Recovery with `python -m utils.ue_lifecycle --recover STATE_DIR` recovers these child journals as well as the pool journal. No change authorizes launching live traffic; validate the new transition condition on the testbed before comparative use.
+
+When raw `resources-prometheus.json` and Pod lifecycle observations are available, `resource-usage.png` now shows one CPU/RAM point per 15-second reporting window and exports `resource-windows-15s.csv`. CPU points average complete evaluations of the archived rolling rate (normally a 45-second lookback, evaluated every 5 seconds); RAM points average sampled working-set totals. These are not inferred from phase averages or asserted to be exact 15-second CPU consumption. CSV coverage fields and missing reasons describe incomplete measurements; unavailable values stay blank and appear as gaps. The original phase aggregation is retained separately as `resource-usage-phase-summary.png`. Summary-only inputs still produce explicitly labeled phase-summary plots. PNG width, 300 DPI export, phase brackets, and placement bars are preserved.
+
+## Short smoke campaigns (target: results within 15 minutes)
+
+Run one profile at a time on core after syncing the same source to the UE host:
+
+```bash
+bash experiments/run.sh smoke mobility smoke_mobility_01
+bash experiments/run.sh smoke scaling smoke_scaling_01
+bash experiments/run.sh smoke joint smoke_joint_01
+```
+
+These commands run real traffic and temporary workloads; they are alternatives,
+not a batch to run concurrently. Use a fresh name each time. The wrapper keeps
+normal HPA timers and the 15-second reporting windows, with 60-second phases,
+continuous UE transitions, SLO 150ms, TC 10ms, 5 RPS/UE, and max 8 in flight/UE.
+
+| Profile | UE splits (gNB1:gNB2:gNB3) | Replica settings | Traffic across both methods |
+|---|---|---|---|
+| mobility | 1:7:1 → 1:5:3 | Fixed 3 for both methods | 4 minutes |
+| scaling | 1:1:1 → 4:4:4 → 1:1:1 | Shared min/initial 3, max 12; default scheduler on gNB-3 | 6 minutes |
+| joint | 1:1:1 → 1:7:1 → 1:1:7 → 1:1:1 | Shared min/initial 3, max 12; full-system comparison | 8 minutes |
+
+Scaling uses the existing floor-adjusted latency policy (130ms reference, 20ms
+excess target). Joint uses the existing full-system raw RT/SLO policy, without
+that scaling-only floor; do not interpret it as an isolated scaling comparison.
+Mobility clamps the HPA budget; readiness can temporarily fall during eviction.
+These short tests check wiring, transitions, measurement, and plotting. They do
+not guarantee a particular scaling/relocation action or steady-state result.
+
+Offline preview (no probes, subprocess, cluster changes, or traffic):
+
+```bash
+bash experiments/run.sh smoke joint smoke_joint_01 --plan-only /tmp/smoke-joint-plan
+```
+
+The preview includes generated manifests, `plan.yaml`, and `smoke-plan.json` with
+the exact schedule, traffic duration, and stop budget. The shared campaign CLI
+also supports `--phase-schedule TOTAL:GNB1:GNB2:GNB3,...` for explicit schedules;
+these take precedence over default scenario schedules and are recorded in metadata.
+Mobility `--mobility-direction reverse` reverses the effective mobility schedule.
+
+Results and 300 DPI PNGs go to `results/NAME/` and `results/NAME/plots/`.
+Live progress/completion status is written to `results/smoke-status/NAME.json`.
+Success requires both methods to finish, the four detailed PNGs, and finite
+latency, placement, CPU, and RAM observations for both methods in their 15-second
+CSVs. Measurement gaps remain visible; an empty resource figure does not count
+as a passing smoke test. Failed/partial outputs are retained.
+
+The supervisor requests one graceful interrupt at 13 minutes, reserving about
+2 minutes for the campaign's cleanup. It returns exit code 124 for the time
+budget, 130 for a user interrupt, and nonzero for failed output checks. Setup,
+transfers, and external cleanup can take longer than expected; this is a
+15-minute target, not a guarantee of completed plots or a forced-kill deadline.
+It never force-kills journalled UE cleanup. Press Ctrl+C once and let cleanup
+finish. The JSON status records timeout/failure rather than claiming success.
+
+Replica overrides: `--replicas N` for mobility; `--min-replicas N --max-replicas N`
+for scaling/joint. `--config`, `--slo-ms`, `--tc-ms`, `--rps-per-ue`,
+`--max-in-flight-per-ue`, and `--method-order` are available. Scaling alone
+accepts `--latency-floor-ms`; set it explicitly to 0 for a raw-RT smoke comparison.
+The wrapper does not rebuild images or change image digests. Build and validate
+the HTTP-thread-capable image before attributing a smoke run to five HTTP threads.

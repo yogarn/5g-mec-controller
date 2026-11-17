@@ -75,6 +75,9 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
     site_rows = []
     seen = set()
     current = None
+    active = {}
+    continuous = False
+    phase_order = []
     with Path(path).open(encoding='utf-8') as source:
         for line_number, line in enumerate(source, 1):
             try:
@@ -83,6 +86,10 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                 if not isinstance(record, dict):
                     raise ValueError('event must be an object')
                 event = record['event']
+                if event == 'phase_start' and record.get('phase_transition') == 'continuous':
+                    continuous = True
+                if continuous:
+                    current = active.get(record.get('phase')) if event != 'phase_start' else None
                 if event == 'phase_start':
                     if current is not None:
                         raise ValueError('phase started before previous phase ended')
@@ -90,6 +97,7 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                     if info[0] in seen:
                         raise ValueError('duplicate phase')
                     seen.add(info[0])
+                    phase_order.append(info[0])
                     start = number(record['start_time'], 'start_time')
                     duration = number(record['duration_s'], 'duration_s', minimum=0)
                     if duration == 0:
@@ -256,10 +264,18 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                     current = None
                 else:
                     raise ValueError(f'unknown event: {event!r}')
+                if continuous:
+                    if event == 'phase_start':
+                        active[record['phase']] = current
+                    elif event == 'phase_end':
+                        active.pop(record['phase'], None)
             except (ValueError, KeyError, TypeError, OverflowError) as exc:
                 raise ValueError(f'line {line_number}: {exc}') from exc
-    if current is not None:
+    if current is not None or active:
         raise ValueError('incomplete input: missing phase_end')
+    phases.sort(key=lambda row: phase_order.index(row['phase']))
+    ue_rows.sort(key=lambda row: phase_order.index(row['phase']))
+    site_rows.sort(key=lambda row: phase_order.index(row['phase']))
     if not phases:
         raise ValueError('input contains no complete phases')
     if ue_results is not None:
