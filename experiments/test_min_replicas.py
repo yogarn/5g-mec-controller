@@ -73,7 +73,7 @@ def test_min_replicas_2_applies_to_both_methods_and_preserves_scaling_semantics(
     assert plan['rt_target_factor'] == 1.0
     assert plan['slo_ms'] == 150
     assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
-    assert plan['phase_durations_s'] == [60.0] * 13
+    assert plan['phase_durations_s'] == [120.0] * 13
 
 
 def test_min_replicas_2_with_rt_target_factor_and_campaign_yaml(tmp_path, monkeypatch):
@@ -92,6 +92,7 @@ def test_min_replicas_2_with_rt_target_factor_and_campaign_yaml(tmp_path, monkey
     monkeypatch.setattr(campaign, '_prepare_floor_adapter', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign.fcntl, 'flock', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'TrafficDelay', lambda *a, **kw: SimpleNamespace(start=lambda: None, close=lambda: None))
     monkeypatch.setattr(campaign, 'run_method', lambda *a, **kw: None)
 
     campaign.main([

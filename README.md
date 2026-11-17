@@ -80,21 +80,28 @@ When running an evaluation campaign, **do not manually apply workloads or HPAs**
    # or for pedestrian-detection:
    bash experiments/run.sh check --workload pedestrian-detection
    ```
-2. **Run a campaign:**
+2. **Run a full experiment:**
    ```bash
-   # Full comparison (default-scheduler + CPU HPA vs mec-placement-scheduler + latency HPA)
-   bash experiments/run.sh run_1 --workload face-detection --comparison full
+   # All 7 mobility phases; fixed pod budget
+   bash experiments/run.sh mobility_full_01 --scenario mobility9 --fixed-replicas 3
 
-   # Placement-only comparison (both use latency HPA)
-   bash experiments/run.sh run_2 --workload pedestrian-detection --comparison placement
+   # All 13 scaling phases; floor-adjusted latency variant
+   bash experiments/run.sh ramp scaling_full_01 --max-replicas 12
 
-   # Scaler-only comparison on gnb-3 (preview offline, then run with optional 360s final hold)
-   bash experiments/run.sh --comparison scaling --scenario scaler-balanced --final-hold --plan-only /tmp/scaler-plan
-   bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced --final-hold
-
-   # Quick 60s-phase debug run
-   bash experiments/run.sh debug_1 --debug
+   # All 13 joint phases; CPU baseline vs raw-latency proposed HPA
+   bash experiments/run.sh joint_full_01 --comparison full --max-replicas 12
    ```
+   All full experiments default to **120s per phase**, including the final
+   phase. The `ramp` shortcut supplies `--comparison scaling`,
+   `--scenario scaler-staircase`, and `--latency-floor-ms 130`.
+   An extended final scaling phase requires explicitly adding `--final-hold`.
+   Shared defaults are TC 10ms one-way, SLO 150ms, 5 requests/s per UE,
+   minimum/initial 3 replicas, and a maximum of 8 in-flight requests per UE.
+   Proposed descheduler checks run every 30s for mobility/joint and are disabled
+   for scaling. Explicit CLI options override defaults. The replica ceiling
+   remains configurable (scaling defaults to 24, joint uses `config.yaml`);
+   these examples explicitly use 12. `--fixed-replicas` sets both bounds.
+   Smoke commands retain their separate 60s phases and abbreviated schedules.
    Results, rendered manifests, summaries, and plots are saved to `results/<campaign_name>/`. See `EXPERIMENTS.md` for fixed experimental conditions and plotting commands.
 
 ---

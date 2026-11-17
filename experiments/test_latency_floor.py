@@ -21,6 +21,8 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     assert plan['slo_ms'] == 150
     assert plan['latency_floor_ms'] == 130
     assert plan['latency_scaling_formula'] == 'max(RT-floor, 0)/(SLO-floor)'
+    assert plan['phase_durations_s'] == [120.0] * 13
+    assert plan['final_hold_seconds'] == 0
     cm = yaml.safe_load((out / 'floor-adapter-configmap.yaml').read_text())
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
     assert rules[0]['name']['as'] == 'ue_p90_latency_seconds'

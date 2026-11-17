@@ -1,5 +1,33 @@
 # gNB3-hotspot experiments
 
+## Full experiment phase schedules
+
+Every phase below lasts **120 seconds**, separately for baseline and proposed.
+Cells show **total UEs (gNB-1:gNB-2:gNB-3)**. An em dash means that experiment
+has already finished; mobility has seven phases, scaling and joint have thirteen.
+
+| Phase | Mobility | Scaling (`ramp`) | Joint (`full`) |
+|---|---|---|---|
+| 1 | 9 (7:1:1) | 3 (1:1:1) | 3 (1:1:1) |
+| 2 | 9 (5:3:1) | 6 (2:2:2) | 9 (3:3:3) |
+| 3 | 9 (3:5:1) | 9 (3:3:3) | 9 (1:1:7) |
+| 4 | 9 (1:7:1) | 12 (4:4:4) | 15 (5:5:5) |
+| 5 | 9 (1:5:3) | 15 (5:5:5) | 15 (1:1:13) |
+| 6 | 9 (1:3:5) | 18 (6:6:6) | 24 (8:8:8) |
+| 7 | 9 (1:1:7) | 24 (8:8:8) | 24 (1:1:22) |
+| 8 | — | 18 (6:6:6) | 24 (8:8:8) |
+| 9 | — | 15 (5:5:5) | 15 (1:1:13) |
+| 10 | — | 12 (4:4:4) | 15 (5:5:5) |
+| 11 | — | 9 (3:3:3) | 9 (1:1:7) |
+| 12 | — | 6 (2:2:2) | 9 (3:3:3) |
+| 13 | — | 3 (1:1:1) | 3 (1:1:1) |
+
+Traffic per pair: mobility **28 minutes**, scaling **52 minutes**, joint **52 minutes**.
+These totals exclude setup, transfer and cleanup. The default method order is
+baseline then proposed; `--method-order` can override it. Distributions are UE
+attachments: scaling still pins application pods to gNB-3 for both methods.
+The schedules are preserved in full; no smoke schedule override is applied.
+
 ## Run an experiment
 
 On **core-5g**, in tmux, from the project root:
@@ -15,7 +43,8 @@ Inside that session:
 bash experiments/run.sh run_2
 ```
 
-Traffic control is **off by default**. To enable a 10 ms one-way inter-node delay and set a 750 ms controller/reporting SLO:
+Traffic control defaults to **10 ms one-way**, with a **150 ms** reporting SLO.
+To override the reporting SLO to 750 ms:
 
 ```bash
 bash experiments/run.sh run_2 --tc-ms 10 --slo-ms 750
@@ -136,7 +165,7 @@ The tool inserts only new subscribers; do not reprovision the existing pool. Wri
 
 The application remains in namespace **services**. The runner deletes only the named `mec-placement-face-detection` Deployment/Service and `mec-placement-face-detection-baseline` HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
 
-The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 1 CPU / 512 MiB per-pod limits (limits are twice requests), shared replica ceiling (`--max-replicas`, default 100) and starting replica count of one. The CPU baseline HPA uses `averageUtilization: 60`, targeting 300m per pod (60% of the 500m request, or 30% of the 1-CPU limit). Placement-only comparisons use the same latency HPA for both methods. Treat runs with different resource limits or HPA targets as separate experimental configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
+The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 1 CPU / 512 MiB per-pod limits (limits are twice requests), shared replica ceiling (`--max-replicas`, default 100) and starting replica count of three (override with `--min-replicas`). The CPU baseline HPA uses `averageUtilization: 60`, targeting 300m per pod (60% of the 500m request, or 30% of the 1-CPU limit). Placement-only comparisons use the same latency HPA for both methods. Treat runs with different resource limits or HPA targets as separate experimental configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
 
 For both methods, each UE group sends to its own gNB's NodePort, using `site_node_ips` from `experiments/campaign.yaml`. The runner checks these against Kubernetes node InternalIPs. The Service uses `externalTrafficPolicy: Cluster`, `internalTrafficPolicy: Cluster`, no `trafficDistribution` preference, and `sessionAffinity: None`. Verify that the live kube-proxy uses iptables mode: the Service settings alone do not select the proxy mode. In iptables mode, each new connection randomly selects a ready endpoint across the cluster. A node with k of R ready Pods therefore receives approximately k/R of new connections, including core. This is probabilistic balancing, not strict round robin or load-based spillover; reused connections stay on their selected backend. The runner rejects locality preferences and client affinity before starting UE traffic. Routing from each UE through its UPF to its configured NodePort must be verified on the live network; preflight does not prove those paths.
 
@@ -219,7 +248,7 @@ bash experiments/run.sh mobility9_fixed9_tc10_150ms_01 --scenario mobility9 --fi
 bash experiments/run.sh mobility9_rev_fixed6_tc10_01 --scenario mobility9 --mobility-direction reverse --fixed-replicas 6 --phase-duration 90 --tc-ms 10
 ```
 
-The default comparison is `placement`: both methods use the same native latency HPA at 100 ms. Proposed uses the Go scheduler/descheduler. The descheduler checks every 30 seconds; HPA stabilization and the CPU measurement window retain their normal settings. Override the check interval independently with `--deschedule-interval SECONDS`; `--phase-duration`, `--slo-ms`, and `--locality-weight` remain available. `--debug` is rejected for this scenario to avoid changing other timers.
+The default comparison is `placement`: both methods use the same native latency HPA at 150 ms. Proposed uses the Go scheduler/descheduler. The descheduler checks every 30 seconds; HPA stabilization and the CPU measurement window retain their normal settings. Override the check interval independently with `--deschedule-interval SECONDS`; `--phase-duration`, `--slo-ms`, and `--locality-weight` remain available. `--debug` is rejected for this scenario to avoid changing other timers.
 
 The shorter descheduler interval gives each hotspot opportunities for eviction, but does not force a move. Pods must be settled, the destination must be feasible, and the score improvement must be positive; PDB rejection also defers eviction. In particular, gNB-1 may lack capacity. Inspect `proposed/controller.log` for `descheduler evicted`, `descheduler noop`, and `descheduler deferred`, alongside placement and latency plots. HPA remains active, so new-Pod scheduling also affects placement; this is a diagnostic of the placement system, not an isolated descheduler-only test. Repeat with reversed hotspot order before treating an observed effect as general.
 
@@ -235,7 +264,7 @@ For a placement comparison at a fixed replica budget with inter-node traffic sha
 bash experiments/run.sh mobility9_fixed6_tc10_01 --scenario mobility9 --fixed-replicas 6 --tc-ms 10
 ```
 
-`--fixed-replicas 6` sets both methods' initial Deployment replicas and HPA minimum/maximum to six. HPA cannot change this budget; an eviction can temporarily reduce the number of ready Pods while the ReplicaSet creates a replacement. The scenario retains nine UEs, 120-second default phases, 30-second descheduler checks and the 100 ms reporting objective. Do not combine `--fixed-replicas` with `--max-replicas`.
+`--fixed-replicas 6` sets both methods' initial Deployment replicas and HPA minimum/maximum to six. HPA cannot change this budget; an eviction can temporarily reduce the number of ready Pods while the ReplicaSet creates a replacement. The scenario retains nine UEs, 120-second default phases, 30-second descheduler checks and the 150 ms reporting objective. Do not combine `--fixed-replicas` with `--max-replicas`.
 
 `--tc-ms 10` adds 10 ms one-way delay on the selected inter-node workload interfaces in both directions (about 20 ms added RTT per shaped round trip). Same-node traffic is not delayed by this rule. Both methods use the reserved workload pool, and campaign cleanup removes its shaping filters. Use a fresh result name for each run; remove `--tc-ms` for a separate unshaped comparison.
 
@@ -267,13 +296,13 @@ On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one 
 
 ## Scaler-only balanced scenario (`scaler-balanced`)
 
-Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`60%` target) against native latency HPA (`100` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 60-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
+Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`60%` target) against native latency HPA (`150` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
 
 ```bash
 # Offline preview (no cluster or network access):
 bash experiments/run.sh --comparison scaling --scenario scaler-balanced --final-hold --plan-only /tmp/scaler-balanced-plan
 
-# Live run (60s phases; add --final-hold for a 420s final 3:1:1:1 phase to observe 300s HPA scale-down):
+# Live run (120s phases; explicit --final-hold extends the final balanced phase to 480s):
 bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced --final-hold
 ```
 
@@ -311,7 +340,7 @@ New experiment runs use **Prometheus/cAdvisor** as the primary source for `resou
   bash experiments/run.sh rebuild
   ```
   This builds a unique image tag, checks the loaded model and dedicated health/readiness endpoints in a local container, pushes it, and pins the published digest in both workload manifests. It shares the campaign lock and stops before updating manifests if build, smoke testing or digest validation fails. The campaign deploys the image. Preview with `bash experiments/run.sh rebuild --plan-only`.
-- **Short scaler ramp command (60s phases, no extra final hold, TC 10ms, SLO 150ms, 5 RPS/UE, maximum 8 in flight):**
+- **Full scaler ramp command (120s per phase, TC 10ms, SLO 150ms, 5 RPS/UE, maximum 8 in flight):**
   ```bash
   bash experiments/run.sh ramp scaler_floor_short_01
   ```
@@ -333,7 +362,7 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 ## Gradual scaler staircase (new configuration)
 
 Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
-`--scenario scaler-staircase`, 60s phases, no extra final hold, TC 10ms, SLO 150ms,
+`--comparison scaling --scenario scaler-staircase`, 120s for every phase, TC 10ms, SLO 150ms,
 5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
 Both methods use default-scheduler on gnb-3,
 replica bounds 3..24, `HTTP_THREADS=5` (explicitly set for both methods),
@@ -345,14 +374,20 @@ does not upgrade an existing image). Keep historical min-1 / single-threaded
 results unchanged as a separate application/experiment configuration.
 
 UE steps are 3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3, equally divided
-between the three gNBs. All thirteen phases last 60s by default (13 minutes of
-traffic per method, 26 minutes per pair, plus setup, request drain and UE
-reattachment). This default also applies to direct staircase invocation.
-`--phase-duration` overrides the regular phases. Opt into `--final-hold` to extend
-the last phase to at least 600s; it is no longer part of the shortcut. To reproduce
-the older 46-minute-per-method timing, append `--phase-duration 180 --final-hold`.
-The old `scaler-balanced` flag retains its seven-phase schedule
-and original HPA behavior for reproducibility. Mobility is unchanged.
+between the three gNBs. All full experiments default to 120s per phase, including
+the last phase. Mobility runs all seven phases (14 minutes per method, 28 per pair);
+staircase scaling and joint each run all thirteen phases (26 minutes per method,
+52 per pair). Setup, request draining and UE reattachment add elapsed time.
+`--phase-duration` overrides this duration. The `ramp` shortcut does not add a
+final hold. Explicit `--final-hold` extends the staircase final phase to at least
+600s; legacy balanced scaling instead adds 360s to its final phase. The legacy
+`scaler-balanced` scenario retains its seven-phase schedule and original HPA behavior.
+The full joint campaign reads its phase duration from `experiments/campaign.yaml`.
+All three default to TC 10ms, SLO 150ms, 5 RPS/UE, minimum/initial 3 replicas and
+at most 8 in-flight requests per UE. Mobility and joint descheduler checks default
+to 30s; scaling disables descheduling. Smoke profiles explicitly retain their
+shorter schedules and 60s phases. Equal observation windows do not establish
+steady state: joint's 300s scale-down stabilization spans several 120s phases.
 
 The staircase gives both HPAs matched behavior: scale up by at most 2 Pods/30s,
 scale down by at most 1 Pod/30s, scale-down stabilization 60s, and scale-down
@@ -488,9 +523,9 @@ replica count for both baseline and proposed methods:
 - Before starting each method's traffic, the runner waits for the Deployment
   rollout and verifies `readyReplicas >= min_replicas` (aborting on timeout).
 - Cannot be combined with `--fixed-replicas` and must not exceed the effective
-  `--max-replicas`. Scaling comparisons (`scaler-balanced`, `scaler-staircase`,
-  and the `ramp` preset) default to a shared minimum and initial replica count
-  of `3` unless `--min-replicas` is passed explicitly.
+  `--max-replicas`. All campaign comparisons default to a shared minimum and
+  initial replica count of `3` unless `--min-replicas` is passed explicitly.
+  `--fixed-replicas` overrides both bounds for mobility.
 - **Rationale and interpretation boundary:** Three replicas provide initial
   processing capacity for both CPU and RT autoscalers, while five HTTP threads
   (`HTTP_THREADS=5`) allow overlapping request I/O (not because 5 RPS requires

@@ -272,6 +272,8 @@ def test_plot_autoscaler_exports_png_only_at_300_dpi_and_window_csvs(tmp_path, m
         captured_figs[name] = {
             'axes_xdata': [[list(line.get_xdata()) for line in ax.get_lines()] for ax in fig.axes],
             'axes_ylim': [ax.get_ylim() for ax in fig.axes],
+            'series': [[(list(line.get_xdata()), list(line.get_ydata())) for line in ax.lines
+                        if line.get_label() in ('Baseline', 'Proposed')] for ax in fig.axes],
         }
         orig_export(fig, output_dir, name)
 
@@ -279,16 +281,21 @@ def test_plot_autoscaler_exports_png_only_at_300_dpi_and_window_csvs(tmp_path, m
     monkeypatch.setattr(sys, 'argv', ['plot_autoscaler', str(res_dir), str(out_dir), '--slo-ms', '100'])
     plot_autoscaler.main()
 
+    for name in ('response-time', 'response-time-zoom', 'resource-usage', 'slo-violations'):
+        xs, ys = captured_figs[name]['series'][0][0]
+        assert xs[:2] == [0, 15] and ys[0] == 0
+    assert len(captured_figs['resource-usage']['series']) == 2
+    assert len(captured_figs['resource-usage-phase-summary']['series']) == 2
     assert list(out_dir.glob('*.pdf')) == []
     pngs = sorted(p.name for p in out_dir.glob('*.png'))
-    assert pngs == ['late-phase.png', 'pod-placement.png', 'resource-usage-phase-summary.png', 'resource-usage.png', 'response-time-zoom.png', 'response-time.png', 'slo-violations.png']
+    assert pngs == ['pod-placement.png', 'resource-usage-phase-summary.png', 'resource-usage.png', 'response-time-zoom.png', 'response-time.png', 'slo-violations.png']
     with Image.open(out_dir / 'response-time.png') as img:
         dpi = img.info.get('dpi')
         assert dpi is not None and round(dpi[0]) == 300
 
     # Window-end x-coordinates: [15, 30], [45, 60], [75, 90] (never midpoints, never connected across phases)
     rt_lines = captured_figs['response-time']['axes_xdata'][0]
-    assert [15.0, 30.0] in rt_lines
+    assert [0.0, 15.0, 30.0] in rt_lines
     assert [45.0, 60.0] in rt_lines
     assert [75.0, 90.0] in rt_lines
     assert not any(len(xs) > 2 and xs == [15.0, 30.0, 45.0, 60.0, 75.0, 90.0] for xs in rt_lines)
@@ -317,7 +324,7 @@ def test_pod_placement_y_axis_not_clipped_by_baseline(tmp_path, monkeypatch):
             placement_limits['ylims'] = [ax.get_ylim() for ax in fig.axes]
             placement_limits['yticks'] = [list(ax.get_yticks()) for ax in fig.axes]
             placement_limits['bars'] = [[
-                (p.get_x() + p.get_width(), p.get_height()) for p in ax.patches
+                (p.get_x() + p.get_width() / 2, p.get_height()) for p in ax.patches
             ] for ax in fig.axes]
         orig_export(fig, output_dir, name)
 
@@ -330,7 +337,7 @@ def test_pod_placement_y_axis_not_clipped_by_baseline(tmp_path, monkeypatch):
         assert hi >= 8.0
     for ticks in placement_limits['yticks']:
         assert all(float(t).is_integer() for t in ticks)
-    assert sorted({end for end, height in placement_limits['bars'][0]}) == [15.0, 30.0]
+    assert sorted({end for end, height in placement_limits['bars'][0]}) == [10.0, 25.0]
     assert max(height for end, height in placement_limits['bars'][0]) == 3
     assert max(height for end, height in placement_limits['bars'][1]) == 8
 
@@ -363,8 +370,9 @@ def test_continuous_mode_uses_one_timeline_and_preserves_missing_windows(tmp_pat
     plot_autoscaler.main()
     assert len(captured['lines']) == 2
     for xs, ys in captured['lines']:
-        assert xs == [15, 30, 45, 60]
-        assert math.isnan(ys[1]) and math.isnan(ys[3])
+        assert xs == [0, 15, 30, 45, 60]
+        assert ys[0] == 0
+        assert math.isnan(ys[2]) and math.isnan(ys[4])
     assert 'reattachment is included' in captured['label']
 
 
@@ -440,3 +448,34 @@ def test_missing_requests_writes_phase_summary_outputs_without_15s_claims(tmp_pa
     assert (out_dir / 'pod-placement-phase-summary.png').exists()
     assert 'ready counts unavailable' in titles['pod-placement-phase-summary']
     assert 'Phase summary' in titles['resource-usage']
+
+
+def test_observation_bars_preserve_intermediate_counts_and_phase_boundaries(tmp_path):
+    import json
+    from utils.plot_autoscaler import build_pod_observations
+
+    windows = [dict(phase='p1', actual_start_time=1000, actual_end_time=1015),
+               dict(phase='p1', actual_start_time=1015, actual_end_time=1030),
+               dict(phase='p2', actual_start_time=1030, actual_end_time=1045)]
+    records = []
+    for when, count in [(999, 2), (1028, 3), (1030, 4), (1032, 5), (1046, 6)]:
+        records.append(dict(sample_time=when, pods=[dict(node='n', ready=i < 3) for i in range(count)]))
+    records.append(dict(sample_time=1031, error='API unavailable'))
+    (tmp_path / 'metrics.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
+    rows = build_pod_observations(tmp_path, windows, ['n', 'empty'])
+    observed = [r for r in rows if r['node'] == 'n']
+    assert [(r['aligned_sample_s'], r['pod_count'], r['phase']) for r in observed] == [
+        (28, 3, 'p1'), (30, 4, 'p2'), (32, 5, 'p2')]
+    assert [r['ready_count'] for r in observed] == [3, 3, 3]
+    assert all(r['pod_count'] == 0 for r in rows if r['node'] == 'empty')
+
+
+def test_display_origin_never_fills_missing_windows_or_restarts_at_phase_boundary():
+    from utils.plot_autoscaler import _window_points
+    points = [dict(aligned_end_s=15, end_offset_s=15, value=12),
+              dict(aligned_end_s=30, end_offset_s=30, value=math.nan)]
+    xs, ys = _window_points(points, 'value')
+    assert xs == [0, 15, 30]
+    assert ys[:2] == [0, 12] and math.isnan(ys[2])
+    xs, ys = _window_points([dict(aligned_end_s=75, end_offset_s=15, value=12)], 'value')
+    assert xs == [75] and ys == [12]

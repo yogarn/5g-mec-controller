@@ -490,3 +490,22 @@ def test_sample_hpa_records_status_and_continues_on_kubectl_error(tmp_path, monk
     assert rows[1]['current_replicas'] == 5
     assert rows[1]['desired_replicas'] == 10
     assert rows[1]['last_scale_time'] == '2026-11-16T06:00:00Z'
+
+
+@pytest.mark.parametrize('clock_values,expected_sleeps', [([100, 102, 108], [3, 2]),
+                                                         ([100, 111, 116], [4, 4])])
+def test_pod_sampler_keeps_cadence_and_skips_overruns(tmp_path, monkeypatch, clock_values, expected_sleeps):
+    handlers, sleeps = {}, []
+    clock = iter(clock_values)
+    monkeypatch.setattr(monitor_resources.signal, 'signal', lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(monitor_resources.time, 'monotonic', lambda: next(clock))
+    monkeypatch.setattr(monitor_resources, 'kubectl', lambda *args, **kwargs: {'items': []})
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            handlers[monitor_resources.signal.SIGTERM](None, None)
+    monkeypatch.setattr(monitor_resources.time, 'sleep', sleep)
+    output = tmp_path / 'metrics.jsonl'
+    monitor_resources.sample(output, pods_only=True)
+    assert sleeps == expected_sleeps
+    assert len(output.read_text().splitlines()) == 2

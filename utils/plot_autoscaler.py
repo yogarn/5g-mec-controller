@@ -19,7 +19,7 @@ import sys
 import matplotlib.pyplot as plt
 from matplotlib.transforms import ScaledTranslation
 from matplotlib.ticker import FixedLocator, MaxNLocator
-from utils.cadvisor_resources import DEFAULT_FRESHNESS_S, POD_LOOKUP_MAX_AGE_S
+from utils.cadvisor_resources import POD_LOOKUP_MAX_AGE_S
 from utils.phase_windows import summarize_windows, write_windows
 from utils.transient_analysis import _percentile
 from utils.resource_windows import build_resource_windows
@@ -28,6 +28,7 @@ METHODS = ("baseline", "proposed")
 STYLES = {"baseline": "--", "proposed": "-"}
 METHOD_COLORS = {"proposed": "#D55E00", "baseline": "#0072B2"}
 METHOD_LABELS = {"baseline": "Baseline", "proposed": "Proposed"}
+ORIGIN_NOTE = "(0,0) is a display origin; dots thereafter summarize measured windows"
 WINDOW_SECONDS = 15.0
 THESIS_FIG_WIDTH = 7.5
 ALIGNED_TIME_NOTE = "Cumulative traffic elapsed time (s); setup, draining, and reattachment gaps excluded"
@@ -420,6 +421,53 @@ def build_pod_placement_15s(method_dir, window_rows, nodes, freshness_s=POD_LOOK
     return placement_rows
 
 
+def build_pod_observations(method_dir, window_rows, nodes):
+    """Keep every saved Pod snapshot at its actual observation time.
+
+    Phase intervals are half open, so a boundary observation belongs to the
+    incoming phase. No phase-end count is backdated to a phase midpoint.
+    """
+    path = Path(method_dir) / "metrics.jsonl"
+    if not path.exists():
+        return []
+    bounds = {}
+    for win in window_rows:
+        bounds.setdefault(win['phase'], [win['actual_start_time'], win['actual_end_time']])[1] = win['actual_end_time']
+    cursor = 0.0
+    intervals = []
+    for phase, (start, end) in bounds.items():
+        intervals.append((phase, start, end, cursor))
+        cursor += end - start
+    output = []
+    observations = {}
+    for line in path.read_text().splitlines():
+        if line.strip():
+            rec = json.loads(line)
+            if 'error' not in rec and 'pods' in rec and 'sample_time' in rec:
+                observations[float(rec['sample_time'])] = rec['pods']
+    for when, pods in sorted(observations.items()):
+        for index, (phase, start, end, aligned_start) in enumerate(intervals):
+            if start <= when < end or (index == len(intervals) - 1 and when == end):
+                for node in nodes:
+                    selected = [p for p in pods if p.get('node') == node]
+                    output.append(dict(phase=phase, sample_time=when,
+                                       aligned_sample_s=aligned_start + when - start,
+                                       node=node, pod_count=len(selected),
+                                       ready_count=sum(bool(p.get('ready')) for p in selected)))
+                break
+    return output
+
+
+def _window_points(points, key):
+    """Add the requested display origin once; never zero-fill missing data."""
+    xs = [r['aligned_end_s'] for r in points]
+    ys = [r[key] for r in points]
+    if points and abs(xs[0] - points[0]['end_offset_s']) < 1e-9:
+        xs.insert(0, 0.0)
+        ys.insert(0, 0.0)
+    return xs, ys
+
+
 def load_ready_placements(root, phases, nodes):
     """Return {(phase, node): ready_count} when ready_count is recorded in both methods, else None."""
     result = {}
@@ -463,6 +511,9 @@ def _decorate_time_axes(axes, phases, phase_bounds, total_traffic_s, compact_lab
             sparse_ticks.append(boundary_ticks[-1])
     else:
         sparse_ticks = boundary_ticks
+
+    if total_traffic_s <= 240 and window_ends:
+        sparse_ticks = sorted(set([0.0, *window_ends]))
 
     for ax in axes:
         for b in boundary_ticks[1:-1]:
@@ -515,9 +566,8 @@ def _render_resource_summary(output_dir, phases, resources, resource_coverage, c
 
     xs = ([0.5 * (phase_bounds[p][0] + phase_bounds[p][1]) for p in phases]
           if phase_bounds is not None else list(range(len(phases))))
-    bar_w = min(0.35 * min(durations), 18.0) if durations else 0.35
 
-    fig, axes = plt.subplots(3, 1, figsize=(THESIS_FIG_WIDTH, 8.0), sharex=True, layout="constrained")
+    fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
     fig.suptitle(f"Phase summary: mean workload resources per phase ({source_note}; gaps/annotations show missingness)")
     for ax, key, title, ylabel in zip(axes[:2], ("cpu_millicores", "memory_mib"),
                                       ("CPU usage (~ = approx. overlapping windows)", "RAM working set (point-in-time)"),
@@ -542,17 +592,6 @@ def _render_resource_summary(output_dir, phases, resources, resource_coverage, c
         ax.set(ylabel=ylabel, title=title, ylim=(0, None))
         ax.grid(axis="y", linestyle=":")
         ax.legend(frameon=False, ncols=2)
-    res_cov_ax = axes[2]
-    for method, offset in (("baseline", -0.5 * bar_w), ("proposed", 0.5 * bar_w)):
-        color = METHOD_COLORS[method]
-        cov_vals = [entry["coverage_pct"] for entry in resource_coverage[method]]
-        res_cov_ax.bar([v + offset for v in xs], cov_vals, width=bar_w, color=color,
-                       edgecolor="black", linewidth=0.5,
-                       hatch="xx" if method == "baseline" else None, label=METHOD_LABELS[method])
-    res_cov_ax.set(ylim=(0, 105), ylabel="Resource coverage (%)",
-                   title="Complete simultaneous rounds / total rounds (100% = no churned or partial rounds)")
-    res_cov_ax.grid(axis="y", linestyle=":")
-    res_cov_ax.legend(frameon=False, ncols=2)
     if phase_bounds is not None:
         _decorate_time_axes(axes, phases, phase_bounds, total_traffic_s, compact_labels, window_ends, xlabel)
     else:
@@ -564,9 +603,9 @@ def _render_resource_windows(output_dir, phases, rows_by_method, decorate, conti
     def groups(method):
         return ([rows_by_method[method]] if continuous else
                 [[r for r in rows_by_method[method] if r['phase'] == phase] for phase in phases])
-    fig, axes = plt.subplots(3, 1, figsize=(THESIS_FIG_WIDTH, 8), sharex=True, layout='constrained')
+    fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout='constrained')
     rates = sorted({r['rate_window_seconds'] for rows in rows_by_method.values() for r in rows})
-    fig.suptitle('Workload resources: 15-second reporting windows')
+    fig.suptitle('Workload resources: 15-second reporting windows\n' + ORIGIN_NOTE)
     for ax, key, title, ylabel in zip(
         axes[:2], ('cpu_millicores', 'memory_mib'),
         (f"CPU: mean of rolling rates ({', '.join(f'{v:g}s' for v in rates)} lookback)",
@@ -577,7 +616,7 @@ def _render_resource_windows(output_dir, phases, rows_by_method, decorate, conti
         for method in METHODS:
             for pi, points in enumerate(groups(method)):
                 finite |= any(math.isfinite(r[key]) for r in points)
-                ax.plot([r['aligned_end_s'] for r in points], [r[key] for r in points],
+                ax.plot(*_window_points(points, key),
                         linestyle=STYLES[method], color=METHOD_COLORS[method], marker='o', markersize=3,
                         label=METHOD_LABELS[method] if pi == 0 else None)
         if not finite:
@@ -586,15 +625,6 @@ def _render_resource_windows(output_dir, phases, rows_by_method, decorate, conti
         ax.set(title=title, ylabel=ylabel, ylim=(0, None))
         ax.grid(axis='y', linestyle=':')
         ax.legend(frameon=False, ncols=2)
-    for method in METHODS:
-        for key, marker, metric in [('cpu_coverage_percent', 'o', 'CPU'), ('memory_coverage_percent', 's', 'RAM')]:
-            for pi, points in enumerate(groups(method)):
-                axes[2].plot([r['aligned_end_s'] for r in points], [r[key] for r in points],
-                             linestyle=STYLES[method], color=METHOD_COLORS[method], marker=marker, markersize=3,
-                             label=f'{METHOD_LABELS[method]} {metric}' if pi == 0 else None)
-    axes[2].set(ylim=(0, 105), ylabel='Complete samples (%)', title='Resource observation coverage per 15-second window')
-    axes[2].grid(axis='y', linestyle=':')
-    axes[2].legend(frameon=False, ncols=2)
     decorate(axes)
     _export_png(fig, output_dir, 'resource-usage')
 
@@ -708,6 +738,8 @@ def main():
         for p in phases
     ]
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    # Remove the retired generated view when replotting an existing directory.
+    (args.output_dir / 'late-phase.png').unlink(missing_ok=True)
 
     if not has_requests:
         print(
@@ -743,7 +775,6 @@ def main():
         durations = [dur_by_phase[p] for p in phases]
 
     phase_bounds, total_traffic_s = compute_aligned_timeline(phases, durations)
-    phase_mids = [0.5 * (phase_bounds[p][0] + phase_bounds[p][1]) for p in phases]
     phase_idx_map = {p: i for i, p in enumerate(phases, 1)}
 
     win_by_phase = {m: {p: [] for p in phases} for m in METHODS}
@@ -816,7 +847,7 @@ def main():
 
     with plt.rc_context({"font.size": 9, "axes.titlesize": 10, "legend.fontsize": 8}):
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
-        fig.suptitle("Successful-request response time over preceding 15-second window")
+        fig.suptitle("Successful-request response time over preceding 15-second window\n" + ORIGIN_NOTE)
         for ax, key, title in zip(
             axes,
             ("p90_ms", "p50_ms"),
@@ -827,8 +858,7 @@ def main():
                 color = METHOD_COLORS[method]
                 labeled = False
                 for pts in window_groups(method):
-                    xs = [r["aligned_end_s"] for r in pts]
-                    ys = [r[key] for r in pts]
+                    xs, ys = _window_points(pts, key)
                     ax.plot(xs, ys, linestyle=STYLES[method], color=color, marker="o", markersize=3,
                             label=METHOD_LABELS[method] if not labeled else None)
                     labeled = True
@@ -841,79 +871,46 @@ def main():
         decorate(axes)
         _export_png(fig, args.output_dir, "response-time")
 
-        windows = {}
-        for method in METHODS:
-            rows = summarize_windows(args.results_dir / method, args.slo_ms)
-            write_windows(rows, args.output_dir / f"{method}-phase-windows.csv")
-            windows[method] = {(r["phase"], r["window"]): r for r in rows}
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
-        for ax, mode, title in zip(
-            axes,
-            ("window_15s", "late_phase"),
-            ("Successful-request p90 over preceding 15-second window (zoom <= 300 ms)",
-             "Phase summary (final 60s window): P90 (zoom <= 300 ms; convergence not assumed)"),
-        ):
-            for method in ("proposed", "baseline"):
-                color = METHOD_COLORS[method]
-                labeled = False
-                for phase in ([None] if mode == 'window_15s' and continuous else phases):
-                    if mode == "window_15s":
-                        pts = window_groups(method)[0] if phase is None else win_by_phase[method][phase]
-                        xs = [r["aligned_end_s"] for r in pts]
-                        values = [r["p90_ms"] for r in pts]
-                    else:
-                        xs = [0.5 * (phase_bounds[phase][0] + phase_bounds[phase][1])]
-                        values = [optional_number(windows[method][(phase, "late_phase")]["p90_ms"], "p90_ms")]
-                    clipped = [min(v, 300) if not math.isnan(v) else math.nan for v in values]
-                    ax.plot(xs, clipped, linestyle=STYLES[method], color=color, marker="o", markersize=3,
-                            label=METHOD_LABELS[method] if not labeled else None)
-                    labeled = True
-                    for pos, value in zip(xs, values):
-                        if not math.isnan(value) and value > 300:
-                            ax.plot(pos, 295, marker="^", color=color, markersize=4)
-            ax.axhline(args.slo_ms, color="#d62728", linestyle="--", linewidth=1.2, label=f"SLO ({args.slo_ms:g} ms)")
-            ax.set(ylim=(0, 300), ylabel="Response time (ms)", title=title)
-            ax.grid(axis="y", linestyle=":")
+        # Preserve phase diagnostic exports for existing analysis consumers.
+        for method in METHODS:
+            write_windows(summarize_windows(args.results_dir / method, args.slo_ms),
+                          args.output_dir / f'{method}-phase-windows.csv')
+        fig.suptitle('Response time: 15-second windows, zoomed\n' + ORIGIN_NOTE)
+        for ax, key in zip(axes, ('p90_ms', 'p50_ms')):
+            for method in METHODS:
+                for index, pts in enumerate(window_groups(method)):
+                    xs, values = _window_points(pts, key)
+                    clipped = [min(v, 300) if math.isfinite(v) else math.nan for v in values]
+                    ax.plot(xs, clipped, linestyle=STYLES[method], color=METHOD_COLORS[method],
+                            marker='o', markersize=3, label=METHOD_LABELS[method] if index == 0 else None)
+                    for x, value in zip(xs, values):
+                        if math.isfinite(value) and value > 300:
+                            ax.plot(x, 295, marker='^', color=METHOD_COLORS[method], markersize=4)
+            ax.axhline(args.slo_ms, color='#d62728', linestyle='--', label=f'SLO ({args.slo_ms:g} ms)')
+            ax.set(ylim=(0, 300), ylabel='Response time (ms)',
+                   title=f"Successful-request {key.split('_')[0]} over preceding 15-second window (zoom ≤ 300 ms)")
+            ax.grid(axis='y', linestyle=':')
             ax.legend(frameon=False, ncols=3)
         decorate(axes)
-        _export_png(fig, args.output_dir, "response-time-zoom")
+        _export_png(fig, args.output_dir, 'response-time-zoom')
 
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
-        for ax, key, title in zip(
-            axes,
-            ("p90_ms", "violation_percent"),
-            ("Phase summary (final 60s window): successful-request P90 (full range)",
-             "Phase summary (final 60s window): failed or slow attempts (%)"),
-        ):
-            for method in ("proposed", "baseline"):
-                color = METHOD_COLORS[method]
-                values = [optional_number(windows[method][(p, "late_phase")][key], key) for p in phases]
-                ax.plot(phase_mids, values, linestyle=STYLES[method], color=color, marker="o", markersize=4,
-                        label=METHOD_LABELS[method])
-            if key == "p90_ms":
-                ax.axhline(args.slo_ms, color="#d62728", linestyle="--", linewidth=1.2)
-            ax.set(title=title, ylim=(0, 100 if key == "violation_percent" else None))
-            ax.grid(axis="y", linestyle=":")
-            ax.legend(frameon=False, ncols=2)
-        fig.suptitle("Phase summary (final 60s window); steady state is not assumed; coverage in phase-windows CSVs")
-        decorate(axes)
-        _export_png(fig, args.output_dir, "late-phase")
-
-        fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
+        fig.suptitle("SLO violations and request coverage\n" + ORIGIN_NOTE)
         ax, cov_ax = axes
         for method in ("baseline", "proposed"):
             color = METHOD_COLORS[method]
             labeled = False
             for pts in window_groups(method):
-                xs = [r["aligned_end_s"] for r in pts]
-                viol_vals = [r["violation_percent"] for r in pts]
+                xs, viol_vals = _window_points(pts, "violation_percent")
+                cov_xs = [r["aligned_end_s"] for r in pts]
                 cov_vals = [
                     r["request_coverage_percent"] if r["request_coverage_percent"] != "" else math.nan
                     for r in pts
                 ]
                 ax.plot(xs, viol_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
                         label=METHOD_LABELS[method] if not labeled else None)
-                cov_ax.plot(xs, cov_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
+                cov_ax.plot(cov_xs, cov_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
                             label=METHOD_LABELS[method] if not labeled else None)
                 labeled = True
         ax.set(ylim=(0, 100), ylabel="SLO violations (%)",
@@ -927,24 +924,28 @@ def main():
         _export_png(fig, args.output_dir, "slo-violations")
 
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.0), sharex=True, sharey=True, layout="constrained")
-        fig.suptitle(f"Per-node ready replica counts at 15s window ends ({POD_LOOKUP_MAX_AGE_S:g}s freshness)")
+        fig.suptitle("Per-node pod counts at recorded observation times (includes unready pods)")
         palette = plt.get_cmap("tab10").colors
         colors = dict(zip(nodes, palette))
         all_ready = []
+        snapshot_rows = []
         for ax, method in zip(axes, METHODS):
+            rows = build_pod_observations(args.results_dir / method, windows_15s[method], nodes)
+            snapshot_rows.extend(dict(method=method, **r) for r in rows)
             for phase_index, phase in enumerate(phases):
-                pts = pod_by_phase[method][phase]
-                by_node = {node: [r for r in pts if r["node"] == node] for node in nodes}
+                by_node = {node: [r for r in rows if r['phase'] == phase and r['node'] == node] for node in nodes}
                 observations = by_node[nodes[0]]
-                widths = [0.8 * (r["end_offset_s"] - r["start_offset_s"]) for r in observations]
-                # Each bar ends at its observation time; width is visual spacing,
-                # not a claim that this count held throughout the interval.
-                lefts = [r["aligned_end_s"] - w for r, w in zip(observations, widths)]
-                counts = {node: [r["ready_count"] for r in by_node[node]] for node in nodes}
-                all_ready.extend(_placement_bars(
-                    ax, lefts, widths, counts, nodes, colors, labels=phase_index == 0))
-            ax.set(ylabel="Ready replicas", title=METHOD_LABELS[method])
+                times = [r['aligned_sample_s'] for r in observations]
+                # Thin, centered bars show snapshots rather than interval totals.
+                widths = [1.5] * len(times)
+                lefts = [t - w / 2 for t, w in zip(times, widths)]
+                counts = {node: [r['pod_count'] for r in by_node[node]] for node in nodes}
+                all_ready.extend(_placement_bars(ax, lefts, widths, counts, nodes, colors, labels=phase_index == 0))
+            ax.set(ylabel="Pods", title=METHOD_LABELS[method])
             ax.grid(axis="y", linestyle=":")
+        write_csv_rows(snapshot_rows, ['method', 'phase', 'sample_time', 'aligned_sample_s',
+                                     'node', 'pod_count', 'ready_count'],
+                       args.output_dir / 'pod-placement-observations.csv')
         max_ready = max(all_ready) if all_ready else 1
         axes[0].set_ylim(0, max(1, math.ceil(max_ready)) + max(1.5, 0.2 * max_ready))
         axes[0].yaxis.set_major_locator(MaxNLocator(integer=True))

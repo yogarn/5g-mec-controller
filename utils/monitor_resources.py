@@ -75,6 +75,7 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     with Path(output).open('x', encoding='utf-8') as stream:
+        next_sample = time.monotonic()
         while not stop:
             try:
                 pods = kubectl(namespace, 'get', 'pods', '-l', 'app=' + app, '-o', 'json')['items']
@@ -124,7 +125,14 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
             except (subprocess.SubprocessError, OSError, ValueError, KeyError) as exc:
                 stream.write(json.dumps({'sample_time': time.time(), 'error': str(exc)}) + '\n')
                 stream.flush()
-            time.sleep(5)
+            # Keep the 5s observation cadence independent of kubectl latency.
+            # After an overrun, skip missed slots rather than burst stale polls.
+            next_sample += 5.0
+            now = time.monotonic()
+            if next_sample <= now:
+                next_sample += (int((now - next_sample) // 5.0) + 1) * 5.0
+            if not stop:
+                time.sleep(max(0.0, next_sample - now))
 
 
 def sample_hpa(output, namespace, hpa_name, interval=5.0):

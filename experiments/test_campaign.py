@@ -167,7 +167,7 @@ def test_default_campaign_has_matched_ascending_and_descending_phases():
     counts = [tuple(p[f'gnb{i}_ues'] for i in (1, 2, 3)) for p in phases]
     assert len(phases) == 13
     assert counts[:6] == list(reversed(counts[7:]))
-    assert settings['phase_duration'] == 60
+    assert settings['phase_duration'] == 120
 
 
 @pytest.mark.parametrize('cap', [1, 3, 8, 100])
@@ -533,7 +533,7 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     campaign.main(['--scenario', 'mobility9', '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['comparison'] == 'placement'
-    assert plan['slo_ms'] == 100
+    assert plan['slo_ms'] == 150
     assert plan['mobility_direction'] == 'forward'
     expected_schedule = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
     assert plan['schedule'] == expected_schedule
@@ -550,7 +550,7 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     proposed = yaml.safe_load((output / 'proposed-hpa.yaml').read_text())
     assert baseline['spec'] == proposed['spec']
     assert proposed['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
-    assert proposed['spec']['metrics'][0]['external']['target']['value'] == '100m'
+    assert proposed['spec']['metrics'][0]['external']['target']['value'] == '150m'
     cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
     assert cfg['deschedule_interval_seconds'] == 30
     original = yaml.safe_load((campaign.ROOT / 'config.yaml').read_text())
@@ -714,7 +714,7 @@ def test_staircase_plan_is_balanced_with_matched_bounded_hpas(tmp_path):
     steps = [list(map(int, s.split(':'))) for s in plan['schedule'].split(',')]
     assert [s[0] for s in steps] == [3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3]
     assert all(s[1:] == [s[0] // 3] * 3 for s in steps)
-    assert plan['phase_durations_s'] == [60.0] * 12 + [600.0]
+    assert plan['phase_durations_s'] == [120.0] * 12 + [600.0]
     assert plan['hpa_behavior_profile'] == 'bounded-staircase'
     hpas = [yaml.safe_load((out / f'{m}-hpa.yaml').read_text()) for m in ('baseline', 'proposed')]
     assert hpas[0]['spec']['behavior'] == hpas[1]['spec']['behavior']
@@ -769,23 +769,23 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert prop_hpa['spec']['maxReplicas'] == 24
     assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
     assert prop_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
-    assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '100m'
+    assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '150m'
 
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     assert plan['comparison'] == 'scaling'
     assert plan['scenario'] == 'scaler-balanced'
     assert plan['http_threads'] == 5
     assert plan['schedule'] == '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
-    assert plan['phase_durations_s'] == [60.0] * 7
+    assert plan['phase_durations_s'] == [120.0] * 7
     assert plan['final_hold_seconds'] == 0
     assert plan['node_restriction'] == 'gnb-3'
     assert plan['replica_bounds'] == {'min': 3, 'max': 24}
     assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
     assert plan['hpa_targets'] == {
         'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
-        'proposed': {'type': 'latency_p90_ms', 'target': 100},
+        'proposed': {'type': 'latency_p90_ms', 'target': 150},
     }
-    assert plan['tc_ms'] is None
+    assert plan['tc_ms'] == 10
     assert plan['resource_measurement'] == {
         'source': 'prometheus-cadvisor',
         'scrape_interval_seconds': 5,
@@ -803,7 +803,7 @@ def test_scaler_balanced_final_hold_and_overrides(tmp_path):
         '--plan-only', str(out),
     ])
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
-    assert plan['phase_durations_s'] == [60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 420.0]
+    assert plan['phase_durations_s'] == [120.0] * 6 + [480.0]
     assert plan['final_hold_seconds'] == 360
     assert plan['replica_bounds'] == {'min': 3, 'max': 12}
     assert plan['tc_ms'] == 15.0

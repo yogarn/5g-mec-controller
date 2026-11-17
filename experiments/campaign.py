@@ -39,6 +39,13 @@ SCALER_SCENARIOS = ('scaler-balanced', 'scaler-staircase')
 SCALER_NODE = 'gnb-3'
 SCALER_MIN_REPLICAS = 3
 SCALER_DEFAULT_MAX_REPLICAS = 24
+DEFAULT_SLO_MS = 150
+DEFAULT_TC_MS = 10
+DEFAULT_MIN_REPLICAS = 3
+DEFAULT_DESCHEDULE_INTERVAL_S = 30
+DEFAULT_PHASE_SECONDS = 120
+MOBILITY_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
+SCALER_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
 FINAL_HOLD_SECONDS = 360
 COMPARISONS = ('full', 'placement', 'scaling')
 AUTOSCALERS = ('controller', 'hpa')
@@ -1153,7 +1160,7 @@ def main(argv=None):
     parser.add_argument('--final-hold', action='store_true',
                         help='extend final scaling phase: +360s for legacy balanced, or to at least 600s for staircase')
     parser.add_argument('--deschedule-interval', type=float,
-                        help='seconds between proposed descheduler checks (mobility9 default: 30; otherwise config.yaml)')
+                        help='seconds between proposed descheduler checks (default: 30; disabled for scaling)')
     parser.add_argument('--comparison', choices=COMPARISONS, default=None,
                         help='placement: same latency autoscaler; full: CPU HPA vs full proposed; scaling: CPU HPA vs latency HPA on gnb-3')
     parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
@@ -1164,9 +1171,10 @@ def main(argv=None):
                         help='write workload/controller/HPA manifests locally without any probes or cluster access')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
     parser.add_argument('--check', action='store_true', help='dependency checks plus temporary workload and UE connectivity probes')
-    parser.add_argument('--tc-ms', type=float, help='enable workload link shaping at this one-way delay in milliseconds')
+    parser.add_argument('--tc-ms', type=float, default=DEFAULT_TC_MS,
+                        help='workload link shaping one-way delay in milliseconds (default: 10)')
     parser.add_argument('--slo-ms', type=float,
-                        help='reporting p90 SLO threshold in milliseconds (also base RT target before --rt-target-factor; default: config.yaml)')
+                        help='reporting p90 SLO threshold in milliseconds (also base RT target before --rt-target-factor; default: 150)')
     parser.add_argument('--rt-target-factor', type=float, default=1.0,
                         help='experimental headroom multiplier in (0, 1] applied only to proposed RT autoscaler internal target (default: 1.0)')
     parser.add_argument('--latency-floor-ms', type=int, default=0,
@@ -1174,9 +1182,9 @@ def main(argv=None):
     parser.add_argument('--fixed-replicas', type=int,
                         help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
     parser.add_argument('--min-replicas', type=int,
-                        help='shared baseline HPA and proposed minimum and initial replica count (default: 3 for scaling, config.yaml otherwise)')
+                        help='shared baseline HPA and proposed minimum and initial replica count (default: 3)')
     parser.add_argument('--max-replicas', type=int,
-                        help='shared baseline HPA and proposed replica ceiling (default: config.yaml)')
+                        help='shared baseline HPA and proposed replica ceiling (default: 24 for scaling, config.yaml otherwise)')
     parser.add_argument('--scale-down-stabilization-seconds', type=int,
                         help='shared HPA scale-down stabilization window in seconds (default: 60 for staircase, config.yaml otherwise)')
     parser.add_argument('--scale-down-pods', type=int,
@@ -1192,7 +1200,7 @@ def main(argv=None):
     duration_options.add_argument('--long-run', action='store_true',
                                   help='mobility9 only: use 120s phases (default for mobility9; kept for compatibility)')
     duration_options.add_argument('--phase-duration', type=float,
-                                  help='traffic seconds per phase (minimum 60; default: 120 for mobility9, campaign config otherwise, or 60 with --debug)')
+                                  help='traffic seconds per phase (minimum 60; default: 120 for all full experiments; joint reads campaign config; 60 with --debug)')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE,
                         help='target request arrival rate per active UE in requests/second (default: 5)')
     parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE,
@@ -1206,7 +1214,7 @@ def main(argv=None):
     if args.long_run:
         if args.scenario != 'mobility9':
             parser.error('--long-run requires --scenario mobility9')
-        args.phase_duration = 120
+        args.phase_duration = MOBILITY_PHASE_SECONDS
     if args.mobility_direction is not None and args.scenario != 'mobility9':
         parser.error('--mobility-direction requires --scenario mobility9')
     mobility_direction = (args.mobility_direction or 'forward') if args.scenario == 'mobility9' else None
@@ -1246,9 +1254,9 @@ def main(argv=None):
         if args.autoscaler != 'hpa' or args.placement_engine != 'go':
             parser.error('mobility9 requires native HPA and Go placement')
         if args.slo_ms is None:
-            args.slo_ms = 100
+            args.slo_ms = DEFAULT_SLO_MS
         if args.deschedule_interval is None:
-            args.deschedule_interval = 30
+            args.deschedule_interval = DEFAULT_DESCHEDULE_INTERVAL_S
     elif args.scenario in SCALER_SCENARIOS:
         if args.debug:
             parser.error('scaling scenarios have their own HPA profile; omit --debug')
@@ -1261,7 +1269,9 @@ def main(argv=None):
         if args.resource_weights is not None or args.locality_weight is not None:
             parser.error('scaling scenarios do not use custom placement scoring')
         if args.slo_ms is None:
-            args.slo_ms = 100
+            args.slo_ms = DEFAULT_SLO_MS
+    if args.comparison != 'scaling' and args.deschedule_interval is None:
+        args.deschedule_interval = DEFAULT_DESCHEDULE_INTERVAL_S
     if args.deschedule_interval is not None and (not math.isfinite(args.deschedule_interval) or args.deschedule_interval <= 0):
         parser.error('--deschedule-interval must be finite and positive')
     if args.tc_ms is not None and (not math.isfinite(args.tc_ms) or args.tc_ms < 0.001):
@@ -1298,12 +1308,12 @@ def main(argv=None):
             mobility_phases = list(reversed(mobility_phases))
         settings.update(
             schedule=','.join(mobility_phases),
-            phase_duration=120,
+            phase_duration=MOBILITY_PHASE_SECONDS,
             mobility_direction=mobility_direction,
         )
     elif args.scenario in SCALER_SCENARIOS:
         settings.update(schedule=SCALER_STAIRCASE_SCHEDULE if args.scenario == 'scaler-staircase' else SCALER_BALANCED_SCHEDULE,
-                        phase_duration=60)
+                        phase_duration=SCALER_PHASE_SECONDS)
     if args.phase_schedule is not None:
         parse_schedule(args.phase_schedule)
         if args.scenario != 'mobility9':
@@ -1349,7 +1359,7 @@ def main(argv=None):
                        else controller_config.get('locality_weight', .4))
     if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
         parser.error('--locality-weight must be finite and between 0 and 1')
-    slo_ms = args.slo_ms if args.slo_ms is not None else controller_config['slo_seconds'] * 1000
+    slo_ms = args.slo_ms if args.slo_ms is not None else DEFAULT_SLO_MS
     internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(args.rt_target_factor))
     internal_target_ms = _decimal_to_number(internal_target_dec)
     effective_target_dec = (internal_target_dec - Decimal(str(args.latency_floor_ms))
@@ -1369,10 +1379,12 @@ def main(argv=None):
         max_replicas = args.fixed_replicas
     min_replicas = (args.fixed_replicas if args.fixed_replicas is not None
                     else args.min_replicas if args.min_replicas is not None
-                    else SCALER_MIN_REPLICAS if args.comparison == 'scaling'
-                    else controller_config['min_replicas'])
+                    else DEFAULT_MIN_REPLICAS)
     if args.fixed_replicas is None and max_replicas < min_replicas:
         parser.error('--max-replicas must be at least min_replicas')
+    if args.fixed_replicas is None:
+        # Feed the resolved default into manifests as well as metadata.
+        args.min_replicas = min_replicas
     proposed_latency_target = {
         'type': 'latency_p90_ms' if args.autoscaler == 'hpa' else 'controller_latency_p90_ms',
         'target': effective_metric_target_ms,

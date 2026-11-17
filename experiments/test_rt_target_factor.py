@@ -212,6 +212,7 @@ def test_campaign_yaml_console_and_plot_slo_unchanged(tmp_path, monkeypatch, cap
     monkeypatch.setattr(campaign, '_prepare_floor_adapter', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'command', lambda args, **kw: commands.append(args))
     monkeypatch.setattr(campaign.fcntl, 'flock', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'TrafficDelay', lambda *a, **kw: SimpleNamespace(start=lambda: None, close=lambda: None))
     monkeypatch.setattr(campaign, 'run_method', lambda *a, **kw: None)
 
     campaign.main([
@@ -254,6 +255,7 @@ def test_fractional_slo_with_default_factor_installs_millisecond_adapter(tmp_pat
                         lambda root, floor_ms, unit='seconds': adapter_calls.append((root, floor_ms, unit)))
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign.fcntl, 'flock', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'TrafficDelay', lambda *a, **kw: SimpleNamespace(start=lambda: None, close=lambda: None))
     monkeypatch.setattr(campaign, 'run_method', lambda *a, **kw: None)
 
     campaign.main([

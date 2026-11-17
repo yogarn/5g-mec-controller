@@ -76,6 +76,7 @@ def test_a5_method_order_random_and_live_execution_order(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, '_prepare_floor_adapter', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign.fcntl, 'flock', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'TrafficDelay', lambda *a, **kw: SimpleNamespace(start=lambda: None, close=lambda: None))
     monkeypatch.setattr(campaign, 'run_method', lambda _s, _c, _r, method, *a, **kw: executed.append(method))
     monkeypatch.setattr(campaign, '_collect_live_provenance', lambda _s: {
         'core_git': {'revision': 'abc', 'dirty': False},
