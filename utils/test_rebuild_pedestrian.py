@@ -81,6 +81,7 @@ def test_preview_does_not_mutate_files_or_call_docker(workspace, monkeypatch):
 @pytest.mark.parametrize('action,args,module', [
     ('rebuild', ['--plan-only'], 'utils.rebuild_pedestrian'),
     ('ramp', ['scaler_02'], 'experiments.campaign'),
+    ('smoke', ['joint', 'smoke_joint_01', '--plan-only', '/tmp/smoke-plan'], 'utils.smoke_campaign'),
 ])
 def test_short_shell_commands_forward_to_the_right_module(tmp_path, action, args, module):
     script = tmp_path / 'experiments/run.sh'
@@ -94,9 +95,9 @@ def test_short_shell_commands_forward_to_the_right_module(tmp_path, action, args
     assert cmd[:3] == ['-u', '-m', module]
     assert cmd[-len(args):] == args
     if action == 'ramp':
-        assert cmd[cmd.index('--phase-duration') + 1] == '180'
+        assert cmd[cmd.index('--phase-duration') + 1] == '60'
         assert cmd[cmd.index('--slo-ms') + 1] == '150'
         assert cmd[cmd.index('--tc-ms') + 1] == '10'
-        assert '--final-hold' in cmd
+        assert '--final-hold' not in cmd
         assert cmd[cmd.index('--scenario') + 1] == 'scaler-staircase'
         assert cmd[cmd.index('--latency-floor-ms') + 1] == '130'
