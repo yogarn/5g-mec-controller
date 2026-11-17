@@ -266,6 +266,7 @@ def test_run_one_pedestrian_collects_summary_cadvisor_and_service_probes(tmp_pat
     assert (run_dir / 'service-path-probes.json').exists()
     assert summary['cadvisor_summary_csv'] == str(run_dir / 'resource-by-ramp.csv')
     assert summary['service_path_probes']['phase_01']['gnb-1']['median_ms'] == 12.0
+    assert summary['backend_counts'] == {'mec-placement-pedestrian-detection-p1': 0, 'unknown': 1}
     assert seen_prom_urls and seen_prom_urls[0]
     assert any('--probe-service-path' in ' '.join(map(str, c)) for c in seen_ue_cmds)
 

@@ -114,3 +114,21 @@ def test_a5_invalid_scale_down_flags_rejected(tmp_path, flags):
             '--slo-ms', '150', '--plan-only', str(out), *flags,
         ])
     assert not out.exists()
+
+
+def test_collect_live_provenance_detects_k3s_kube_proxy_mode_from_metrics(monkeypatch):
+    monkeypatch.setattr(campaign, 'command', lambda *a, **kw: SimpleNamespace(stdout='abc\n'))
+
+    def fake_kube(*args, **kwargs):
+        if args[:4] == ('version', '-o', 'json'):
+            return SimpleNamespace(stdout='{"serverVersion": {"gitVersion": "v1.35.4+k3s1"}}')
+        if args[:4] == ('-n', 'kube-system', 'get', 'configmap'):
+            return SimpleNamespace(stdout='')
+        if args[:3] == ('get', '--raw', '/metrics'):
+            return SimpleNamespace(stdout='kubeproxy_iptables_ct_state_invalid_dropped_packets_total 0\n')
+        raise AssertionError(f'unexpected kube call: {args}')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    prov = campaign._collect_live_provenance({'ue_host': 'ue', 'ue_project': '/tmp'})
+    assert prov['kubernetes_server_version'] == 'v1.35.4+k3s1'
+    assert prov['kube_proxy_mode'] == 'iptables'

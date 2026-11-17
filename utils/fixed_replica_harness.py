@@ -381,14 +381,20 @@ def run_one(settings, campaign_dir, stage, block, run_id, replicas, node, schedu
                 subprocess.run(remote(settings, ['sudo', '-n', 'cat', f'{ue_out}/service-path-probes.json']), stdout=out_f, check=True)
             service_path_probes = json.loads(probes_dest.read_text())
 
-        # Collect per-pod request logs and cgroup stats
-        backend_counts = {}
+        # Collect per-pod logs, cgroup stats, and observed serving counts from requests.jsonl.
+        backend_counts = {pod['metadata']['name']: 0 for pod in pods_json['items']}
+        for line in raw_dest.read_text().splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get('event') == 'request':
+                pod_id = rec.get('server_pod') or 'unknown'
+                backend_counts[pod_id] = backend_counts.get(pod_id, 0) + 1
         cgroup_stats = {}
         for pod in pods_json['items']:
             pname = pod['metadata']['name']
             plog = subprocess.check_output(['kubectl', '-n', NAMESPACE, 'logs', pname], text=True)
             (pod_logs_dir / f'{pname}.log').write_text(plog)
-            backend_counts[pname] = sum(1 for line in plog.splitlines() if 'POST /detect' in line)
             try:
                 cstat = subprocess.check_output(['kubectl', '-n', NAMESPACE, 'exec', pname, '--', 'cat', '/sys/fs/cgroup/cpu.stat'], text=True)
                 mpeak = subprocess.check_output(['kubectl', '-n', NAMESPACE, 'exec', pname, '--', 'cat', '/sys/fs/cgroup/memory.peak'], text=True).strip()

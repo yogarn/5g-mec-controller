@@ -490,6 +490,16 @@ def _collect_live_provenance(settings):
                 kube_proxy_mode = parsed.get('mode') or 'iptables'
     except (OSError, subprocess.SubprocessError, ValueError, yaml.YAMLError, AttributeError):
         kube_proxy_mode = None
+    if kube_proxy_mode is None:
+        try:
+            metrics_res = kube('get', '--raw', '/metrics', capture_output=True, text=True)
+            metrics_raw = getattr(metrics_res, 'stdout', None) or ''
+            for mode in ('iptables', 'nftables', 'ipvs'):
+                if f'kubeproxy_{mode}_' in metrics_raw:
+                    kube_proxy_mode = mode
+                    break
+        except (OSError, subprocess.SubprocessError, AttributeError):
+            kube_proxy_mode = None
 
     return {
         'core_git': _local_git_provenance(),
