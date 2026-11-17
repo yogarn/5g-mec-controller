@@ -9,17 +9,17 @@ has already finished; mobility has seven phases, scaling and joint have thirteen
 | Phase | Mobility | Scaling (`ramp`) | Joint (`full`) |
 |---|---|---|---|
 | 1 | 9 (7:1:1) | 3 (1:1:1) | 3 (1:1:1) |
-| 2 | 9 (5:3:1) | 6 (2:2:2) | 9 (3:3:3) |
-| 3 | 9 (3:5:1) | 9 (3:3:3) | 9 (1:1:7) |
-| 4 | 9 (1:7:1) | 12 (4:4:4) | 15 (5:5:5) |
-| 5 | 9 (1:5:3) | 15 (5:5:5) | 15 (1:1:13) |
-| 6 | 9 (1:3:5) | 18 (6:6:6) | 24 (8:8:8) |
+| 2 | 9 (5:3:1) | 6 (2:2:2) | 9 (7:1:1) |
+| 3 | 9 (3:5:1) | 9 (3:3:3) | 15 (6:6:3) |
+| 4 | 9 (1:7:1) | 12 (4:4:4) | 15 (3:9:3) |
+| 5 | 9 (1:5:3) | 15 (5:5:5) | 24 (3:15:6) |
+| 6 | 9 (1:3:5) | 18 (6:6:6) | 24 (3:9:12) |
 | 7 | 9 (1:1:7) | 24 (8:8:8) | 24 (1:1:22) |
-| 8 | — | 18 (6:6:6) | 24 (8:8:8) |
-| 9 | — | 15 (5:5:5) | 15 (1:1:13) |
-| 10 | — | 12 (4:4:4) | 15 (5:5:5) |
-| 11 | — | 9 (3:3:3) | 9 (1:1:7) |
-| 12 | — | 6 (2:2:2) | 9 (3:3:3) |
+| 8 | — | 18 (6:6:6) | 18 (1:2:15) |
+| 9 | — | 15 (5:5:5) | 15 (1:2:12) |
+| 10 | — | 12 (4:4:4) | 12 (1:2:9) |
+| 11 | — | 9 (3:3:3) | 9 (1:2:6) |
+| 12 | — | 6 (2:2:2) | 6 (1:1:4) |
 | 13 | — | 3 (1:1:1) | 3 (1:1:1) |
 
 Traffic per pair: mobility **28 minutes**, scaling **52 minutes**, joint **52 minutes**.
@@ -27,6 +27,9 @@ These totals exclude setup, transfer and cleanup. The default method order is
 baseline then proposed; `--method-order` can override it. Distributions are UE
 attachments: scaling still pins application pods to gNB-3 for both methods.
 The schedules are preserved in full; no smoke schedule override is applied.
+Joint moves the hotspot gNB-1 → gNB-2 → gNB-3 as load grows, then reduces
+load while keeping the hotspot at gNB-3 until balanced recovery. Load and
+distribution can change together; this measures the combined system response.
 
 ## Run an experiment
 
@@ -175,25 +178,30 @@ When `--tc-ms` is specified, both methods use the reserved Calico pool `mec-camp
 
 The controller computes `ceil(current replicas × all-attempt p90 / target)`, within its configured bounds. `--slo-ms` sets that target and the threshold for both methods' summaries and plots. The collector's separately configured SLO-attainment metric is not changed by the flag; the campaign plots calculate attainment from raw attempts. The controller plans added replicas individually against projected capacity and applies the resulting per-node counts without a per-step cooldown. The descheduler checks every 120 seconds when the workload is settled and scaling is not needed. It evaluates all occupied nodes, selects the largest strictly positive target-minus-current score delta, and removes one source replica before creating its replacement. Placement and replacement remain enforced through node-specific Deployments; this uses Deployment scale-down rather than the Kubernetes Eviction API and does not enforce PodDisruptionBudgets. In-flight progress is stored durably; old surge-first migration state must be completed before upgrading. Missing required metrics make reconciliation fail closed.
 
-The objective is **all-attempt p90 <=500 ms** by default, not a p95 objective. Per-attempt violation rates and p95 remain supplementary diagnostics.
+The objective is **all-attempt p90 <=150 ms** by default, not a p95 objective. Per-attempt violation rates and p95 remain supplementary diagnostics.
 
-Each phase generates traffic for **60 seconds**. The 13-phase schedule covers balanced and gNB-3 hotspot demand at 3, 9, 15, and 24 UEs, followed by recovery. Traffic takes **13 minutes per method**, or **26 minutes per paired campaign**, plus UE switching, setup, and transfer.
+Each full joint phase generates traffic for **120 seconds**. The 13-phase
+schedule combines changing load with a hotspot moving from gNB-1 through gNB-2
+to gNB-3, followed by declining load and balanced recovery. Traffic takes
+**26 minutes per method**, or **52 minutes per paired campaign**, plus setup
+and transfer. Both methods receive the same requested schedule.
 
-The 300-second HPA scale-down stabilization spans multiple phases. Interpret this campaign as a transient workload experiment; extend phase durations if settled scale-down is an endpoint. The schedule is `total:gnb1:gnb2:gnb3`:
+The 300-second HPA scale-down stabilization spans multiple phases. Interpret
+this as a transient workload experiment. The schedule is `total:gnb1:gnb2:gnb3`:
 
 ```text
 3:1:1:1
-9:3:3:3
-9:1:1:7
-15:5:5:5
-15:1:1:13
-24:8:8:8
+9:7:1:1
+15:6:6:3
+15:3:9:3
+24:3:15:6
+24:3:9:12
 24:1:1:22
-24:8:8:8
-15:1:1:13
-15:5:5:5
-9:1:1:7
-9:3:3:3
+18:1:2:15
+15:1:2:12
+12:1:2:9
+9:1:2:6
+6:1:1:4
 3:1:1:1
 ```
 

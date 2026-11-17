@@ -11,7 +11,8 @@ site_node_ips:
   gnb-2: 10.34.211.196
   gnb-3: 10.34.210.3
 telemetry_url: http://10.34.211.140:31669/observations
+# Joint: grow load while moving the hotspot gNB-1 -> gNB-2 -> gNB-3, then taper.
 # Full joint schedule: 13 phases at 120s; 26 min/method, 52 min/pair.
 # CLI --phase-duration overrides this; mobility/scaling use scenario defaults.
-schedule: '3:1:1:1,9:3:3:3,9:1:1:7,15:5:5:5,15:1:1:13,24:8:8:8,24:1:1:22,24:8:8:8,15:1:1:13,15:5:5:5,9:1:1:7,9:3:3:3,3:1:1:1'
+schedule: '3:1:1:1,9:7:1:1,15:6:6:3,15:3:9:3,24:3:15:6,24:3:9:12,24:1:1:22,18:1:2:15,15:1:2:12,12:1:2:9,9:1:2:6,6:1:1:4,3:1:1:1'
 phase_duration: 120

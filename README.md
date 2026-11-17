@@ -88,7 +88,7 @@ When running an evaluation campaign, **do not manually apply workloads or HPAs**
    # All 13 scaling phases; floor-adjusted latency variant
    bash experiments/run.sh ramp scaling_full_01 --max-replicas 12
 
-   # All 13 joint phases; CPU baseline vs raw-latency proposed HPA
+   # All 13 joint phases; growing/falling load with a left-to-right hotspot
    bash experiments/run.sh joint_full_01 --comparison full --max-replicas 12
    ```
    All full experiments default to **120s per phase**, including the final

@@ -161,12 +161,19 @@ def test_progress_relays_phase_lines_without_duplicates_or_partial_lines(tmp_pat
     assert capsys.readouterr().out == 'proposed: [RUN] phase_03: ramp-down\n'
 
 
-def test_default_campaign_has_matched_ascending_and_descending_phases():
+def test_joint_campaign_grows_and_tapers_load_with_left_to_right_hotspot():
     settings = yaml.safe_load((campaign.ROOT / 'experiments/campaign.yaml').read_text())
     phases = parse_schedule(settings['schedule'])
     counts = [tuple(p[f'gnb{i}_ues'] for i in (1, 2, 3)) for p in phases]
-    assert len(phases) == 13
-    assert counts[:6] == list(reversed(counts[7:]))
+    assert counts == [
+        (1, 1, 1), (7, 1, 1), (6, 6, 3), (3, 9, 3), (3, 15, 6),
+        (3, 9, 12), (1, 1, 22), (1, 2, 15), (1, 2, 12),
+        (1, 2, 9), (1, 2, 6), (1, 1, 4), (1, 1, 1),
+    ]
+    totals = [p['workload_ue'] for p in phases]
+    assert totals == [3, 9, 15, 15, 24, 24, 24, 18, 15, 12, 9, 6, 3]
+    assert all(sum(c) == n for c, n in zip(counts, totals))
+    assert all(c[2] > max(c[:2]) for c in counts[5:-1])
     assert settings['phase_duration'] == 120
 
 

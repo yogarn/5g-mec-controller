@@ -18,6 +18,9 @@ def test_short_campaign_commands_render_effective_defaults(tmp_path, flags, comp
     campaign.main(['default_test', *flags, '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['comparison'] == comparison
+    if comparison == 'full':
+        settings = yaml.safe_load((campaign.ROOT / 'experiments/campaign.yaml').read_text())
+        assert plan['schedule'] == settings['schedule']
     assert plan['phase_durations_s'] == durations
     assert plan['tc_ms'] == 10
     assert plan['slo_ms'] == 150
