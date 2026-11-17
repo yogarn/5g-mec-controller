@@ -30,7 +30,8 @@ class FakeUEs:
         self.closed = True
 
 
-def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('valid_response', [True, False])
+def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys, valid_response):
     bodies = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -38,7 +39,7 @@ def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys):
             bodies.append((self.client_address[0], self.rfile.read(int(self.headers['Content-Length']))))
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'{}')
+            self.wfile.write(b'{"face_count": 0, "faces": []}' if valid_response else b'{"error":"broken inference"}')
 
         def log_message(self, *args):
             pass
@@ -61,11 +62,18 @@ def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys):
     phases = summarize.summarize(tmp_path / 'run' / 'requests.jsonl', 500)
     output = capsys.readouterr().out
     assert '[..] phase_01:' in output
-    assert 'successful, 0 failed' in output
+    assert ('successful, 0 failed' if valid_response else '0 successful,') in output
     assert f"Results: {tmp_path / 'run' / 'requests.jsonl'}" in output
     assert [phase['phase'] for phase in phases] == ['phase_01', 'phase_02', 'phase_03']
     assert all(phase['attempts'] > 0 for phase in phases)
     records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]
+    requests = [r for r in records if r['event'] == 'request']
+    assert all(r['http_success'] and r['response_valid'] == valid_response for r in requests)
+    assert all(r['response_json'] == ({'face_count': 0, 'faces': []} if valid_response
+                                     else {'error': 'broken inference'}) for r in requests)
+    assert all(p['successes'] == (p['attempts'] if valid_response else 0) for p in phases)
+    if not valid_response:
+        assert all(p['slo_attainment_all_attempts'] == 0 for p in phases)
     assert FakeUEs.instances[-1].calls == [(1, 1, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1)]
     assert FakeUEs.instances[-1].closed
     assert [r['phase'] for r in records if r['event'] == 'phase_end'] == ['phase_01', 'phase_02', 'phase_03']
@@ -85,7 +93,7 @@ def test_interrupted_wait_stops_workers_and_closes_ues(tmp_path, monkeypatch, er
     workers = []
     failure = error_type('interrupted result wait')
 
-    def fake_attempt(url, method, body, headers, source, timeout):
+    def fake_attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
         calls.append(source)
         # Fail promptly instead of looping forever if cancellation regresses.
         assert len(calls) == 1, 'worker sent traffic after cancellation'
@@ -182,7 +190,7 @@ def test_directory_images_assigned_by_subscriber_order_across_phases(tmp_path, m
             ] for site, indices in ((1, range(g1)), (2, range(g1, g1 + g2)),
                                     (3, range(g1 + g2, total))))
 
-    def fake_attempt(url, method, body, headers, source, timeout):
+    def fake_attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
         with call_lock:
             calls.append((source, body))
         time.sleep(0.001)
@@ -236,7 +244,7 @@ def test_site_urls_route_each_group_and_record_destination(tmp_path, monkeypatch
     site_urls = {f'gnb-{site}': f'http://127.0.0.{site}:30000/detect' for site in (1, 2, 3)}
     calls = []
 
-    def fake_attempt(url, method, body, headers, source, timeout):
+    def fake_attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
         calls.append((source, url.geturl()))
         time.sleep(0.001)
         return {'success': True}
@@ -719,7 +727,7 @@ def test_phase_durations_records_actual_final_hold_without_extra_phases(tmp_path
     image.write_bytes(b'image')
     calls = []
 
-    def fake_attempt(url, method, body, headers, source, timeout):
+    def fake_attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
         return {'success': True}
 
     def fake_run_phase(phase_name, selected, phase_duration, rps_per_ue, max_in_flight_per_ue,

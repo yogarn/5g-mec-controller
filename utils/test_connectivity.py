@@ -33,6 +33,7 @@ def test_probe_checks_all_sites_twice_and_always_closes_sessions(tmp_path, monke
         assert attempt.call_count == 6
         assert [c.args[4] for c in attempt.call_args_list] == ['10.1.0.1', '10.2.0.1', '10.3.0.1'] * 2
         assert all(c.args[1] == 'POST' and c.args[5] == 10 for c in attempt.call_args_list)
+        assert all(c.kwargs['response_contract'] == 'detection' for c in attempt.call_args_list)
     lifecycle.close.assert_called_once()
 
 

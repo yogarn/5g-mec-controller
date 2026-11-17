@@ -24,6 +24,46 @@ from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, tele
 
 
 TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+RESPONSE_LOG_LIMIT = 1024 * 1024
+
+
+def detection_response_error(payload):
+    """Validate the application contract, not the accuracy of its detections."""
+    if not isinstance(payload, dict) or 'error' in payload:
+        return 'expected a detection object without an error field'
+    if 'person_count' in payload:
+        count, boxes = payload.get('person_count'), payload.get('persons')
+        pedestrian = True
+    elif 'face_count' in payload:
+        count, boxes = payload.get('face_count'), payload.get('faces')
+        pedestrian = False
+    else:
+        return 'missing detection count and boxes'
+    if type(count) is not int or count < 0 or not isinstance(boxes, list) or count != len(boxes):
+        return 'detection count must match the boxes list'
+    for box in boxes:
+        if not isinstance(box, dict):
+            return 'each detection must be an object'
+        for key in ('x', 'y', 'w', 'h'):
+            value = _optional_ms(box.get(key))
+            if value is None or (key in ('w', 'h') and value == 0):
+                return 'invalid detection coordinates'
+        if pedestrian:
+            value = _optional_ms(box.get('confidence'))
+            if value is None or value > 1:
+                return 'invalid detection confidence'
+    return None
+
+
+def _reject_json_constant(value):
+    raise ValueError(f'non-finite JSON constant: {value}')
+
+
+def _finite_json_float(value):
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError('non-finite JSON number')
+    return result
 
 
 def parse_schedule(value):
@@ -103,11 +143,16 @@ def _optional_str(value):
 def _optional_ms(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    val = float(value)
-    return val if math.isfinite(val) else None
+    try:
+        val = float(value)
+    except OverflowError:
+        return None
+    return val if math.isfinite(val) and val >= 0 else None
 
 
-def attempt(url, method, body, headers, source, timeout):
+def attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
+    if response_contract not in ('http', 'detection'):
+        raise ValueError('unknown response contract')
     start = time.time()
     clock = time.monotonic()
     req_headers = dict(headers or {})
@@ -118,6 +163,7 @@ def attempt(url, method, body, headers, source, timeout):
     status = None
     error = None
     raw_body = None
+    content_type = None
     conn = None
     try:
         cls = http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection
@@ -128,15 +174,43 @@ def attempt(url, method, body, headers, source, timeout):
         conn.request(method, target, body=body, headers=req_headers)
         response = conn.getresponse()
         status = response.status
+        content_type = response.getheader('Content-Type')
         raw_body = response.read()
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError) as exc:
         error = f'{type(exc).__name__}: {exc}'
+        if isinstance(exc, http.client.IncompleteRead):
+            raw_body = exc.partial
     finally:
         if conn is not None:
             conn.close()
     end_time = time.time()
     duration_ms = (time.monotonic() - clock) * 1000
-    success = error is None and status is not None and 200 <= status < 300
+    transport_error = error
+    http_success = error is None and status is not None and 200 <= status < 300
+    # All decoding, validation and serialization happen after the network timer.
+    payload = None
+    parse_error = None
+    truncated = raw_body is not None and len(raw_body) > RESPONSE_LOG_LIMIT
+    response_text = None
+    if raw_body is not None:
+        response_text = raw_body[:RESPONSE_LOG_LIMIT].decode('utf-8', errors='replace')
+        if truncated:
+            parse_error = 'response exceeds 1 MiB logging/validation limit'
+        else:
+            try:
+                payload = json.loads(raw_body.decode('utf-8'), parse_constant=_reject_json_constant,
+                                     parse_float=_finite_json_float)
+            except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+                parse_error = f'{type(exc).__name__}: {exc}'
+    validation_error = None
+    response_valid = None
+    if response_contract == 'detection':
+        validation_error = (transport_error or parse_error or
+                            detection_response_error(payload))
+        response_valid = validation_error is None
+        if http_success and validation_error:
+            error = f'ResponseValidationError: {validation_error}'
+    success = http_success and (response_valid is not False)
     server_fields = {
         'request_id': request_id,
         'server_pod': None,
@@ -147,11 +221,7 @@ def attempt(url, method, body, headers, source, timeout):
         'server_lock_wait_ms': None,
         'server_inference_ms': None,
     }
-    if success and raw_body:
-        try:
-            payload = json.loads(raw_body.decode('utf-8'))
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            payload = None
+    if http_success:
         if isinstance(payload, dict):
             server_fields['request_id'] = _optional_str(payload.get('request_id')) or request_id
             server_fields['server_pod'] = _optional_str(payload.get('server_pod'))
@@ -164,6 +234,14 @@ def attempt(url, method, body, headers, source, timeout):
     return {'start_time': start, 'end_time': end_time,
             'duration_ms': duration_ms,
             'http_status': status, 'error': error,
+            'transport_error': transport_error, 'http_success': http_success,
+            'response_contract': response_contract, 'response_valid': response_valid,
+            'response_validation_error': validation_error,
+            'response_content_type': content_type,
+            'response_size_bytes': len(raw_body) if raw_body is not None else None,
+            'response_body_truncated': truncated,
+            'response_json': payload, 'response_body': response_text,
+            'response_parse_error': parse_error,
             'success': success, **server_fields}
 
 

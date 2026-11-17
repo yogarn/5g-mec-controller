@@ -1467,6 +1467,8 @@ def main(argv=None):
     }
     shared_metadata = {
         'workload': workload,
+        'response_contract': 'detection',
+        'response_log_schema_version': 1,
         'http_threads': _workload_http_threads(workload),
         'phase_transition': args.phase_transition,
         'comparison': args.comparison,

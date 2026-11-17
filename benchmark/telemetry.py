@@ -120,8 +120,8 @@ class TelemetryPublisher:
         print(f'telemetry: delivered={self.delivered} dropped={self.dropped}', file=sys.stderr)
 
 
-def request_with_telemetry(attempt, publisher, url, method, body, headers, source, timeout):
-    result = attempt(url, method, body, headers, source, timeout)
+def request_with_telemetry(attempt, publisher, url, method, body, headers, source, timeout, **attempt_options):
+    result = attempt(url, method, body, headers, source, timeout, **attempt_options)
     if publisher is not None:
         publisher.submit(source, result)
     return result

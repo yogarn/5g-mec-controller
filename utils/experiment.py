@@ -285,6 +285,7 @@ def run(args):
                 'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
                 'workload': 'open-loop-fixed-rate', 'phase_transition': transition,
+                'response_contract': 'detection', 'response_log_schema_version': 1,
                 'switching': ('continuous-unaffected; moving UEs stop-and-reattach; not handover'
                               if transition == 'continuous' else 'stop-and-reattach; not handover')}
     metadata['images'] = [{key: image[key] for key in ('filename', 'sha256', 'bytes')} for image in images]
@@ -319,7 +320,8 @@ def run(args):
                     phases, phase_durations, lifecycle, images, assignments, urls,
                     float(rps_per_ue), max_in_flight_per_ue,
                     lambda url, image, source, publisher: request_with_telemetry(
-                        attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout),
+                        attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout,
+                        response_contract='detection'),
                     emit, publisher_factory=(lambda ip: TelemetryPublisher(telemetry, [ip])) if telemetry else None,
                     initial_probe=initial_probe)
             finally:
@@ -361,7 +363,8 @@ def run(args):
 
                 cancelled = threading.Event()
                 def dispatch(group, source, ue_index, image):
-                    return request_with_telemetry(attempt, publisher, urls[group], 'POST', image['body'], image['headers'], source, args.timeout)
+                    return request_with_telemetry(attempt, publisher, urls[group], 'POST', image['body'], image['headers'], source, args.timeout,
+                                                  response_contract='detection')
 
                 try:
                     per_ue = run_fixed_rate_phase(

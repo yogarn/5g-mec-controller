@@ -314,6 +314,35 @@ bash experiments/run.sh --comparison scaling --scenario scaler-balanced --final-
 bash experiments/run.sh scaler_01 --comparison scaling --scenario scaler-balanced --final-hold
 ```
 
+## Per-request response evidence
+
+New campaigns save the application response in each `request` record of
+`baseline/requests.jsonl` and `proposed/requests.jsonl`. `response_json` preserves
+the detection count, boxes, confidence scores, model identity and application
+timings as returned by the server. `response_body` preserves the UTF-8 body
+(with replacement characters for invalid UTF-8), including JSON or HTML error
+responses. Content type, bytes read, JSON parse errors and explicit truncation
+are recorded separately. Bodies above 1 MiB retain the first 1 MiB of text and
+fail detection validation; their parsed JSON is omitted. No image data is added.
+
+`http_success` means a completed HTTP 2xx exchange. Campaign `success` additionally
+requires a valid detection object: a nonnegative integer count matching the boxes
+list, finite nonnegative coordinates, positive box dimensions, and pedestrian
+confidence scores in [0, 1]. Zero detections are valid. This checks the response
+contract, not whether the model correctly identified people in the image.
+Malformed or error-shaped HTTP 200 responses have `response_valid: false` and
+`ResponseValidationError` in `error`; they count as failures in live telemetry,
+summaries and all-attempt SLO attainment. Transport errors are also retained
+separately in `transport_error`. Connectivity preflight uses the same validation.
+Generic `benchmark.client` HTTP runs retain their HTTP-only success contract.
+
+Response time still ends after the response body is received and the connection
+is closed. JSON parsing, validation, telemetry delivery and disk logging are
+outside that timer. Campaign plans and UE `run.json` record
+`response_log_schema_version: 1` and `response_contract: detection`. Historical
+runs without these fields cannot recover discarded detection results by
+replotting; rerun to collect response evidence.
+
 ## Resource summaries & limitations (`utils/monitor_resources.py`)
 
 `utils/monitor_resources.py` polls workload Pod lists (`kubectl get pods`) with a 5-second delay between collection rounds. Campaigns use `--pods-only`, which skips Metrics Server requests and records Pod lifecycle and placement independently of resource collection. Without `--pods-only`, the sampler also collects Kubernetes Metrics Server Pod metrics (`/apis/metrics.k8s.io/v1beta1/namespaces/<ns>/pods`), keeping metrics for all workload Pods (including recently terminated or terminating Pods) so churned measurements are not dropped before summarization.

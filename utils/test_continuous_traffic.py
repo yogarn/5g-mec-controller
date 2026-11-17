@@ -246,7 +246,8 @@ def test_experiment_entrypoint_records_continuous_mode_and_separate_transitions(
         def close(self):
             self.closed = True
     monkeypatch.setattr(experiment, 'ContinuousUELifecycle', Lifecycle)
-    def attempt(url, method, body, headers, source, timeout):
+    def attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
+        assert response_contract == 'detection'
         now = time.time()
         return dict(start_time=now, end_time=now + .001, duration_ms=1,
                     success=True, http_status=200, error=None)

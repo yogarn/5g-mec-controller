@@ -29,7 +29,8 @@ def probe(settings, output):
                 groups = lifecycle.switch_counts(3, 1, 1, 1)
                 for site, group in zip(('gnb-1', 'gnb-2', 'gnb-3'), groups):
                     source = group[0]['ip']
-                    result = attempt(urls[site], 'POST', body, headers, source, 10)
+                    result = attempt(urls[site], 'POST', body, headers, source, 10,
+                                     response_contract='detection')
                     stream.write(json.dumps({'cycle': cycle, 'site': site, 'source': source,
                                              'rt_ms': result['duration_ms'], **result}) + '\n')
                     stream.flush()
