@@ -756,7 +756,7 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
                     'matchFields': [{
                         'key': 'metadata.name',
                         'operator': 'In',
-                        'values': ['gnb-3'],
+                        'values': ['core-5g'],
                     }]
                 }]
             }
@@ -790,7 +790,7 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert plan['schedule'] == '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
     assert plan['phase_durations_s'] == [120.0] * 7
     assert plan['final_hold_seconds'] == 0
-    assert plan['node_restriction'] == 'gnb-3'
+    assert plan['node_restriction'] == 'core-5g'
     assert plan['replica_bounds'] == {'min': 3, 'max': 24}
     assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
     assert plan['hpa_targets'] == {

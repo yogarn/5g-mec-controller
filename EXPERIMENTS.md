@@ -304,7 +304,7 @@ On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one 
 
 ## Scaler-only balanced scenario (`scaler-balanced`)
 
-Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`80%` target) against native latency HPA (`150` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
+Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`80%` target) against native latency HPA (`150` ms p90 target) on `core-5g` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `core-5g` allocatable CPU/memory minus active pods can fit `max_replicas`.
 
 ```bash
 # Offline preview (no cluster or network access):
@@ -342,6 +342,22 @@ outside that timer. Campaign plans and UE `run.json` record
 `response_log_schema_version: 1` and `response_contract: detection`. Historical
 runs without these fields cannot recover discarded detection results by
 replotting; rerun to collect response evidence.
+
+## Custom CPU HPA target
+
+Use `--cpu-hpa-target PERCENT` for the CPU baseline in scaling or full/joint
+comparisons. The default is `80`; the value must be a positive integer percent
+of CPU **requests**, not limits. With a 500m request, `--cpu-hpa-target 70`
+targets 350m per Pod. Values above 100 are supported because usage can exceed
+requests. The RT HPA target and reporting SLO are independent of this flag.
+Mobility/placement comparisons use latency HPA for both methods and reject an
+explicit CPU-target flag to avoid silently ignoring it. Plans and campaign
+metadata record the effective CPU target alongside the generated HPA.
+
+```bash
+bash experiments/run.sh ramp scaling_core80_01 --max-replicas 12 --cpu-hpa-target 80
+bash experiments/run.sh joint_cpu80_01 --comparison full --max-replicas 12 --cpu-hpa-target 80
+```
 
 ## Resource summaries & limitations (`utils/monitor_resources.py`)
 
@@ -401,11 +417,14 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
 `--comparison scaling --scenario scaler-staircase`, 120s for every phase, TC 10ms, SLO 150ms,
 5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
-Both methods use `default-scheduler` with required node affinity to gnb-3.
+Both methods use `default-scheduler` with required node affinity to core-5g.
 The scheduler honors that restriction; it cannot choose another node. This
 holds placement constant to isolate autoscaling. Mobility and joint comparisons
 allow the four eligible nodes. CPU baseline runs now target 80% of CPU requests;
-retain earlier 60% runs as a separate configuration.
+retain earlier 60% runs as a separate configuration. Historical scaling runs
+restricted to gnb-3 also use a different placement condition. Core placement
+avoids an application co-location advantage for any one gNB/UPF; verify actual
+per-site latency rather than assuming identical physical network delay.
 Both scaling methods use
 replica bounds 3..24, `HTTP_THREADS=5` (explicitly set for both methods),
 requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.

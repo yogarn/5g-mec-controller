@@ -36,9 +36,10 @@ MOBILITY9_SCHEDULE = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
 SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
 SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
 SCALER_SCENARIOS = ('scaler-balanced', 'scaler-staircase')
-SCALER_NODE = 'gnb-3'
+SCALER_NODE = 'core-5g'
 SCALER_MIN_REPLICAS = 3
 SCALER_DEFAULT_MAX_REPLICAS = 24
+DEFAULT_CPU_HPA_TARGET = 80
 DEFAULT_SLO_MS = 150
 DEFAULT_TC_MS = 10
 DEFAULT_MIN_REPLICAS = 3
@@ -55,7 +56,7 @@ PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
 COMPARISON_NOTES = {
     'placement': 'Comparison A (placement): same latency-ratio autoscaler for both methods; isolates scheduler/descheduler placement.',
     'full': 'Comparison B (full system): default-scheduler + CPU HPA vs full proposed system (autoscaler + scheduler + descheduler); do not attribute results solely to placement.',
-    'scaling': 'Comparison C (scaling): default-scheduler + gnb-3-only required affinity for both methods; native CPU HPA (80% target) vs native latency HPA (target recorded in hpa_targets).',
+    'scaling': 'Comparison C (scaling): default-scheduler + core-5g-only required affinity for both methods; native CPU HPA vs native latency HPA (targets recorded in hpa_targets).',
 }
 
 
@@ -549,11 +550,14 @@ def _format_hpa_target(value_ms, unit='seconds'):
 
 def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds,
                 slo_ms=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0,
-                scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None):
+                scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET):
     hpa = yaml.safe_load((ROOT / template_name).read_text())
     hpa['metadata']['name'] = hpa_name
     hpa['spec']['scaleTargetRef']['name'] = app_name
     hpa['spec'].update(minReplicas=min_replicas, maxReplicas=max_replicas)
+    for metric in hpa['spec']['metrics']:
+        if metric.get('resource', {}).get('name') == 'cpu':
+            metric['resource']['target']['averageUtilization'] = cpu_hpa_target
     if staircase:
         # Matched damping for both metrics, independent of latency signal choice.
         stab = 60 if scale_down_stabilization_seconds is None else int(scale_down_stabilization_seconds)
@@ -808,8 +812,10 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET):
     """Persist the exact matched replica budget and manifests used by a method."""
+    if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
+        raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
     if comparison not in COMPARISONS:
         raise ValueError(f'comparison must be one of {COMPARISONS}')
     if autoscaler not in AUTOSCALERS:
@@ -912,6 +918,7 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
             scale_down_stabilization_seconds=scale_down_stabilization_seconds,
             scale_down_pods=scale_down_pods,
             scale_down_period_seconds=scale_down_period_seconds,
+            cpu_hpa_target=cpu_hpa_target,
         )
     elif autoscaler == 'hpa' and (method == 'proposed' or comparison == 'placement'):
         effective_factor = rt_target_factor if method == 'proposed' else 1.0
@@ -965,7 +972,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   min_replicas=min_replicas if min_replicas is not None else settings.get('min_replicas'),
                                                   scale_down_stabilization_seconds=settings.get('scale_down_stabilization_seconds'),
                                                   scale_down_pods=settings.get('scale_down_pods'),
-                                                  scale_down_period_seconds=settings.get('scale_down_period_seconds'))
+                                                  scale_down_period_seconds=settings.get('scale_down_period_seconds'),
+                                                  cpu_hpa_target=settings.get('cpu_hpa_target', DEFAULT_CPU_HPA_TARGET))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -1157,7 +1165,7 @@ def main(argv=None):
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or face-detection)')
     parser.add_argument('--scenario', choices=['mobility9', *SCALER_SCENARIOS],
-                        help='mobility9: 9 UEs shifting across gNBs (7 phases); scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on gnb-3')
+                        help='mobility9: 9 UEs shifting across gNBs (7 phases); scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on core-5g')
     parser.add_argument('--mobility-direction', choices=('forward', 'reverse'), default=None,
                         help='mobility9 only: UE hotspot trajectory direction (forward or reverse; default: forward)')
     parser.add_argument('--phase-transition', choices=('continuous', 'restart'), default='continuous',
@@ -1169,7 +1177,7 @@ def main(argv=None):
     parser.add_argument('--deschedule-interval', type=float,
                         help='seconds between proposed descheduler checks (default: 30; disabled for scaling)')
     parser.add_argument('--comparison', choices=COMPARISONS, default=None,
-                        help='placement: same latency autoscaler; full: CPU HPA vs full proposed; scaling: CPU HPA vs latency HPA on gnb-3')
+                        help='placement: same latency autoscaler; full: CPU HPA vs full proposed; scaling: CPU HPA vs latency HPA on core-5g')
     parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
                         help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter) or controller (Python fallback)')
     parser.add_argument('--placement-engine', choices=PLACEMENT_ENGINES, default='go',
@@ -1182,6 +1190,8 @@ def main(argv=None):
                         help='workload link shaping one-way delay in milliseconds (default: 10)')
     parser.add_argument('--slo-ms', type=float,
                         help='reporting p90 SLO threshold in milliseconds (also base RT target before --rt-target-factor; default: 150)')
+    parser.add_argument('--cpu-hpa-target', type=int, metavar='PERCENT',
+                        help='baseline CPU HPA target as a positive integer percent of CPU requests (default: 80; full/scaling comparisons only)')
     parser.add_argument('--rt-target-factor', type=float, default=1.0,
                         help='experimental headroom multiplier in (0, 1] applied only to proposed RT autoscaler internal target (default: 1.0)')
     parser.add_argument('--latency-floor-ms', type=int, default=0,
@@ -1277,6 +1287,13 @@ def main(argv=None):
             parser.error('scaling scenarios do not use custom placement scoring')
         if args.slo_ms is None:
             args.slo_ms = DEFAULT_SLO_MS
+    if args.cpu_hpa_target is not None:
+        if args.cpu_hpa_target < 1:
+            parser.error('--cpu-hpa-target must be a positive integer percent of CPU requests')
+        if args.comparison == 'placement':
+            parser.error('--cpu-hpa-target requires --comparison full or scaling; placement uses latency HPA for both methods')
+    else:
+        args.cpu_hpa_target = DEFAULT_CPU_HPA_TARGET
     if args.comparison != 'scaling' and args.deschedule_interval is None:
         args.deschedule_interval = DEFAULT_DESCHEDULE_INTERVAL_S
     if args.deschedule_interval is not None and (not math.isfinite(args.deschedule_interval) or args.deschedule_interval <= 0):
@@ -1330,6 +1347,7 @@ def main(argv=None):
     settings['staircase'] = args.scenario == 'scaler-staircase'
     settings['latency_floor_ms'] = args.latency_floor_ms
     settings['rt_target_factor'] = float(args.rt_target_factor)
+    settings['cpu_hpa_target'] = args.cpu_hpa_target
     if args.scale_down_stabilization_seconds is not None:
         settings['scale_down_stabilization_seconds'] = args.scale_down_stabilization_seconds
     if args.scale_down_pods is not None:
@@ -1406,13 +1424,13 @@ def main(argv=None):
             hpa_target_value=hpa_target_value,
         )
     hpa_targets = (
-        {'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
+        {'baseline': {'type': 'cpu_utilization_percent', 'target': args.cpu_hpa_target},
          'proposed': proposed_latency_target}
         if args.comparison == 'scaling' else
         {'baseline': {'type': 'latency_p90_ms', 'target': slo_ms},
          'proposed': proposed_latency_target}
         if args.comparison == 'placement' else
-        {'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
+        {'baseline': {'type': 'cpu_utilization_percent', 'target': args.cpu_hpa_target},
          'proposed': proposed_latency_target}
     )
     if args.latency_floor_ms:
@@ -1503,6 +1521,7 @@ def main(argv=None):
         'final_hold_seconds': hold_seconds,
         'node_restriction': SCALER_NODE if args.comparison == 'scaling' else None,
         'hpa_targets': hpa_targets,
+        'cpu_hpa_target': args.cpu_hpa_target if args.comparison != 'placement' else None,
         'replica_bounds': {'min': min_replicas, 'max': max_replicas},
         'pacing': {'rps_per_ue': float(args.rps_per_ue), 'max_in_flight_per_ue': args.max_in_flight_per_ue},
         'tc_ms': args.tc_ms,
@@ -1527,7 +1546,8 @@ def main(argv=None):
                             rt_target_factor=args.rt_target_factor, min_replicas=args.min_replicas,
                             scale_down_stabilization_seconds=args.scale_down_stabilization_seconds,
                             scale_down_pods=args.scale_down_pods,
-                            scale_down_period_seconds=args.scale_down_period_seconds)
+                            scale_down_period_seconds=args.scale_down_period_seconds,
+                            cpu_hpa_target=args.cpu_hpa_target)
         if args.latency_floor_ms or metric_unit == 'milliseconds':
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
@@ -1571,6 +1591,8 @@ def main(argv=None):
         if args.comparison != 'scaling':
             print(f'Proposed scoring: resource weights={resource_weights}; '
                   f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
+        if args.comparison == 'full':
+            print(f'Baseline CPU HPA target: {args.cpu_hpa_target}% of CPU requests.', flush=True)
         if args.scenario == 'mobility9':
             trajectory = ' -> '.join(':'.join(str(p[f'gnb{s}_ues']) for s in (1, 2, 3)) for p in phases)
             print(f'Mobility scenario ({mobility_direction}): UE splits {trajectory}. '
@@ -1583,7 +1605,7 @@ def main(argv=None):
                            else f'scaling target {internal_target_ms:g} ms p90; reporting SLO {slo_ms:g} ms')
             ue_counts = ' -> '.join(str(p['workload_ue']) for p in phases)
             print(f'Scaling scenario: UE counts {ue_counts}; workload on {SCALER_NODE} with default-scheduler; '
-                  f'CPU HPA (80%) vs latency HPA ({target_desc}), replicas {min_replicas}..{max_replicas}.', flush=True)
+                  f'CPU HPA ({args.cpu_hpa_target}%) vs latency HPA ({target_desc}), replicas {min_replicas}..{max_replicas}.', flush=True)
         if args.fixed_replicas is not None:
             print(f'Fixed placement experiment: {args.fixed_replicas} replicas per method; '
                   'initial Deployment and HPA min/max are equal. Eviction may temporarily reduce readiness.', flush=True)
