@@ -192,7 +192,7 @@ def test_replica_cap_is_identical_in_saved_baseline_hpa_and_proposed_config(tmp_
     assert baseline['min_replicas'] == proposed['min_replicas'] == hpa['spec']['minReplicas']
     assert no_hpa is None
     assert hpa['spec']['metrics'][0]['resource']['target'] == {
-        'type': 'Utilization', 'averageUtilization': 60}
+        'type': 'Utilization', 'averageUtilization': 80}
 
 
 @pytest.mark.parametrize('cap', [0, -1, 1.5, True])
@@ -219,7 +219,7 @@ def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp
         assert config['mobility_query'].endswith('/ 15')
     assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
     assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 30
-    assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
 
 
 def test_normal_hpa_and_proposed_share_15s_interval_and_300s_stabilization(tmp_path):
@@ -775,7 +775,7 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert base_hpa['spec']['maxReplicas'] == 24
     assert base_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
     assert base_hpa['spec']['metrics'][0]['resource']['name'] == 'cpu'
-    assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
 
     assert prop_hpa['spec']['minReplicas'] == 3
     assert prop_hpa['spec']['maxReplicas'] == 24
@@ -794,7 +794,7 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert plan['replica_bounds'] == {'min': 3, 'max': 24}
     assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
     assert plan['hpa_targets'] == {
-        'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
+        'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
         'proposed': {'type': 'latency_p90_ms', 'target': 150},
     }
     assert plan['tc_ms'] == 10

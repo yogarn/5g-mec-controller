@@ -24,7 +24,7 @@ def test_default_factor_backward_compatible(tmp_path):
     assert plan['latency_floor_ms'] == 130
     assert plan['effective_rt_metric_target_ms'] == 20
     assert plan['latency_scaling_formula'] == 'max(RT-floor, 0)/(SLO-floor)'
-    assert plan['hpa_targets']['baseline'] == {'type': 'cpu_utilization_percent', 'target': 60}
+    assert plan['hpa_targets']['baseline'] == {'type': 'cpu_utilization_percent', 'target': 80}
     assert plan['hpa_targets']['proposed'] == {
         'type': 'excess_latency_p90_ms',
         'target': 20,
@@ -33,7 +33,7 @@ def test_default_factor_backward_compatible(tmp_path):
         'metric': 'ue_p90_excess_latency_130ms_seconds',
     }
     assert prop['spec']['metrics'][0]['external']['target']['value'] == '20m'
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
 
 
 def test_raw_mode_slo_150_factor_095(tmp_path):
@@ -64,7 +64,7 @@ def test_raw_mode_slo_150_factor_095(tmp_path):
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
     assert rules[-1]['name']['as'] == 'ue_p90_latency_milliseconds'
     assert '* 1000' in rules[-1]['metricsQuery']
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
     assert base['spec']['behavior'] == prop['spec']['behavior']
     assert base['spec']['minReplicas'] == prop['spec']['minReplicas'] == 3
     assert base['spec']['maxReplicas'] == prop['spec']['maxReplicas'] == 24
@@ -108,7 +108,7 @@ def test_floor_mode_slo_150_floor_130_factor_095(tmp_path):
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
     assert rules[-1]['name']['as'] == 'ue_p90_excess_latency_130ms_milliseconds'
     assert '(clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.13, 0)) * 1000' in rules[-1]['metricsQuery']
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
     assert base['spec']['behavior'] == prop['spec']['behavior']
 
 

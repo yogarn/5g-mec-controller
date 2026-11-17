@@ -168,7 +168,7 @@ The tool inserts only new subscribers; do not reprovision the existing pool. Wri
 
 The application remains in namespace **services**. The runner deletes only the named `mec-placement-face-detection` Deployment/Service and `mec-placement-face-detection-baseline` HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
 
-The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 1 CPU / 512 MiB per-pod limits (limits are twice requests), shared replica ceiling (`--max-replicas`, default 100) and starting replica count of three (override with `--min-replicas`). The CPU baseline HPA uses `averageUtilization: 60`, targeting 300m per pod (60% of the 500m request, or 30% of the 1-CPU limit). Placement-only comparisons use the same latency HPA for both methods. Treat runs with different resource limits or HPA targets as separate experimental configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
+The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 1 CPU / 512 MiB per-pod limits (limits are twice requests), shared replica ceiling (`--max-replicas`, default 100) and starting replica count of three (override with `--min-replicas`). The CPU baseline HPA uses `averageUtilization: 80`, targeting 400m per pod (80% of the 500m request, or 40% of the 1-CPU limit). Placement-only comparisons use the same latency HPA for both methods. Treat runs with different resource limits or HPA targets as separate experimental configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
 
 For both methods, each UE group sends to its own gNB's NodePort, using `site_node_ips` from `experiments/campaign.yaml`. The runner checks these against Kubernetes node InternalIPs. The Service uses `externalTrafficPolicy: Cluster`, `internalTrafficPolicy: Cluster`, no `trafficDistribution` preference, and `sessionAffinity: None`. Verify that the live kube-proxy uses iptables mode: the Service settings alone do not select the proxy mode. In iptables mode, each new connection randomly selects a ready endpoint across the cluster. A node with k of R ready Pods therefore receives approximately k/R of new connections, including core. This is probabilistic balancing, not strict round robin or load-based spillover; reused connections stay on their selected backend. The runner rejects locality preferences and client affinity before starting UE traffic. Routing from each UE through its UPF to its configured NodePort must be verified on the live network; preflight does not prove those paths.
 
@@ -304,7 +304,7 @@ On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one 
 
 ## Scaler-only balanced scenario (`scaler-balanced`)
 
-Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`60%` target) against native latency HPA (`150` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
+Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`80%` target) against native latency HPA (`150` ms p90 target) on `gnb-3` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `gnb-3` allocatable CPU/memory minus active pods can fit `max_replicas`.
 
 ```bash
 # Offline preview (no cluster or network access):
@@ -401,7 +401,12 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
 `--comparison scaling --scenario scaler-staircase`, 120s for every phase, TC 10ms, SLO 150ms,
 5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
-Both methods use default-scheduler on gnb-3,
+Both methods use `default-scheduler` with required node affinity to gnb-3.
+The scheduler honors that restriction; it cannot choose another node. This
+holds placement constant to isolate autoscaling. Mobility and joint comparisons
+allow the four eligible nodes. CPU baseline runs now target 80% of CPU requests;
+retain earlier 60% runs as a separate configuration.
+Both scaling methods use
 replica bounds 3..24, `HTTP_THREADS=5` (explicitly set for both methods),
 requests 500m CPU / 256Mi and limits 1 CPU / 512Mi.
 The rebuilt image digest from core is pinned in both manifests; note that the
@@ -429,7 +434,7 @@ steady state: joint's 300s scale-down stabilization spans several 120s phases.
 The staircase gives both HPAs matched behavior: scale up by at most 2 Pods/30s,
 scale down by at most 1 Pod/30s, scale-down stabilization 60s, and scale-down
 tolerance 0.01. This requires Kubernetes support for per-direction HPA tolerance
-(v1.35 cluster used here). CPU baseline still targets 60% of requests. The `ramp` shortcut now opts into the floor-adjusted variant described below;
+(v1.35 cluster used here). CPU baseline still targets 80% of requests. The `ramp` shortcut now opts into the floor-adjusted variant described below;
 direct scenario invocation keeps raw RT/SLO unless `--latency-floor-ms` is set.
 These settings do not guarantee SLO attainment or full replica convergence;
 integer rounding, metric delay, and floor choice remain limitations.
@@ -454,7 +459,7 @@ The user authorized trying this variant after examining scaler_02. The `ramp`
 shortcut now supplies `--latency-floor-ms 130`. With SLO 150ms, proposed HPA uses
 `ceil(currentReplicas * max(RT - 130ms, 0) / 20ms)`, subject to the existing
 replica bounds, stabilization, tolerance and rate limits. CPU baseline stays
-at 60% of requests, with the matched staircase rate/stabilization settings.
+at 80% of requests, with the matched staircase rate/stabilization settings.
 Reporting still uses the full response time against 150ms, including failures
 and scheduled-request coverage. No Python replica controller is introduced.
 
@@ -519,7 +524,7 @@ and [Prometheus Adapter configuration](https://github.com/kubernetes-sigs/promet
   `142500` or `12500`). Whole-millisecond targets (e.g. `135m`, `5m`, `20m`)
   retain the seconds-unit metrics.
 - **Unchanged evaluation and baseline:** request SLO classification, violation
-  plots, attainment summaries, baseline CPU target (`60%`), replica bounds, and
+  plots, attainment summaries, baseline CPU target (`80%`), replica bounds, and
   HPA behavior remain evaluated against `--slo-ms`. Legacy `--autoscaler
   controller` and `--comparison placement` reject `rt_target_factor != 1.0`
   (placement-only comparisons must share the same latency autoscaler).

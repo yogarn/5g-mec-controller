@@ -14,7 +14,7 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     base = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())
     prop = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
     assert base['spec']['behavior'] == prop['spec']['behavior']
     assert prop['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_excess_latency_130ms_seconds'
     assert prop['spec']['metrics'][0]['external']['target']['value'] == '20m'

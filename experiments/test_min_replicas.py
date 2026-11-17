@@ -65,7 +65,7 @@ def test_min_replicas_2_applies_to_both_methods_and_preserves_scaling_semantics(
     assert prop_cfg['min_replicas'] == 2
 
     # Baseline CPU, proposed RT-only floor metric, factor, behavior, pacing, and timing preserved.
-    assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 60
+    assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
     assert prop_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_excess_latency_130ms_seconds'
     assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '20m'
     assert base_hpa['spec']['behavior'] == prop_hpa['spec']['behavior']

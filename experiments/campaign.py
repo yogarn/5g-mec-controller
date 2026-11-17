@@ -55,7 +55,7 @@ PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
 COMPARISON_NOTES = {
     'placement': 'Comparison A (placement): same latency-ratio autoscaler for both methods; isolates scheduler/descheduler placement.',
     'full': 'Comparison B (full system): default-scheduler + CPU HPA vs full proposed system (autoscaler + scheduler + descheduler); do not attribute results solely to placement.',
-    'scaling': 'Comparison C (scaling): default-scheduler + gnb-3-only required affinity for both methods; native CPU HPA (60% target) vs native latency HPA (target recorded in hpa_targets).',
+    'scaling': 'Comparison C (scaling): default-scheduler + gnb-3-only required affinity for both methods; native CPU HPA (80% target) vs native latency HPA (target recorded in hpa_targets).',
 }
 
 
@@ -1406,13 +1406,13 @@ def main(argv=None):
             hpa_target_value=hpa_target_value,
         )
     hpa_targets = (
-        {'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
+        {'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
          'proposed': proposed_latency_target}
         if args.comparison == 'scaling' else
         {'baseline': {'type': 'latency_p90_ms', 'target': slo_ms},
          'proposed': proposed_latency_target}
         if args.comparison == 'placement' else
-        {'baseline': {'type': 'cpu_utilization_percent', 'target': 60},
+        {'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
          'proposed': proposed_latency_target}
     )
     if args.latency_floor_ms:
@@ -1583,7 +1583,7 @@ def main(argv=None):
                            else f'scaling target {internal_target_ms:g} ms p90; reporting SLO {slo_ms:g} ms')
             ue_counts = ' -> '.join(str(p['workload_ue']) for p in phases)
             print(f'Scaling scenario: UE counts {ue_counts}; workload on {SCALER_NODE} with default-scheduler; '
-                  f'CPU HPA (60%) vs latency HPA ({target_desc}), replicas {min_replicas}..{max_replicas}.', flush=True)
+                  f'CPU HPA (80%) vs latency HPA ({target_desc}), replicas {min_replicas}..{max_replicas}.', flush=True)
         if args.fixed_replicas is not None:
             print(f'Fixed placement experiment: {args.fixed_replicas} replicas per method; '
                   'initial Deployment and HPA min/max are equal. Eviction may temporarily reduce readiness.', flush=True)
