@@ -680,7 +680,10 @@ Control overhead is recorded separately:
   timestamps. `scheduling-delay.csv` separates creation-to-PodScheduled from
   PodScheduled-to-Ready. API timestamps limit precision; zero may mean events
   occurred in the same reported second. This is a lifecycle/queueing proxy,
-  not algorithm execution time. Legacy `deployments-after.json` can recover
+  not algorithm execution time. The scheduling-delay figure shows labelled
+  median bars and observed min–max whiskers in seconds, plus a per-pod table.
+  `scheduling-delay-summary.csv` records summary values and available/observed
+  pod counts; the raw delay CSV retains milliseconds. Legacy `deployments-after.json` can recover
   timestamps only for surviving pods; those rows are marked explicitly.
 - `hpa-action-delay.csv` uses HPA `lastScaleTime`, desired replicas and the
   sampled active/ready pod count to bound scale-request-to-ready delay. Polling

@@ -510,6 +510,8 @@ def _zoom_axes(fig):
                    for patch in ax.patches), default=0)
     values_by_axis = {}
     for ax in fig.axes:
+        if ax.get_gid() in ('summary-bars', 'summary-table'):
+            continue
         values = []
         for line in ax.lines:
             if line.get_marker() in (None, 'None', '', '^') or line.get_gid() == 'phase-bracket':
@@ -522,6 +524,8 @@ def _zoom_axes(fig):
             values.extend(float(v) for v in ys if math.isfinite(float(v)))
         values_by_axis[ax] = values
     for ax in fig.axes:
+        if ax.get_gid() in ('summary-bars', 'summary-table'):
+            continue
         values = [v for sibling in ax.get_shared_y_axes().get_siblings(ax)
                   for v in values_by_axis.get(sibling, [])]
         if ax.patches:
@@ -775,8 +779,13 @@ def _render_node_metrics(output_dir, nodes, rows_by_method, phases, decorate, co
                     else 'No resource measurements', ha='center', transform=ax.transAxes)
         if slo_ms is not None:
             ax.axhline(slo_ms, color='#d62728', linestyle=':', label=f'SLO ({slo_ms:g} ms)')
-        ax.set(title=node, ylabel=ylabel, ylim=(0, None))
+        ax.set(title=node, ylabel=ylabel)
         ax.grid(axis='y', linestyle=':')
+    # Setting a shared y limit while later panels are still being populated
+    # disables autoscaling for the entire group. Fit once after all data exist.
+    measured = [r[key] for rows in rows_by_method.values() for r in rows if math.isfinite(r[key])]
+    maximum = max(measured + ([slo_ms] if slo_ms is not None else []), default=0)
+    axes[0].set_ylim(0, max(1.0, maximum * 1.08))
     axes[0].legend(frameon=False, ncols=3)
     decorate(axes)
     _export_png(fig, output_dir, name)
@@ -834,6 +843,79 @@ def _render_overhead_points(output_dir, rows, key, name, title, lower_key=None):
     _export_png(fig, output_dir, name)
 
 
+def _scheduling_summary(rows):
+    summary = []
+    for key in ('created_to_scheduled_ms', 'scheduled_to_ready_ms'):
+        for method in METHODS:
+            cohort = [r for r in rows if r['method'] == method]
+            measured = [r for r in cohort if math.isfinite(r[key])]
+            values = sorted(r[key] for r in measured)
+            summary.append(dict(metric=key, method=method, available_pods=len(values), observed_pods=len(cohort),
+                                median_ms=_percentile(values, .5) if values else math.nan,
+                                min_ms=min(values) if values else math.nan, max_ms=max(values) if values else math.nan,
+                                cohort_status='legacy_survivors' if any(r['source'] == 'final-snapshot-survivor' for r in measured)
+                                else 'incomplete' if len(values) < len(cohort) else 'complete' if values else 'missing'))
+    return summary
+
+
+def _render_scheduling_delay(output_dir, rows):
+    summary = _scheduling_summary(rows)
+    write_csv_rows(summary, ['metric', 'method', 'available_pods', 'observed_pods', 'median_ms',
+                            'min_ms', 'max_ms', 'cohort_status'], output_dir / 'scheduling-delay-summary.csv')
+    fig = plt.figure(figsize=(THESIS_FIG_WIDTH, max(9, 4.8 + .23 * (len(rows) + 1))), layout='constrained')
+    grid = fig.add_gridspec(3, 1, height_ratios=[1, 1, max(1.5, .14 * len(rows) + .4)])
+    legacy = any(r['source'] == 'final-snapshot-survivor' for r in rows)
+    fig.suptitle('Pod lifecycle delay: median and observed min–max' +
+                 ('\nLegacy snapshot: surviving pods only; incomplete comparison' if legacy else ''))
+    for index, (key, title) in enumerate([
+        ('created_to_scheduled_ms', 'Pod created → PodScheduled condition'),
+        ('scheduled_to_ready_ms', 'PodScheduled → Ready condition'),
+    ]):
+        ax = fig.add_subplot(grid[index])
+        ax.set_gid('summary-bars')
+        group = [r for r in summary if r['metric'] == key]
+        largest = max((r['max_ms'] / 1000 for r in group if math.isfinite(r['max_ms'])), default=0)
+        for pos, row in enumerate(group):
+            count = f"{row['available_pods']}/{row['observed_pods']} pods"
+            if not math.isfinite(row['median_ms']):
+                ax.text(.02, pos, f'Not recorded ({count})', va='center', transform=ax.get_yaxis_transform())
+                continue
+            median, low, high = [row[k] / 1000 for k in ('median_ms', 'min_ms', 'max_ms')]
+            ax.barh(pos, median, height=.45, color=METHOD_COLORS[row['method']],
+                    xerr=[[median - low], [high - median]], capsize=4)
+            label = f'{median:g} s; {count}' if median else f'Same reported second*; {count}'
+            ax.annotate(label, (high, pos), xytext=(5, 0), textcoords='offset points', va='center', fontsize=8)
+        ax.set(title=title, xlabel='Delay (seconds); bars = median, whiskers = min–max',
+               yticks=[0, 1], yticklabels=['Baseline', 'Proposed'], ylim=(1.6, -.6),
+               xlim=(0, max(1.5, largest * 1.5)))
+        ax.grid(axis='x', linestyle=':')
+        ax.set_axisbelow(True)
+    table_ax = fig.add_subplot(grid[2])
+    table_ax.set_gid('summary-table')
+    table_ax.axis('off')
+    table_ax.set_title('Per-pod recorded delays (seconds); full identifiers are in scheduling-delay.csv', fontsize=9)
+    def seconds(value):
+        return '—' if not math.isfinite(value) else '0*' if value == 0 else f'{value / 1000:g}'
+    table_rows = [[METHOD_LABELS[r['method']], r['pod'].rsplit('-', 1)[-1], r.get('node') or '—',
+                   seconds(r['created_to_scheduled_ms']), seconds(r['scheduled_to_ready_ms']),
+                   'Final snapshot' if r['source'] == 'final-snapshot-survivor' else 'Sampled'] for r in rows]
+    if table_rows:
+        table = table_ax.table(cellText=table_rows,
+                               colLabels=['Method', 'Pod suffix', 'Node', 'Created →\nscheduled (s)', 'Scheduled →\nready (s)', 'Source'],
+                               cellLoc='center', colWidths=[.14, .13, .12, .19, .19, .23], bbox=[0, 0, 1, 1])
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        for (row, _column), cell in table.get_celld().items():
+            if row == 0:
+                cell.set_text_props(weight='bold')
+                cell.set_facecolor('#eeeeee')
+    else:
+        table_ax.text(.5, .5, 'No pod lifecycle timestamps were recorded', ha='center', transform=table_ax.transAxes)
+    fig.supxlabel('— = not recorded. *Same-second timestamps do not mean zero execution time.\n'
+                  'These are API lifecycle delays, not algorithm timings; available/observed counts show missing records.', fontsize=8)
+    _export_png(fig, output_dir, 'scheduling-delay')
+
+
 def _render_control_overhead(args):
     datasets = {
         'scheduling-delay': (scheduling_delays, ['pod', 'uid', 'node', 'scheduler', 'created_at', 'scheduled_at', 'ready_at',
@@ -882,24 +964,7 @@ def _render_control_overhead(args):
         rows = [r for r in captured['proposed-decision-execution'] if r['operation'] == operation]
         _render_overhead_points(args.output_dir, rows, 'execution_ms', f'proposed-{operation}-execution',
                                'Proposed controller: ' + operation + '\nStage timing only; no equivalent default-scheduler stage is recorded')
-    rows = captured['scheduling-delay']
-    fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6), layout='constrained')
-    legacy = any(r['source'] == 'final-snapshot-survivor' for r in rows)
-    fig.suptitle('Pod lifecycle delay (queueing and startup included)' + ('\nLegacy snapshot: survivors only; incomplete cohort' if legacy else ''))
-    for ax, key, title in zip(axes, ['created_to_scheduled_ms', 'scheduled_to_ready_ms'],
-                              ['Pod created → PodScheduled condition', 'PodScheduled → Ready condition']):
-        finite = False
-        for index, method in enumerate(METHODS):
-            values = [r[key] for r in rows if r['method'] == method and math.isfinite(r[key])]
-            finite |= bool(values)
-            xs = [index + .2 * (i / max(1, len(values) - 1) - .5) for i in range(len(values))]
-            ax.plot(xs, values, linestyle='None', marker='o', color=METHOD_COLORS[method], label=f'{METHOD_LABELS[method]} (n={len(values)})')
-        if not finite:
-            ax.text(.5, .5, 'Lifecycle timestamps were not recorded', transform=ax.transAxes, ha='center')
-        ax.set(title=title, ylabel='Delay (ms)', ylim=(0, None), xticks=[0, 1], xticklabels=['Baseline', 'Proposed'], xlim=(-.5, 1.5))
-        ax.grid(axis='y', linestyle=':')
-        ax.legend(frameon=False, ncols=2)
-    _export_png(fig, args.output_dir, 'scheduling-delay')
+    _render_scheduling_delay(args.output_dir, captured['scheduling-delay'])
 
 
 def main():

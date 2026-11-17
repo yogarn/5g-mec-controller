@@ -510,3 +510,57 @@ def test_zoom_bars_preserve_zero_and_total_stacked_height():
     low, high = ax.get_ylim()
     assert low == 0 and high > 8
     plt.close(fig)
+
+
+@pytest.mark.parametrize('key', ['cpu_millicores', 'memory_mib'])
+def test_normal_node_limits_cover_later_proposed_peaks_and_empty_last_node(tmp_path, monkeypatch, key):
+    import matplotlib.pyplot as plt
+    from utils import plot_autoscaler
+    rows = {method: [dict(node=node, phase='p', aligned_end_s=15, **{key: value})
+                     for node, value in zip(['first', 'later', 'empty'], values)]
+            for method, values in [('baseline', [1, 2, 0]), ('proposed', [2, 500, 0])]}
+    captured = {}
+    def capture(fig, directory, name):
+        captured['limits'] = [ax.get_ylim() for ax in fig.axes]
+        captured['values'] = [[float(v) for line in ax.lines for v in line.get_ydata()] for ax in fig.axes]
+        plt.close(fig)
+    monkeypatch.setattr(plot_autoscaler, '_export_png', capture)
+    plot_autoscaler._render_node_metrics(tmp_path, ['first', 'later', 'empty'], rows, ['p'],
+                                         lambda axes: None, True, key, 'Resources', 'Usage', 'node-test')
+    assert len(set(captured['limits'])) == 1
+    for (low, high), values in zip(captured['limits'], captured['values']):
+        assert low == 0 and high > 500
+        assert all(low <= v <= high for v in values)
+
+
+def test_scheduling_summary_reports_missing_cohort_and_readable_same_second_values(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    from utils import plot_autoscaler
+    rows = [dict(method='baseline', pod='pod-base', node='n1', created_to_scheduled_ms=0,
+                 scheduled_to_ready_ms=10000, source='sampled-pod-lifecycle'),
+            dict(method='proposed', pod='pod-prop', node='n2', created_to_scheduled_ms=1000,
+                 scheduled_to_ready_ms=12000, source='final-snapshot-survivor'),
+            dict(method='proposed', pod='pod-missing', node='n2', created_to_scheduled_ms=math.nan,
+                 scheduled_to_ready_ms=math.nan, source='sampled-pod-lifecycle')]
+    summary = plot_autoscaler._scheduling_summary(rows)
+    proposed = next(r for r in summary if r['method'] == 'proposed' and r['metric'] == 'created_to_scheduled_ms')
+    assert proposed['available_pods'] == 1 and proposed['observed_pods'] == 2
+    assert proposed['median_ms'] == proposed['min_ms'] == proposed['max_ms'] == 1000
+    assert proposed['cohort_status'] == 'legacy_survivors'
+    captured = {}
+    def capture(fig, directory, name):
+        captured['labels'] = [text.get_text() for ax in fig.axes for text in ax.texts]
+        captured['bars'] = [patch.get_width() for ax in fig.axes[:2] for patch in ax.patches]
+        captured['table'] = [cell.get_text().get_text() for table in fig.axes[-1].tables for cell in table.get_celld().values()]
+        limits = [ax.get_ylim() for ax in fig.axes]
+        plot_autoscaler._zoom_axes(fig)
+        assert [ax.get_ylim() for ax in fig.axes] == limits
+        plt.close(fig)
+    monkeypatch.setattr(plot_autoscaler, '_export_png', capture)
+    plot_autoscaler._render_scheduling_delay(tmp_path, rows)
+    assert any('Same reported second' in label for label in captured['labels'])
+    assert any('1/2 pods' in label for label in captured['labels'])
+    assert captured['bars'] == [0, 1, 10, 12]  # seconds, not unlabelled millisecond dots
+    assert '—' in captured['table'] and 'Final snapshot' in captured['table']
+    with (tmp_path/'scheduling-delay-summary.csv').open() as stream:
+        assert len(list(csv.DictReader(stream))) == 4
