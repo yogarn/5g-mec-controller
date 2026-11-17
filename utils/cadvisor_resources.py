@@ -226,7 +226,7 @@ def _memory_mib_at(samples, t_eval, freshness_s):
     return prior[-1][1] / (1024.0 * 1024.0), prior[-1][0], 'ok'
 
 
-def _load_running_lookup(metrics_jsonl_path):
+def _load_running_lookup(metrics_jsonl_path, node=None):
     if metrics_jsonl_path is None or not Path(metrics_jsonl_path).exists():
         return lambda _when: None
     samples = [json.loads(line) for line in Path(metrics_jsonl_path).read_text().splitlines() if line.strip()]
@@ -237,7 +237,10 @@ def _load_running_lookup(metrics_jsonl_path):
         index = bisect_right(sample_times, when) - 1
         if index < 0 or when - sample_times[index] > POD_LOOKUP_MAX_AGE_S:
             return None
-        return frozenset(p['name'] for p in valid[index]['pods'] if p['phase'] == 'Running')
+        running = [p for p in valid[index]['pods'] if p.get('phase') == 'Running']
+        if node is not None and any(not p.get('node') for p in running):
+            return None
+        return frozenset(p['name'] for p in running if node is None or p['node'] == node)
 
     return running_at
 

@@ -14,6 +14,7 @@ import time
 from bisect import bisect_right
 from datetime import datetime
 from pathlib import Path
+from utils.control_overhead import pod_timing_fields
 
 LABEL = 'app=mec-placement-face-detection'
 PREFIX = 'mec-placement-face-detection-'
@@ -87,7 +88,8 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
                         continue
                     rows.append({'name': metadata['name'], 'node': pod.get('spec', {}).get('nodeName') or '<pending>',
                                  'phase': status.get('phase'),
-                                 'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', []))})
+                                 'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', [])),
+                                 **{k: v for k, v in pod_timing_fields(pod).items() if v is not None}})
                     cs_list = status.get('containerStatuses') or []
                     if cs_list:
                         term_reasons = []

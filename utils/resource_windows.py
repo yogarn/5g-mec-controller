@@ -24,7 +24,7 @@ def _instances_at(series, containers, running, when):
     return {key: val[1] for key, val in selected.items()}
 
 
-def build_resource_windows(method_dir, windows):
+def build_resource_windows(method_dir, windows, node=None):
     """Average complete 5s evaluations within each reporting window.
 
     CPU retains the archived rate-window setting (normally 45s); these are
@@ -37,7 +37,7 @@ def build_resource_windows(method_dir, windows):
     prefix = prom.get('pod_prefix', 'mec-placement-face-detection-')
     cpu, _, cpu_containers, _ = _dedupe_series(result.get('cpu_seconds_total', []), prefix)
     memory, _, mem_containers, _ = _dedupe_series(result.get('memory_working_set_bytes', []), prefix)
-    running_at = (_load_running_lookup(directory / 'metrics.jsonl') if prom else lambda when: None)
+    running_at = (_load_running_lookup(directory / 'metrics.jsonl', node=node) if prom else lambda when: None)
     step = float(prom.get('step_seconds', DEFAULT_SCRAPE_INTERVAL_S))
     rate_window = float(prom.get('rate_window_seconds', DEFAULT_RATE_WINDOW_S))
     freshness = float(prom.get('freshness_seconds', DEFAULT_FRESHNESS_S))
@@ -94,6 +94,8 @@ def build_resource_windows(method_dir, windows):
                 else:
                     reasons.add(f'incomplete_{metric}')
         row = dict(win)
+        if node is not None:
+            row['node'] = node
         row.update(resource_source='prometheus-cadvisor', rate_window_seconds=rate_window,
                    freshness_seconds=freshness, evaluation_step_seconds=step,
                    expected_samples=len(times), missing_reasons=';'.join(sorted(reasons)))

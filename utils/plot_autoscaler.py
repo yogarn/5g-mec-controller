@@ -23,6 +23,10 @@ from utils.cadvisor_resources import POD_LOOKUP_MAX_AGE_S
 from utils.phase_windows import summarize_windows, write_windows
 from utils.transient_analysis import _percentile
 from utils.resource_windows import build_resource_windows
+from utils.node_windows import build_node_request_windows
+from utils.control_overhead import (
+    scheduling_delays, hpa_action_delays, component_execution_windows, proposed_execution_records,
+)
 
 METHODS = ("baseline", "proposed")
 STYLES = {"baseline": "--", "proposed": "-"}
@@ -496,8 +500,45 @@ def compute_aligned_timeline(phases, durations):
     return bounds, cursor
 
 
+def _zoom_axes(fig):
+    """Fit all measured values, never clip outliers or use a threshold as data.
+
+    Synthetic origins are omitted from the zoom view. Stacked bars retain zero
+    and share limits, so lengths remain comparable between methods.
+    """
+    bar_max = max((patch.get_y() + patch.get_height() for ax in fig.axes
+                   for patch in ax.patches), default=0)
+    values_by_axis = {}
+    for ax in fig.axes:
+        values = []
+        for line in ax.lines:
+            if line.get_marker() in (None, 'None', '', '^') or line.get_gid() == 'phase-bracket':
+                continue
+            ys = list(line.get_ydata())
+            xs = list(line.get_xdata())
+            if line.get_gid() == 'window-series' and xs and xs[0] == 0 and ys[0] == 0:
+                ys[0] = math.nan
+                line.set_ydata(ys)
+            values.extend(float(v) for v in ys if math.isfinite(float(v)))
+        values_by_axis[ax] = values
+    for ax in fig.axes:
+        values = [v for sibling in ax.get_shared_y_axes().get_siblings(ax)
+                  for v in values_by_axis.get(sibling, [])]
+        if ax.patches:
+            ax.set_ylim(0, max(1, bar_max * 1.08))
+        elif values:
+            low, high = min(values), max(values)
+            pad = max((high - low) * .05, abs(high) * .005, .01)
+            ax.set_ylim(max(0, low - pad), high + pad)
+    if fig._suptitle:
+        title = fig._suptitle.get_text().replace(ORIGIN_NOTE, 'Auto y range; display origin omitted; all measured points retained')
+        fig.suptitle(title + ' (zoom)')
+
+
 def _export_png(fig, output_dir, name):
     fig.savefig(Path(output_dir) / f"{name}.png", dpi=300)
+    _zoom_axes(fig)
+    fig.savefig(Path(output_dir) / f"{name}_zoom.png", dpi=300)
     plt.close(fig)
 
 
@@ -616,7 +657,7 @@ def _render_resource_windows(output_dir, phases, rows_by_method, decorate, conti
         for method in METHODS:
             for pi, points in enumerate(groups(method)):
                 finite |= any(math.isfinite(r[key]) for r in points)
-                ax.plot(*_window_points(points, key),
+                ax.plot(*_window_points(points, key), gid='window-series',
                         linestyle=STYLES[method], color=METHOD_COLORS[method], marker='o', markersize=3,
                         label=METHOD_LABELS[method] if pi == 0 else None)
         if not finite:
@@ -714,6 +755,153 @@ def _render_phase_summary_fallbacks(output_dir, phases, summaries, violations, c
     _export_png(fig, output_dir, "pod-placement-phase-summary")
 
 
+def _render_node_metrics(output_dir, nodes, rows_by_method, phases, decorate, continuous, key, title, ylabel, name, slo_ms=None):
+    fig, axes = plt.subplots(len(nodes), 1, figsize=(THESIS_FIG_WIDTH, 2.0 * len(nodes) + 2),
+                             sharex=True, sharey=True, layout='constrained', squeeze=False)
+    axes = list(axes[:, 0])
+    fig.suptitle(title + '\n15-second windows; common y scale across nodes')
+    for ax, node in zip(axes, nodes):
+        available = False
+        for method in METHODS:
+            points = [r for r in rows_by_method[method] if r['node'] == node]
+            groups = [points] if continuous else [[r for r in points if r['phase'] == p] for p in phases]
+            for index, pts in enumerate(groups):
+                available |= any(math.isfinite(r[key]) for r in pts)
+                ax.plot([r['aligned_end_s'] for r in pts], [r[key] for r in pts],
+                        linestyle=STYLES[method], color=METHOD_COLORS[method], marker='o', markersize=2,
+                        label=METHOD_LABELS[method] if index == 0 else None)
+        if not available:
+            ax.text(.5, .5, 'No attributed requests' if key in ('p50_ms', 'p90_ms', 'violation_percent')
+                    else 'No resource measurements', ha='center', transform=ax.transAxes)
+        if slo_ms is not None:
+            ax.axhline(slo_ms, color='#d62728', linestyle=':', label=f'SLO ({slo_ms:g} ms)')
+        ax.set(title=node, ylabel=ylabel, ylim=(0, None))
+        ax.grid(axis='y', linestyle=':')
+    axes[0].legend(frameon=False, ncols=3)
+    decorate(axes)
+    _export_png(fig, output_dir, name)
+
+
+def _render_per_node(args, phases, nodes, windows, phase_bounds, decorate, continuous):
+    nodes = [node for node in nodes if not node.startswith('<')]
+    if not nodes:
+        return
+    resources, requests = {}, {}
+    for method in METHODS:
+        resources[method] = [row for node in nodes for row in build_resource_windows(args.results_dir / method, windows[method], node=node)]
+        requests[method] = build_node_request_windows(args.results_dir / method, windows[method], nodes, args.slo_ms)
+        for row in resources[method] + requests[method]:
+            row['method'] = method
+            row['aligned_end_s'] = phase_bounds[row['phase']][0] + row['end_offset_s']
+    base = ['method', 'node', 'phase', 'window_index', 'actual_start_time', 'actual_end_time', 'aligned_end_s']
+    write_csv_rows([r for rows in resources.values() for r in rows], base + [
+        'cpu_millicores', 'memory_mib', 'rate_window_seconds', 'evaluation_step_seconds',
+        'expected_samples', 'cpu_complete_samples', 'memory_complete_samples', 'missing_reasons',
+    ], args.output_dir / 'resource-windows-by-node-15s.csv')
+    write_csv_rows([r for rows in requests.values() for r in rows], base + [
+        'attempts', 'successes', 'failures', 'p50_ms', 'p90_ms', 'violation_percent',
+        'all_window_attempts', 'unattributed_attempts', 'attribution_percent',
+    ], args.output_dir / 'request-windows-by-node-15s.csv')
+    for key, title, ylabel, name in [
+        ('cpu_millicores', 'Workload pod CPU by execution node (rolling CPU rate)', 'CPU (millicores)', 'cpu-by-node'),
+        ('memory_mib', 'Workload pod working-set memory by execution node', 'Memory (MiB)', 'memory-by-node'),
+        ('p90_ms', 'Successful-request P90 by serving node', 'Response time (ms)', 'response-time-p90-by-node'),
+        ('p50_ms', 'Successful-request P50 by serving node', 'Response time (ms)', 'response-time-p50-by-node'),
+        ('violation_percent', 'SLO violations among requests attributed to each serving node', 'SLO violations (%)', 'slo-violations-by-node'),
+    ]:
+        _render_node_metrics(args.output_dir, nodes, resources if key in ('cpu_millicores', 'memory_mib') else requests,
+                             phases, decorate, continuous, key, title, ylabel, name,
+                             slo_ms=args.slo_ms if key in ('p90_ms', 'p50_ms') else None)
+
+
+def _render_overhead_points(output_dir, rows, key, name, title, lower_key=None):
+    if not any(math.isfinite(r.get(key, math.nan)) for r in rows):
+        return
+    fig, ax = plt.subplots(figsize=(THESIS_FIG_WIDTH, 4), layout='constrained')
+    fig.suptitle(title)
+    for index, method in enumerate(METHODS):
+        measured = [r for r in rows if r['method'] == method and math.isfinite(r.get(key, math.nan))]
+        xs = [index + .2 * (i / max(1, len(measured) - 1) - .5) for i in range(len(measured))]
+        ys = [r[key] for r in measured]
+        if lower_key:
+            ax.errorbar(xs, ys, yerr=[[r[key] - r[lower_key] for r in measured], [0] * len(measured)],
+                        fmt='none', color=METHOD_COLORS[method], capsize=3)
+        ax.plot(xs, ys, linestyle='None', marker='o', color=METHOD_COLORS[method], label=f'{METHOD_LABELS[method]} (n={len(ys)})')
+    ax.set(xticks=[0, 1], xticklabels=['Baseline run', 'Proposed run'], xlim=(-.5, 1.5),
+           ylabel='Elapsed wall time (ms)', ylim=(0, None))
+    ax.grid(axis='y', linestyle=':')
+    ax.legend(frameon=False, ncols=2)
+    _export_png(fig, output_dir, name)
+
+
+def _render_control_overhead(args):
+    datasets = {
+        'scheduling-delay': (scheduling_delays, ['pod', 'uid', 'node', 'scheduler', 'created_at', 'scheduled_at', 'ready_at',
+            'created_to_scheduled_ms', 'scheduled_to_ready_ms', 'status', 'source', 'scope']),
+        'hpa-action-delay': (hpa_action_delays, ['hpa', 'action_time', 'decision_observed_at', 'target_replicas',
+            'settled_observed_at', 'scale_to_ready_ms_lower', 'scale_to_ready_ms_upper', 'status']),
+        'native-component-execution': (component_execution_windows, ['start_time', 'end_time', 'operation', 'labels',
+            'observations', 'mean_execution_ms', 'duration_sum_ms', 'status', 'scope']),
+        'proposed-decision-execution': (proposed_execution_records, ['operation', 'pod', 'execution_ms', 'source']),
+    }
+    captured = {}
+    availability = {}
+    for name, (builder, fields) in datasets.items():
+        captured[name] = []
+        availability[name] = {}
+        for method in METHODS:
+            rows = builder(args.results_dir / method)
+            captured[name].extend(dict(method=method, **row) for row in rows)
+            availability[name][method] = dict(rows=len(rows), measured=sum(
+                row.get('status') in ('measured', 'observed_settled') or 'execution_ms' in row for row in rows))
+        write_csv_rows(captured[name], ['method'] + fields, args.output_dir / f'{name}.csv')
+    notes = [
+        'Execution time is separate from scheduling/action delay. Empty durations mean unavailable, never zero.',
+        'PodCreated to PodScheduled uses API timestamps, including queueing/status propagation; precision is limited by those timestamps.',
+        'Legacy final-snapshot-survivor rows omit evicted pods and cannot establish an unbiased scheduling-overhead comparison.',
+        'HPA scale-to-ready delay has polling bounds; superseded and unfinished actions remain missing.',
+        'Native histogram means use counter differences between samples; all native series have cluster scope and may include background workloads.',
+        'Proposed scheduler_snapshot includes telemetry/API reads; scheduler_score times ScoreCandidateNode only; scheduler_bind times the Binding API call.',
+        'Native scheduling algorithm and proposed score are different execution scopes; they are not a like-for-like algorithm benchmark.',
+        'Old runs do not contain execution metrics. New proposed timing logs require rebuilding/deploying the updated placement-controller image.',
+    ]
+    (args.output_dir / 'control-overhead-availability.json').write_text(json.dumps(dict(availability=availability, notes=notes), indent=2) + '\n')
+    _render_overhead_points(args.output_dir, captured['hpa-action-delay'], 'scale_to_ready_ms_upper',
+                            'hpa-action-delay', 'HPA scale request → settled ready target (polling bounds)', 'scale_to_ready_ms_lower')
+    native_names = {
+        'scheduler_scheduling_algorithm_duration_seconds': 'native-scheduler-algorithm-execution',
+        'scheduler_scheduling_attempt_duration_seconds': 'native-scheduler-attempt-execution',
+        'horizontal_pod_autoscaler_controller_reconciliation_duration_seconds': 'native-hpa-reconciliation-execution',
+        'horizontal_pod_autoscaler_controller_metric_computation_duration_seconds': 'native-hpa-metric-execution',
+    }
+    for operation, name in native_names.items():
+        rows = [r for r in captured['native-component-execution'] if r['operation'] == operation]
+        _render_overhead_points(args.output_dir, rows, 'mean_execution_ms', name,
+                               name.replace('-', ' ') + '\nCluster-wide; points are sampled-interval means, not individual decisions')
+    for operation in sorted({r['operation'] for r in captured['proposed-decision-execution']}):
+        rows = [r for r in captured['proposed-decision-execution'] if r['operation'] == operation]
+        _render_overhead_points(args.output_dir, rows, 'execution_ms', f'proposed-{operation}-execution',
+                               'Proposed controller: ' + operation + '\nStage timing only; no equivalent default-scheduler stage is recorded')
+    rows = captured['scheduling-delay']
+    fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6), layout='constrained')
+    legacy = any(r['source'] == 'final-snapshot-survivor' for r in rows)
+    fig.suptitle('Pod lifecycle delay (queueing and startup included)' + ('\nLegacy snapshot: survivors only; incomplete cohort' if legacy else ''))
+    for ax, key, title in zip(axes, ['created_to_scheduled_ms', 'scheduled_to_ready_ms'],
+                              ['Pod created → PodScheduled condition', 'PodScheduled → Ready condition']):
+        finite = False
+        for index, method in enumerate(METHODS):
+            values = [r[key] for r in rows if r['method'] == method and math.isfinite(r[key])]
+            finite |= bool(values)
+            xs = [index + .2 * (i / max(1, len(values) - 1) - .5) for i in range(len(values))]
+            ax.plot(xs, values, linestyle='None', marker='o', color=METHOD_COLORS[method], label=f'{METHOD_LABELS[method]} (n={len(values)})')
+        if not finite:
+            ax.text(.5, .5, 'Lifecycle timestamps were not recorded', transform=ax.transAxes, ha='center')
+        ax.set(title=title, ylabel='Delay (ms)', ylim=(0, None), xticks=[0, 1], xticklabels=['Baseline', 'Proposed'], xlim=(-.5, 1.5))
+        ax.grid(axis='y', linestyle=':')
+        ax.legend(frameon=False, ncols=2)
+    _export_png(fig, args.output_dir, 'scheduling-delay')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_dir", type=Path, help="directory containing baseline/ and proposed/ CSV inputs")
@@ -740,6 +928,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # Remove the retired generated view when replotting an existing directory.
     (args.output_dir / 'late-phase.png').unlink(missing_ok=True)
+    (args.output_dir / 'response-time-zoom.png').unlink(missing_ok=True)
 
     if not has_requests:
         print(
@@ -859,7 +1048,7 @@ def main():
                 labeled = False
                 for pts in window_groups(method):
                     xs, ys = _window_points(pts, key)
-                    ax.plot(xs, ys, linestyle=STYLES[method], color=color, marker="o", markersize=3,
+                    ax.plot(xs, ys, gid="window-series", linestyle=STYLES[method], color=color, marker="o", markersize=3,
                             label=METHOD_LABELS[method] if not labeled else None)
                     labeled = True
             if key == "p90_ms":
@@ -871,29 +1060,10 @@ def main():
         decorate(axes)
         _export_png(fig, args.output_dir, "response-time")
 
-        fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
-        # Preserve phase diagnostic exports for existing analysis consumers.
+        # Keep phase diagnostic CSVs; every metric now gets an auto-range zoom.
         for method in METHODS:
             write_windows(summarize_windows(args.results_dir / method, args.slo_ms),
                           args.output_dir / f'{method}-phase-windows.csv')
-        fig.suptitle('Response time: 15-second windows, zoomed\n' + ORIGIN_NOTE)
-        for ax, key in zip(axes, ('p90_ms', 'p50_ms')):
-            for method in METHODS:
-                for index, pts in enumerate(window_groups(method)):
-                    xs, values = _window_points(pts, key)
-                    clipped = [min(v, 300) if math.isfinite(v) else math.nan for v in values]
-                    ax.plot(xs, clipped, linestyle=STYLES[method], color=METHOD_COLORS[method],
-                            marker='o', markersize=3, label=METHOD_LABELS[method] if index == 0 else None)
-                    for x, value in zip(xs, values):
-                        if math.isfinite(value) and value > 300:
-                            ax.plot(x, 295, marker='^', color=METHOD_COLORS[method], markersize=4)
-            ax.axhline(args.slo_ms, color='#d62728', linestyle='--', label=f'SLO ({args.slo_ms:g} ms)')
-            ax.set(ylim=(0, 300), ylabel='Response time (ms)',
-                   title=f"Successful-request {key.split('_')[0]} over preceding 15-second window (zoom ≤ 300 ms)")
-            ax.grid(axis='y', linestyle=':')
-            ax.legend(frameon=False, ncols=3)
-        decorate(axes)
-        _export_png(fig, args.output_dir, 'response-time-zoom')
 
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
         fig.suptitle("SLO violations and request coverage\n" + ORIGIN_NOTE)
@@ -908,7 +1078,7 @@ def main():
                     r["request_coverage_percent"] if r["request_coverage_percent"] != "" else math.nan
                     for r in pts
                 ]
-                ax.plot(xs, viol_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
+                ax.plot(xs, viol_vals, gid="window-series", linestyle=STYLES[method], color=color, marker="o", markersize=3,
                         label=METHOD_LABELS[method] if not labeled else None)
                 cov_ax.plot(cov_xs, cov_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
                             label=METHOD_LABELS[method] if not labeled else None)
@@ -967,6 +1137,8 @@ def main():
             'memory_complete_samples', 'cpu_coverage_percent', 'memory_coverage_percent', 'missing_reasons',
         ], args.output_dir / 'resource-windows-15s.csv')
         _render_resource_windows(args.output_dir, phases, resource_rows, decorate, continuous=continuous)
+        _render_per_node(args, phases, nodes, windows_15s, phase_bounds, decorate, continuous)
+        _render_control_overhead(args)
         _render_resource_summary(
             args.output_dir, phases, resources, resource_coverage, compact_labels,
             phase_bounds=phase_bounds, total_traffic_s=total_traffic_s,

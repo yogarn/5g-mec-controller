@@ -406,18 +406,14 @@ These settings do not guarantee SLO attainment or full replica convergence;
 integer rounding, metric delay, and floor choice remain limitations.
 Do not label this configuration as the unchanged default-HPA comparison.
 
-Plots preserve the full-range `response-time` figure. `response-time-zoom` adds
-a 0–300ms whole-phase panel and a final-60s panel, with all values above 300ms
-marked and labelled. `late-phase` also shows final-60s latency on an unrestricted
-axis and all-attempt violation percentages. `{method}-phase-windows.csv` records
-whole-phase and late-phase latency, failures, exact scheduled-slot coverage and
-scheduled SLO attainment when slot metadata exists. Request latency is grouped
-by dispatch time; coverage is grouped by scheduled slot. Missing slot metadata
-leaves coverage unknown. Late-phase measurements are not automatically steady
-state. Check the retained pod/HPA timeline for convergence; do not average away
-or discard the transition costs. These request windows do not change cAdvisor
-resource-window semantics. With 60s phases, the final-60s request window covers
-the entire phase and gives no separate evidence of settling.
+Plots preserve the regular `response-time` figure and write auto-range `_zoom`
+variants for every metric, without clipping measured outliers. Per-node CPU,
+RAM, response-time and SLO views use archived pod and serving-node identities.
+`{method}-phase-windows.csv` retains whole-phase and final-60s diagnostics for
+existing analysis consumers; the separate `late-phase` plot is retired. Final-60s
+measurements are not automatically steady state. Check the pod/HPA timeline for
+convergence and retain transition costs. See the auto-range/per-node/control
+section below for current filenames, sampling semantics and timing limitations.
 
 Frozen results and `scaler_02` retain their original parameters. This is a new
 exploratory configuration following inspection of those runs; preserve both.
@@ -650,3 +646,63 @@ for scaling/joint. `--config`, `--slo-ms`, `--tc-ms`, `--rps-per-ue`,
 accepts `--latency-floor-ms`; set it explicitly to 0 for a raw-RT smoke comparison.
 The wrapper does not rebuild images or change image digests. Build and validate
 the HTTP-thread-capable image before attributing a smoke run to five HTTP threads.
+
+## Auto-range zooms, per-node plots and control overhead
+
+`utils.plot_autoscaler` now writes a `<metric>_zoom.png` beside every regular
+figure. Zoom limits fit all finite measured values from both methods, with a
+small margin. Synthetic (0,0) display origins are omitted from zooms; missing
+windows remain gaps and outliers are not clipped. Stacked placement bars keep
+a zero baseline. Per-node panels use common scales. The former fixed 0–300ms
+`response-time-zoom.png` view is retired.
+
+Per-node outputs include `cpu-by-node`, `memory-by-node`,
+`response-time-p50-by-node`, `response-time-p90-by-node`, and
+`slo-violations-by-node` (each with a `_zoom` copy). Resources are workload pod
+usage grouped by the execution node, not whole-host utilization. Requests are
+grouped by `server_node`, not the UE site. Requests without a known serving node
+remain unattributed; the node CSV exports their count and attribution coverage.
+Per-node SLO percentages are conditional on attributed attempts. The aggregate
+SLO figure continues to include all attempts, including failures without headers.
+A node with no requests has missing latency, not zero latency. A freshly observed
+node with no Running workload pods has measured zero workload resources.
+
+CPU is a counter-derived rate over available samples in the preceding 45s,
+reported every 15s. That lookback can cross a phase boundary and is not a reporting
+interval. RAM is sampled working set. Replacement pods can have smaller working
+sets while loading/warming, so eviction/replacement can cause a temporary RAM dip
+even with a fixed desired replica count. Resource totals include Running unready
+pods, omit removed pods, and retain incomplete CPU evaluations as missing.
+
+Control overhead is recorded separately:
+
+- `metrics.jsonl` saves pod UID, scheduler, creation, PodScheduled and Ready
+  timestamps. `scheduling-delay.csv` separates creation-to-PodScheduled from
+  PodScheduled-to-Ready. API timestamps limit precision; zero may mean events
+  occurred in the same reported second. This is a lifecycle/queueing proxy,
+  not algorithm execution time. Legacy `deployments-after.json` can recover
+  timestamps only for surviving pods; those rows are marked explicitly.
+- `hpa-action-delay.csv` uses HPA `lastScaleTime`, desired replicas and the
+  sampled active/ready pod count to bound scale-request-to-ready delay. Polling
+  sets the bounds. Superseded, unfinished and pre-recording actions stay missing.
+  Fixed-replica mobility normally has no HPA scaling actions to time.
+- A separate `utils.control_overhead` process archives selected native scheduler
+  and HPA histograms from Kubernetes `/metrics` into `control-overhead.jsonl`,
+  starting with a snapshot before deployment. `native-component-execution.csv`
+  uses histogram sum/count differences to report mean execution wall time per
+  observed interval, with action/error/metric-type labels preserved. Process
+  restarts, counter resets, collection failures and long gaps are not interpolated.
+  These metrics have **cluster-wide scope** and may include background work;
+  they are not automatically attributable to the experiment's HPA or pods.
+- The Go controller logs monotonic timers for `scheduler_snapshot` (telemetry/API
+  reads), `scheduler_score` (ScoreCandidateNode only), `scheduler_bind` (Binding
+  API call), and `descheduler_score` (SelectDescheduleCandidate only). These export
+  to `proposed-decision-execution.csv`. **Rebuild and deploy the controller image
+  for the new timers to run.** Native scheduler algorithm time and proposed score
+  time have different scopes; they do not establish a matched algorithm benchmark.
+
+Available HPA action and execution measurements get regular and `_zoom` figures.
+`control-overhead-availability.json` states which measurements exist. Old runs
+cannot provide execution durations that were never recorded; no timing is inferred
+from gaps between log messages. These figures are descriptive; repeat runs and
+account for background work before drawing overhead comparisons.

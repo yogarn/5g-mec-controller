@@ -180,6 +180,12 @@ func TestSchedulerBindingInFlightDeduplicationAndCapacity(t *testing.T) {
 		t.Fatalf("unexpected bound results: %+v", res)
 	}
 
+	for _, operation := range []string{"scheduler_snapshot", "scheduler_score", "scheduler_bind"} {
+		if !strings.Contains(logs.String(), "decision timing operation="+operation+" duration_ms=") {
+			t.Fatalf("missing monotonic stage timer %s in %s", operation, logs.String())
+		}
+	}
+
 	// Scale-out: app-1 arrives while app-0's nodeName is not yet reflected on API server.
 	// Must NOT re-bind app-0, and must account for app-0's 2 CPU on b so app-1 binds to a.
 	pod1 := makeTestPod("app-1", "uid-1", "", "mec-placement-scheduler", false, "2", "2Gi")

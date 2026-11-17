@@ -75,3 +75,18 @@ def test_restarted_container_does_not_reuse_old_cpu_rate(tmp_path):
     row = build_resource_windows(tmp_path, [window(10, 15)])[0]
     assert math.isnan(row['cpu_millicores'])
     assert row['cpu_coverage_percent'] == 0
+
+
+def test_per_node_resources_use_saved_pod_placement_and_observed_empty_nodes(tmp_path):
+    fixture(tmp_path)
+    windows = [window(0, 15), window(15, 30)]
+    fleet = build_resource_windows(tmp_path, windows)
+    busy = build_resource_windows(tmp_path, windows, node='gnb-3')
+    idle = build_resource_windows(tmp_path, windows, node='gnb-2')
+    assert [r['cpu_millicores'] for r in busy] == [r['cpu_millicores'] for r in fleet]
+    assert [r['memory_mib'] for r in busy] == [128, 256]
+    assert [r['memory_mib'] for r in idle] == [0, 0]
+    assert all(r['node'] == 'gnb-3' for r in busy)
+    (tmp_path/'metrics.jsonl').write_text(json.dumps(dict(sample_time=1004, pods=[dict(name='app-a', phase='Running')]))+'\n')
+    row = build_resource_windows(tmp_path, [window(0, 15)], node='gnb-3')[0]
+    assert math.isnan(row['cpu_millicores']) and math.isnan(row['memory_mib'])

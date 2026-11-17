@@ -281,14 +281,17 @@ def test_plot_autoscaler_exports_png_only_at_300_dpi_and_window_csvs(tmp_path, m
     monkeypatch.setattr(sys, 'argv', ['plot_autoscaler', str(res_dir), str(out_dir), '--slo-ms', '100'])
     plot_autoscaler.main()
 
-    for name in ('response-time', 'response-time-zoom', 'resource-usage', 'slo-violations'):
+    for name in ('response-time', 'resource-usage', 'slo-violations'):
         xs, ys = captured_figs[name]['series'][0][0]
         assert xs[:2] == [0, 15] and ys[0] == 0
     assert len(captured_figs['resource-usage']['series']) == 2
     assert len(captured_figs['resource-usage-phase-summary']['series']) == 2
     assert list(out_dir.glob('*.pdf')) == []
     pngs = sorted(p.name for p in out_dir.glob('*.png'))
-    assert pngs == ['pod-placement.png', 'resource-usage-phase-summary.png', 'resource-usage.png', 'response-time-zoom.png', 'response-time.png', 'slo-violations.png']
+    expected = ['pod-placement', 'resource-usage-phase-summary', 'resource-usage', 'response-time', 'slo-violations',
+                'cpu-by-node', 'memory-by-node', 'response-time-p90-by-node', 'response-time-p50-by-node',
+                'slo-violations-by-node', 'scheduling-delay']
+    assert pngs == sorted(f'{name}{suffix}.png' for name in expected for suffix in ('', '_zoom'))
     with Image.open(out_dir / 'response-time.png') as img:
         dpi = img.info.get('dpi')
         assert dpi is not None and round(dpi[0]) == 300
@@ -479,3 +482,31 @@ def test_display_origin_never_fills_missing_windows_or_restarts_at_phase_boundar
     assert ys[:2] == [0, 12] and math.isnan(ys[2])
     xs, ys = _window_points([dict(aligned_end_s=75, end_offset_s=15, value=12)], 'value')
     assert xs == [75] and ys == [12]
+
+
+def test_zoom_fits_all_measured_values_shared_axes_and_omits_only_synthetic_origin():
+    import matplotlib.pyplot as plt
+    from utils.plot_autoscaler import _zoom_axes
+    fig, axes = plt.subplots(2, sharey=True)
+    axes[0].plot([0, 15, 30], [0, 140, 150], marker='o', gid='window-series')
+    axes[1].plot([15, 30], [400, 410], marker='o')
+    axes[0].axhline(1000, label='SLO')
+    _zoom_axes(fig)
+    assert math.isnan(axes[0].lines[0].get_ydata()[0])
+    assert axes[0].get_ylim() == axes[1].get_ylim()
+    low, high = axes[0].get_ylim()
+    assert 0 < low < 140 and 410 < high < 1000
+    assert list(axes[1].lines[0].get_ydata()) == [400, 410]
+    plt.close(fig)
+
+
+def test_zoom_bars_preserve_zero_and_total_stacked_height():
+    import matplotlib.pyplot as plt
+    from utils.plot_autoscaler import _zoom_axes
+    fig, ax = plt.subplots()
+    ax.bar([1], [3])
+    ax.bar([1], [5], bottom=[3])
+    _zoom_axes(fig)
+    low, high = ax.get_ylim()
+    assert low == 0 and high > 8
+    plt.close(fig)

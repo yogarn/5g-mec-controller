@@ -359,7 +359,9 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 		return unscheduled[i].UID < unscheduled[j].UID
 	})
 
+	snapshotStarted := time.Now()
 	nodes, kNodes, err := c.nodesSnapshot(ctx, extraSnapshot)
+	c.logDecisionTiming("scheduler_snapshot", snapshotStarted, "")
 	if err != nil {
 		return nil, err
 	}
@@ -376,9 +378,11 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 			c.Logger.Printf("scheduler skipped pod=%s uid=%s reason=unsupported-constraints err=%v", pod.Name, pod.UID, err)
 			continue
 		}
+		policyStarted := time.Now()
 		targetNode, scores, err := policy.ScoreCandidateNode(
 			nodes, reqs, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, "", allowed,
 		)
+		c.logDecisionTiming("scheduler_score", policyStarted, pod.Name)
 		if err != nil {
 			return bound, err
 		}
@@ -405,7 +409,10 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 				Name:       targetNode,
 			},
 		}
-		if err := c.Client.CoreV1().Pods(c.Namespace).Bind(ctx, binding, metav1.CreateOptions{}); err != nil {
+		bindStarted := time.Now()
+		bindErr := c.Client.CoreV1().Pods(c.Namespace).Bind(ctx, binding, metav1.CreateOptions{})
+		c.logDecisionTiming("scheduler_bind", bindStarted, pod.Name)
+		if err := bindErr; err != nil {
 			c.Logger.Printf("scheduler binding failed pod=%s uid=%s node=%s err=%v", pod.Name, pod.UID, targetNode, err)
 			continue
 		}
@@ -523,9 +530,11 @@ func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval b
 		c.Logger.Printf("descheduler skipped reason=unsupported-constraints err=%v", err)
 		return nil, err
 	}
+	policyStarted := time.Now()
 	candidate, err := policy.SelectDescheduleCandidate(
 		nodes, reqs, counts, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, allowed,
 	)
+	c.logDecisionTiming("descheduler_score", policyStarted, "")
 	if err != nil {
 		return nil, err
 	}
@@ -652,4 +661,10 @@ func (c *Controller) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// logDecisionTiming uses monotonic wall time, separate from queueing/lifecycle delay.
+// Snapshot includes API/telemetry reads; score is only the policy call; bind is API time.
+func (c *Controller) logDecisionTiming(operation string, started time.Time, pod string) {
+	c.Logger.Printf("decision timing operation=%s duration_ms=%.6f pod=%s", operation, float64(time.Since(started).Nanoseconds())/1e6, pod)
 }

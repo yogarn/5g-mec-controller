@@ -976,6 +976,12 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     try:
         with (output / 'controller.log').open('x') as control_log, (output / 'sampler.log').open('x') as sampler_log, (output / 'runner-ssh.log').open('x') as runner_log:
             try:
+                # Native timers are cluster-wide; archive before deployment so
+                # initial scheduler observations have a counter baseline.
+                command([sys.executable, '-m', 'utils.control_overhead', 'snapshot', output / 'control-overhead.jsonl'])
+                processes.append(subprocess.Popen(
+                    [sys.executable, '-u', '-m', 'utils.control_overhead', 'sample', str(output / 'control-overhead.jsonl')],
+                    stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True))
                 if incluster_go:
                     cm = _render_incluster_placement_configmap(config, config['manifest'])
                     cm_path = output / 'placement-configmap.yaml'
@@ -996,11 +1002,12 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                         cmd.append('--deploy')
                     else:
                         cmd.append('--placement-only')
-                    processes.append(subprocess.Popen(cmd, stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True))
+                    controller_process = subprocess.Popen(cmd, stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True)
+                    processes.append(controller_process)
                     if hpa_path is None:
                         deadline = time.monotonic() + 30
                         while time.monotonic() < deadline:
-                            if processes[0].poll() is not None:
+                            if controller_process.poll() is not None:
                                 raise RuntimeError('controller startup failed; see controller.log')
                             check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
                             if check.stdout.strip():

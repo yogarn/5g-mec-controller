@@ -219,6 +219,8 @@ def test_startup_waits_for_initial_replicas_and_aborts_on_timeout(tmp_path, monk
 
 
 def test_run_method_aborts_before_traffic_when_initial_replicas_not_ready(tmp_path, monkeypatch):
+    monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'stop_process', lambda *a: None)
     monkeypatch.setattr(campaign, 'kube', lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout='', stderr=''))
     monkeypatch.setattr(campaign, 'get', lambda *a, **kw: {'spec': {'replicas': 2}, 'status': {'readyReplicas': 1}})
     now = {'t': 0.0}
@@ -246,4 +248,4 @@ def test_run_method_aborts_before_traffic_when_initial_replicas_not_ready(tmp_pa
             settings, 'camp', run_root, 'proposed', delay=None, slo_ms=150, max_replicas=24,
             comparison='scaling', autoscaler='hpa', placement_engine='go', min_replicas=2,
         )
-    assert ue_started == []
+    assert not any('campaign_ue' in str(cmd) for cmd in ue_started)
