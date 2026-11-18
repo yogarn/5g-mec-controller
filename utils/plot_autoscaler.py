@@ -541,7 +541,9 @@ def _zoom_axes(fig):
             continue
         values = []
         for line in ax.lines:
-            if line.get_marker() in (None, 'None', '') or line.get_gid() == 'phase-bracket':
+            if line.get_gid() == 'phase-bracket':
+                continue
+            if line.get_gid() != 'window-series' and line.get_marker() in (None, 'None', ''):
                 continue
             ys = list(line.get_ydata())
             xs = list(line.get_xdata())
@@ -671,7 +673,7 @@ def _render_resource_summary(output_dir, phases, resources, resource_coverage, c
     _export_png(fig, output_dir, name)
 
 
-def _render_resource_windows(output_dir, phases, rows_by_method, decorate, continuous=False):
+def _render_resource_windows(output_dir, phases, rows_by_method, decorate, continuous=False, *, export_png=None):
     def groups(method):
         return ([rows_by_method[method]] if continuous else
                 [[r for r in rows_by_method[method] if r['phase'] == phase] for phase in phases])
@@ -698,7 +700,7 @@ def _render_resource_windows(output_dir, phases, rows_by_method, decorate, conti
         ax.grid(axis='y', linestyle=':')
         ax.legend(frameon=False, ncols=2)
     decorate(axes)
-    _export_png(fig, output_dir, 'resource-usage')
+    (export_png or _export_png)(fig, output_dir, 'resource-usage')
 
 
 def _placement_bars(ax, lefts, widths, counts, nodes, colors, labels=True):
@@ -1059,7 +1061,7 @@ def _render_control_overhead(args):
     _render_scheduling_delay(args.output_dir, captured['scheduling-delay'], args.csv_dir)
 
 
-def main():
+def main(argv=None, *, export_png=None, slo_coverage=True):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_dir", type=Path, help="directory containing baseline/ and proposed/ CSV inputs")
     parser.add_argument("output_dir", type=Path, help="directory for 300 DPI PNG figures")
@@ -1067,7 +1069,8 @@ def main():
                         help="separate CSV/metadata directory; default: sibling csv for plots, csv-review for plots-review, or OUTPUT_DIR-csv")
     parser.add_argument("--slo-ms", type=float, default=500,
                         help="controller p90 target and recorded request SLO in milliseconds (default: 500)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    export_png = export_png or _export_png
     try:
         summaries, placements, resources, site_keys, phases, nodes = load(args.results_dir)
         violations = load_slo(args.results_dir, phases, args.slo_ms)
@@ -1221,40 +1224,49 @@ def main():
             ax.grid(axis="y", linestyle=":")
             ax.legend(frameon=False, ncols=3)
         decorate(axes)
-        _export_png(fig, args.output_dir, "response-time")
+        export_png(fig, args.output_dir, "response-time")
 
         # Keep phase diagnostic CSVs; every metric now gets an auto-range zoom.
         for method in METHODS:
             write_windows(summarize_windows(args.results_dir / method, args.slo_ms),
                           args.csv_dir / f'{method}-phase-windows.csv')
 
-        fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.5), sharex=True, layout="constrained")
-        fig.suptitle("SLO violations and request coverage\n" + ORIGIN_NOTE)
-        ax, cov_ax = axes
+        fig, axes = plt.subplots(
+            2 if slo_coverage else 1, 1, figsize=(THESIS_FIG_WIDTH, 6.5 if slo_coverage else 4.5),
+            sharex=True, squeeze=False, layout="constrained",
+        )
+        axes = axes[:, 0]
+        fig.suptitle(("SLO violations and request coverage" if slo_coverage else "SLO violations") + "\n" + ORIGIN_NOTE)
+        ax = axes[0]
         for method in ("baseline", "proposed"):
             color = METHOD_COLORS[method]
             labeled = False
             for pts in window_groups(method):
                 xs, viol_vals = _window_points(pts, "violation_percent")
-                cov_xs = [r["aligned_end_s"] for r in pts]
-                cov_vals = [
-                    r["request_coverage_percent"] if r["request_coverage_percent"] != "" else math.nan
-                    for r in pts
-                ]
                 ax.plot(xs, viol_vals, gid="window-series", linestyle=STYLES[method], color=color, marker="o", markersize=3,
                         label=METHOD_LABELS[method] if not labeled else None)
-                cov_ax.plot(cov_xs, cov_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
-                            label=METHOD_LABELS[method] if not labeled else None)
+                if slo_coverage:
+                    cov_xs = [r["aligned_end_s"] for r in pts]
+                    cov_vals = [
+                        r["request_coverage_percent"] if r["request_coverage_percent"] != "" else math.nan
+                        for r in pts
+                    ]
+                    axes[1].plot(cov_xs, cov_vals, linestyle=STYLES[method], color=color, marker="o", markersize=3,
+                                 label=METHOD_LABELS[method] if not labeled else None)
                 labeled = True
+        slo_title = f"Failed or slower than {args.slo_ms:g} ms"
+        if slo_coverage:
+            slo_title += " over preceding 15-second window (denominator: all attempts)"
         ax.set(ylim=(0, 100), ylabel="SLO violations (%)",
-               title=f"Failed or slower than {args.slo_ms:g} ms over preceding 15-second window (denominator: all attempts)")
+               title=slo_title)
         ax.grid(axis="y", linestyle=":")
         ax.legend(frameon=False, ncols=2)
-        cov_ax.set(ylim=(0, 105), ylabel="Request coverage (%)",
-                   title="Request coverage over preceding 15-second window (completed / scheduled)")
-        cov_ax.grid(axis="y", linestyle=":")
+        if slo_coverage:
+            axes[1].set(ylim=(0, 105), ylabel="Request coverage (%)",
+                        title="Request coverage over preceding 15-second window (completed / scheduled)")
+            axes[1].grid(axis="y", linestyle=":")
         decorate(axes)
-        _export_png(fig, args.output_dir, "slo-violations")
+        export_png(fig, args.output_dir, "slo-violations")
 
         fig, axes = plt.subplots(2, 1, figsize=(THESIS_FIG_WIDTH, 6.0), sharex=True, sharey=True, layout="constrained")
         fig.suptitle("Per-node pod counts at recorded observation times (includes unready pods)")
@@ -1283,7 +1295,7 @@ def main():
         axes[0].yaxis.set_major_locator(MaxNLocator(integer=True))
         axes[0].legend(frameon=False, ncols=min(len(nodes), 5), loc="upper right")
         decorate(axes)
-        _export_png(fig, args.output_dir, "pod-placement")
+        export_png(fig, args.output_dir, "pod-placement")
 
         resource_rows = {}
         for method in METHODS:
@@ -1298,7 +1310,9 @@ def main():
             'cpu_millicores', 'memory_mib', 'expected_samples', 'cpu_complete_samples',
             'memory_complete_samples', 'cpu_coverage_percent', 'memory_coverage_percent', 'missing_reasons',
         ], args.csv_dir / 'resource-windows-15s.csv')
-        _render_resource_windows(args.output_dir, phases, resource_rows, decorate, continuous=continuous)
+        _render_resource_windows(
+            args.output_dir, phases, resource_rows, decorate, continuous=continuous, export_png=export_png,
+        )
         _render_per_node(args, phases, nodes, windows_15s, phase_bounds, decorate, continuous, snapshot_rows)
         _render_control_overhead(args)
         _render_resource_summary(
