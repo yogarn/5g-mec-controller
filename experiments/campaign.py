@@ -828,10 +828,11 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     if rt_target_factor != 1.0 and comparison == 'placement':
         raise ValueError('rt_target_factor != 1.0 is not supported with --comparison placement (baseline and proposed must share the same latency autoscaler)')
     internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(rt_target_factor))
-    if latency_floor_ms and (not staircase or comparison != 'scaling' or autoscaler != 'hpa'
+    if latency_floor_ms and (not (comparison == 'full' or (comparison == 'scaling' and staircase))
+                            or autoscaler != 'hpa'
                             or type(latency_floor_ms) is not int or latency_floor_ms <= 0
                             or internal_target_dec <= Decimal(str(latency_floor_ms))):
-        raise ValueError('latency floor requires staircase scaling with native HPA and 0 < floor < internal RT target')
+        raise ValueError('latency floor requires full/joint or staircase scaling with native HPA and 0 < floor < internal RT target')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if min_replicas is not None:
         if type(min_replicas) is not int or min_replicas < 1:
@@ -1195,7 +1196,7 @@ def main(argv=None):
     parser.add_argument('--rt-target-factor', type=float, default=1.0,
                         help='experimental headroom multiplier in (0, 1] applied only to proposed RT autoscaler internal target (default: 1.0)')
     parser.add_argument('--latency-floor-ms', type=int, default=0,
-                        help='staircase only: fixed reference latency in whole milliseconds; 0 keeps raw RT/SLO')
+                        help='full/joint or staircase scaling: fixed reference latency in whole milliseconds; 0 keeps raw RT/SLO')
     parser.add_argument('--fixed-replicas', type=int,
                         help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
     parser.add_argument('--min-replicas', type=int,
@@ -1310,8 +1311,12 @@ def main(argv=None):
         parser.error('--rt-target-factor != 1.0 is not supported with --comparison placement (baseline and proposed must share the same latency autoscaler)')
     if args.latency_floor_ms < 0:
         parser.error('--latency-floor-ms must be nonnegative')
-    if args.latency_floor_ms and args.scenario != 'scaler-staircase':
-        parser.error('--latency-floor-ms requires --scenario scaler-staircase')
+    if args.latency_floor_ms:
+        if args.autoscaler != 'hpa':
+            parser.error('--latency-floor-ms requires native HPA (--autoscaler hpa)')
+        if not (args.comparison == 'full' or
+                (args.comparison == 'scaling' and args.scenario == 'scaler-staircase')):
+            parser.error('--latency-floor-ms requires --comparison full or --scenario scaler-staircase')
     if args.max_replicas is not None and args.max_replicas < 1:
         parser.error('--max-replicas must be a positive integer')
     if args.phase_duration is not None and (not math.isfinite(args.phase_duration) or args.phase_duration < 60):

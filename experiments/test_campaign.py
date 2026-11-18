@@ -423,9 +423,11 @@ def test_verify_incluster_components_checks_adapter_and_go_deployment(monkeypatc
         campaign.verify_incluster_components('hpa', 'go')
 
 
-def test_incluster_go_with_hpa_applies_manifests_without_host_controller_processes(monkeypatch, tmp_path):
+@pytest.mark.parametrize('floor_ms', [0, 130])
+def test_incluster_go_with_hpa_applies_manifests_without_host_controller_processes(monkeypatch, tmp_path, floor_ms):
     spawned = []
     kube_calls = []
+    metric_name = campaign._latency_metric_name(floor_ms)
 
     class FakeProc:
         def __init__(self, cmd):
@@ -455,10 +457,10 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         kube_calls.append(args)
         if 'logs' in args and 'stdout' in kwargs:
             kwargs['stdout'].write('scheduler bound pod=test node=gnb-2\n')
-        if args[:2] == ('get', '--raw') and 'ue_p90_latency_seconds' in args[2]:
+        if args[:2] == ('get', '--raw') and metric_name in args[2]:
             return subprocess.CompletedProcess(
                 args, 0,
-                stdout=json.dumps({'items': [{'metricName': 'ue_p90_latency_seconds', 'value': '100m'}]}),
+                stdout=json.dumps({'items': [{'metricName': metric_name, 'value': '100m'}]}),
                 stderr='',
             )
         return subprocess.CompletedProcess(args, 0, stdout='deployment.apps/mec-placement-pedestrian-detection\n', stderr='')
@@ -505,11 +507,12 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         'nr_ue': 'nr-ue',
         'token': 'tok',
         'telemetry_url': 'http://tel',
+        'latency_floor_ms': floor_ms,
     }
     run_root = tmp_path / 'run'
     run_root.mkdir()
     campaign.run_method(
-        settings, 'camp', run_root, 'proposed', delay=None, slo_ms=500, max_replicas=10,
+        settings, 'camp', run_root, 'proposed', delay=None, slo_ms=150, max_replicas=10,
         comparison='full', autoscaler='hpa', placement_engine='go',
     )
 
@@ -520,7 +523,10 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     assert any(args[:4] == ('-n', 'placement', 'rollout', 'status') for args in kube_calls)
     assert any(args[:2] == ('apply', '-f') and str(run_root / 'proposed-workload.yaml') in map(str, args) for args in kube_calls)
     assert any(args[:2] == ('apply', '-f') and str(run_root / 'proposed-hpa.yaml') in map(str, args) for args in kube_calls)
-    assert any(args[:2] == ('get', '--raw') and 'ue_p90_latency_seconds' in args[2] for args in kube_calls)
+    assert any(args[:2] == ('get', '--raw') and metric_name in args[2] for args in kube_calls)
+    hpa = yaml.safe_load((run_root / 'proposed-hpa.yaml').read_text())
+    assert hpa['spec']['metrics'][0]['external']['metric']['name'] == metric_name
+    assert hpa['spec']['metrics'][0]['external']['target']['value'] == ('20m' if floor_ms else '150m')
     cm = yaml.safe_load(cm_file.read_text())
     cfg = yaml.safe_load(cm['data']['config.yaml'])
     assert cfg['manifest'] == '/etc/placement/manifest.yaml'

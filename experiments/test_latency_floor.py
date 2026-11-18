@@ -31,6 +31,39 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     assert 'ue_request_window_complete{job="ue-telemetry"} == 1' in rules[-1]['metricsQuery']
 
 
+@pytest.mark.parametrize('factor,excess_target', [('1.0', '20m'), ('0.95', '12.5')])
+def test_joint_floor_preserves_placement_and_reporting(tmp_path, factor, excess_target):
+    out = tmp_path / 'plan'
+    campaign.main(['--comparison', 'full', '--slo-ms', '150', '--tc-ms', '10',
+                   '--cpu-hpa-target', '80', '--latency-floor-ms', '130',
+                   '--rt-target-factor', factor, '--max-replicas', '12',
+                   '--plan-only', str(out)])
+    plan = yaml.safe_load((out / 'plan.yaml').read_text())
+    base = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())
+    prop = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
+    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert prop['spec']['metrics'][0]['external']['target']['value'] == excess_target
+    unit = 'seconds' if factor == '1.0' else 'milliseconds'
+    assert prop['spec']['metrics'][0]['external']['metric']['name'] == f'ue_p90_excess_latency_130ms_{unit}'
+    assert plan['reporting_slo_ms'] == 150
+    assert plan['latency_floor_ms'] == plan['campaign_settings']['latency_floor_ms'] == 130
+    assert plan['tc_ms'] == 10
+    assert plan['node_restriction'] is None
+    assert plan['replica_bounds'] == {'min': 3, 'max': 12}
+    assert plan['phase_durations_s'] == [120.0] * 13
+    assert plan['deschedule_interval_seconds'] == 30
+    for method, scheduler in (('baseline', 'default-scheduler'), ('proposed', 'mec-placement-scheduler')):
+        dep = next(d for d in yaml.safe_load_all((out / f'{method}-workload.yaml').read_text())
+                   if d and d.get('kind') == 'Deployment')
+        spec = dep['spec']['template']['spec']
+        assert spec['schedulerName'] == scheduler
+        terms = spec['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
+        assert {value for term in terms for match in term['matchFields']
+                for value in match['values']} == {'gnb1', 'gnb-2', 'gnb-3', 'core-5g'}
+    cfg = yaml.safe_load((out / 'proposed-controller.yaml').read_text())
+    assert cfg['slo_seconds'] == .15
+
+
 @pytest.mark.parametrize('flags', [
     ['--latency-floor-ms', '-1'],
     ['--latency-floor-ms', 'nan'],
@@ -39,6 +72,7 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     ['--latency-floor-ms', '151'],
     ['--latency-floor-ms', '130', '--scenario', 'mobility9'],
     ['--latency-floor-ms', '130', '--scenario', 'scaler-balanced'],
+    ['--latency-floor-ms', '130', '--comparison', 'full', '--autoscaler', 'controller'],
 ])
 def test_invalid_floor_fails_before_writing_plan(tmp_path, flags):
     out = tmp_path / 'plan'

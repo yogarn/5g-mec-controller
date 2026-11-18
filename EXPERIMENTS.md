@@ -492,10 +492,12 @@ downscaling. A reference close to the SLO increases sensitivity. Record changes
 as distinct experimental configurations rather than tuning an ongoing run.
 
 `--latency-floor-ms` accepts nonnegative whole milliseconds, requires the
-staircase scenario when nonzero, and must be below the SLO. Use
+staircase scaling or full/joint comparison with native HPA when nonzero, and
+must be below the internal RT target (`SLO * --rt-target-factor`). Use
 `bash experiments/run.sh ramp scaler_floor_01` to try 130ms, or append
 `--latency-floor-ms 0` to retain raw RT/SLO. Direct campaign invocation defaults
-to zero, so legacy and mobility scenarios keep their original formula.
+to zero. Full/joint runs can explicitly use `--latency-floor-ms 130`;
+placement-only mobility retains its matched raw-RT autoscalers.
 
 For each nonzero reference the campaign renders a separate adapter metric, e.g.
 `ue_p90_excess_latency_130ms_seconds`, using
@@ -656,12 +658,14 @@ continuous UE transitions, SLO 150ms, TC 10ms, 5 RPS/UE, and max 8 in flight/UE.
 | Profile | UE splits (gNB1:gNB2:gNB3) | Replica settings | Traffic across both methods |
 |---|---|---|---|
 | mobility | 1:7:1 → 1:5:3 | Fixed 3 for both methods | 4 minutes |
-| scaling | 1:1:1 → 4:4:4 → 1:1:1 | Shared min/initial 3, max 12; default scheduler on gNB-3 | 6 minutes |
+| scaling | 1:1:1 → 4:4:4 → 1:1:1 | Shared min/initial 3, max 12; default scheduler on core-5g | 6 minutes |
 | joint | 1:1:1 → 1:7:1 → 1:1:7 → 1:1:1 | Shared min/initial 3, max 12; full-system comparison | 8 minutes |
 
 Scaling uses the existing floor-adjusted latency policy (130ms reference, 20ms
-excess target). Joint uses the existing full-system raw RT/SLO policy, without
-that scaling-only floor; do not interpret it as an isolated scaling comparison.
+excess target). The joint smoke wrapper defaults to the full-system raw RT/SLO
+policy. Full joint campaigns accept an explicit latency floor; the smoke wrapper
+still accepts this override only for scaling. Joint compares the full system,
+so do not interpret it as an isolated scaling comparison.
 Mobility clamps the HPA budget; readiness can temporarily fall during eviction.
 These short tests check wiring, transitions, measurement, and plotting. They do
 not guarantee a particular scaling/relocation action or steady-state result.
@@ -787,3 +791,20 @@ Available HPA action and execution measurements get regular and `_zoom` figures.
 cannot provide execution durations that were never recorded; no timing is inferred
 from gaps between log messages. These figures are descriptive; repeat runs and
 account for background work before drawing overhead comparisons.
+
+## Sequential floor-130 scaling and joint runs
+
+This pair uses CPU HPA 80% of requests, reporting SLO 150ms, TC 10ms,
+proposed latency floor 130ms, RT target factor 1.0, 120-second phases and a
+shared replica range of 3..12. Scaling runs on core-5g; joint uses the normal
+four-node eligibility and scheduler/descheduler. Mobility is not required to
+compare these two configurations. Use fresh result names and run sequentially:
+
+```bash
+bash experiments/run.sh ramp scaling_cpu80_slo150_floor130_01 --cpu-hpa-target 80 --slo-ms 150 --tc-ms 10 --latency-floor-ms 130 --rt-target-factor 1.0 --max-replicas 12 && \
+bash experiments/run.sh joint_cpu80_slo150_floor130_01 --comparison full --cpu-hpa-target 80 --slo-ms 150 --tc-ms 10 --latency-floor-ms 130 --rt-target-factor 1.0 --max-replicas 12
+```
+
+Both campaigns report full response times and failures against 150ms. Only
+proposed's autoscaling signal subtracts the fixed 130ms reference. The complete
+pair has 104 minutes of traffic, plus setup, transfer, plotting and cleanup.

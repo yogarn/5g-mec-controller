@@ -195,7 +195,8 @@ def test_placement_comparison_rejects_non_unit_factor(tmp_path):
         )
 
 
-def test_campaign_yaml_console_and_plot_slo_unchanged(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('comparison', ['scaling', 'full'])
+def test_campaign_yaml_console_and_plot_slo_unchanged(tmp_path, monkeypatch, capsys, comparison):
     fake_root = tmp_path / 'repo'
     fake_root.mkdir()
     for name in ('config.yaml', 'experiments', 'apps', 'autoscaler'):
@@ -209,16 +210,20 @@ def test_campaign_yaml_console_and_plot_slo_unchanged(tmp_path, monkeypatch, cap
     monkeypatch.setattr(campaign, 'check_node_capacity', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'prerequisites', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'check_result_name', lambda *a, **kw: None)
-    monkeypatch.setattr(campaign, '_prepare_floor_adapter', lambda *a, **kw: None)
+    adapter_calls = []
+    monkeypatch.setattr(campaign, '_prepare_floor_adapter', lambda *a, **kw: adapter_calls.append((a, kw)))
     monkeypatch.setattr(campaign, 'command', lambda args, **kw: commands.append(args))
     monkeypatch.setattr(campaign.fcntl, 'flock', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'TrafficDelay', lambda *a, **kw: SimpleNamespace(start=lambda: None, close=lambda: None))
     monkeypatch.setattr(campaign, 'run_method', lambda *a, **kw: None)
 
     campaign.main([
-        'camp_095', '--comparison', 'scaling', '--scenario', 'scaler-staircase',
+        'camp_095', '--comparison', comparison,
         '--slo-ms', '150', '--latency-floor-ms', '130', '--rt-target-factor', '0.95',
+        *(['--scenario', 'scaler-staircase'] if comparison == 'scaling' else []),
     ])
+    assert adapter_calls[0][0][1] == 130
+    assert adapter_calls[0][1]['unit'] == 'milliseconds'
 
     camp_yaml = yaml.safe_load((fake_root / 'results' / 'camp_095' / 'campaign.yaml').read_text())
     assert camp_yaml['slo_ms'] == 150
@@ -233,7 +238,8 @@ def test_campaign_yaml_console_and_plot_slo_unchanged(tmp_path, monkeypatch, cap
                for c in commands)
 
     out = capsys.readouterr().out
-    assert 'internal scaling target 142.5 ms p90 = 150 ms * 0.95; reporting SLO 150 ms' in out
+    if comparison == 'scaling':
+        assert 'internal scaling target 142.5 ms p90 = 150 ms * 0.95; reporting SLO 150 ms' in out
     assert 'excess target 12.5ms (metric ue_p90_excess_latency_130ms_milliseconds, target 12.5). Reporting SLO remains 150ms.' in out
 
 
