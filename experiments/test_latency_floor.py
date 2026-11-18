@@ -70,7 +70,7 @@ def test_joint_floor_preserves_placement_and_reporting(tmp_path, factor, excess_
     ['--latency-floor-ms', '1.5'],
     ['--latency-floor-ms', '150'],
     ['--latency-floor-ms', '151'],
-    ['--latency-floor-ms', '130', '--scenario', 'mobility9'],
+    ['--latency-floor-ms', '130', '--scenario', 'mobility9', '--comparison', 'placement'],
     ['--latency-floor-ms', '130', '--scenario', 'scaler-balanced'],
     ['--latency-floor-ms', '130', '--comparison', 'full', '--autoscaler', 'controller'],
 ])

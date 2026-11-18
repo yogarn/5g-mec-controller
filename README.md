@@ -93,7 +93,7 @@ When running an evaluation campaign, **do not manually apply workloads or HPAs**
    ```
    All full experiments default to **120s per phase**, including the final
    phase. The `ramp` shortcut supplies `--comparison scaling`,
-   `--scenario scaler-staircase`, and `--latency-floor-ms 130`.
+   `--scenario scaler-staircase`, and `--latency-floor-ms 125`.
    An extended final scaling phase requires explicitly adding `--final-hold`.
    Shared defaults are TC 10ms one-way, SLO 150ms, 5 requests/s per UE,
    minimum/initial 3 replicas, and a maximum of 8 in-flight requests per UE.

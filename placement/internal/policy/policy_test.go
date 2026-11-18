@@ -294,3 +294,23 @@ func TestPodFitsNodeConstraints(t *testing.T) {
 		t.Fatalf("expected mixed nodeSelectorTerms to reject core-1, ok=%v err=%v", ok, err)
 	}
 }
+
+func TestPreferCloseDemandMinusPodShare(t *testing.T) {
+	nodes := []Node{
+		{Name: "a", Capacity: map[string]float64{"cpu": 10, "memory": 10}, Allocated: map[string]float64{}, CPUUtilization: .1, ArrivalRate: 9, Ready: true},
+		{Name: "b", Capacity: map[string]float64{"cpu": 10, "memory": 10}, Allocated: map[string]float64{}, CPUUtilization: .1, ArrivalRate: 1, Ready: true},
+	}
+	weights := map[string]float64{"cpu": 1, "memory": 0, "gpu": 0, "vram": 0}
+	requests := map[string]float64{"cpu": 1, "memory": 1}
+	raw, err := RankNodes(nodes, requests, .8, .4, weights)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adjusted, err := RankNodes(nodes, requests, .8, .4, weights, map[string]float64{"a": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs((raw["a"]-adjusted["a"])-.4) > 1e-9 || raw["b"] != adjusted["b"] {
+		t.Fatalf("pod share adjustment incorrect: raw=%v adjusted=%v", raw, adjusted)
+	}
+}

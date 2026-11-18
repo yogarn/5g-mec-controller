@@ -55,7 +55,7 @@ def load_settings(path: str) -> Settings:
     allowed = {'manifest', 'namespace', 'prometheus_url', 'latency_query', 'slo_seconds',
                'min_replicas', 'max_replicas', 'interval_seconds', 'mode', 'mutate',
                'eligible_nodes', 'cpu_utilization_query', 'mobility_query', 'cpu_saturation',
-               'locality_weight', 'cooldown_seconds', 'max_metric_age_seconds',
+               'locality_weight', 'prefer_close', 'cooldown_seconds', 'max_metric_age_seconds',
                'scale_down_seconds', 'resource_weights', 'gpu_nodes',
                'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes',
                'deschedule_interval_seconds', 'scheduler_name', 'scheduler_interval_seconds'}

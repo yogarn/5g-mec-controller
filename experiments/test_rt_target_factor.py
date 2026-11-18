@@ -323,7 +323,7 @@ def test_run_method_forwards_reporting_slo_to_summarize(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, 'command', lambda args, **kw: summarize_cmds.append(args))
     monkeypatch.setattr(campaign, 'active_telemetry', lambda url: True)
     monkeypatch.setattr(campaign, 'stop_process', lambda p: None)
-    monkeypatch.setattr(campaign, 'check_service_routing', lambda s: None)
+    monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'transfer', lambda *a: None)
     monkeypatch.setattr(campaign, 'RunnerProgress', DummyProgress)
     monkeypatch.setattr(campaign, 'time', type('T', (), {'monotonic': lambda: 0.0, 'sleep': lambda _: None}))

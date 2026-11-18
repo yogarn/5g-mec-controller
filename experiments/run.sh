@@ -34,7 +34,7 @@ if [[ "${1:-}" == rebuild ]]; then
 fi
 if [[ "${1:-}" == ramp ]]; then
   shift
-  exec .venv/bin/python -u -m experiments.campaign --comparison scaling --scenario scaler-staircase --latency-floor-ms 130 "$@"
+  exec .venv/bin/python -u -m experiments.campaign --comparison scaling --scenario scaler-staircase --latency-floor-ms 125 "$@"
 fi
 if [[ "${1:-}" == smoke ]]; then
   shift
@@ -45,7 +45,7 @@ if [[ "${1:-}" == check ]]; then
   exec .venv/bin/python -u -m experiments.campaign --check "$@"
 fi
 if [[ $# -eq 0 ]]; then
-  echo 'Usage: bash experiments/run.sh smoke mobility|scaling|joint NEW_NAME [--plan-only DIR] | setup | check [--workload NAME] | rebuild [--plan-only] | ramp NEW_CAMPAIGN_NAME [OPTIONS] | NEW_CAMPAIGN_NAME [--workload face-detection|pedestrian-detection] [--comparison full|placement|scaling] [--scenario mobility9|scaler-balanced|scaler-staircase] [--mobility-direction forward|reverse] [--phase-transition continuous|restart] [--final-hold] [--long-run] [--fixed-replicas COUNT] [--deschedule-interval SECONDS] [--rps-per-ue RATE] [--max-in-flight-per-ue COUNT] [--tc-ms DELAY] [--slo-ms TARGET] [--cpu-hpa-target PERCENT] [--rt-target-factor FACTOR] [--latency-floor-ms MILLISECONDS] [--min-replicas COUNT] [--max-replicas COUNT] [--scale-down-stabilization-seconds SECONDS] [--scale-down-pods COUNT] [--scale-down-period-seconds SECONDS] [--method-order baseline-first|proposed-first|random] [--debug] [--phase-duration SECONDS] [--resource-weights CPU MEMORY GPU VRAM] [--locality-weight WEIGHT] [--plan-only DIR]' >&2
+  echo 'Usage: bash experiments/run.sh smoke mobility|scaling|joint NEW_NAME [--plan-only DIR] | setup | check [--workload NAME] | rebuild [--plan-only] | ramp NEW_CAMPAIGN_NAME [OPTIONS] | NEW_CAMPAIGN_NAME [--comparison full|placement|scaling] [--prefer-close] [--cpu-hpa-target PERCENT] [--latency-floor-ms MILLISECONDS] [--plan-only DIR] [OPTIONS]' >&2
   exit 2
 fi
 exec .venv/bin/python -u -m experiments.campaign "$@"

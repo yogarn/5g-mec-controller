@@ -9,7 +9,7 @@ from experiments import campaign
 
 
 @pytest.mark.parametrize('flags,comparison,durations,ceiling,deschedule', [
-    (['--scenario', 'mobility9', '--fixed-replicas', '3'], 'placement', [120] * 7, 3, 30),
+    (['--scenario', 'mobility9', '--fixed-replicas', '3'], 'full', [120] * 7, 3, 30),
     (['--scenario', 'scaler-staircase'], 'scaling', [120] * 13, 24, None),
     (['--comparison', 'full', '--max-replicas', '12'], 'full', [120] * 13, 12, 30),
 ])
@@ -18,7 +18,7 @@ def test_short_campaign_commands_render_effective_defaults(tmp_path, flags, comp
     campaign.main(['default_test', *flags, '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['comparison'] == comparison
-    if comparison == 'full':
+    if comparison == 'full' and '--scenario' not in flags:
         settings = yaml.safe_load((campaign.ROOT / 'experiments/campaign.yaml').read_text())
         assert plan['schedule'] == settings['schedule']
     assert plan['phase_durations_s'] == durations
@@ -74,8 +74,8 @@ def test_ramp_shortcut_renders_full_schedule_with_inherited_defaults(tmp_path):
     assert plan['comparison'] == 'scaling' and plan['scenario'] == 'scaler-staircase'
     assert plan['phase_durations_s'] == [120] * 13
     assert plan['final_hold_seconds'] == 0
-    assert plan['latency_floor_ms'] == 130
-    assert plan['effective_rt_metric_target_ms'] == 20
+    assert plan['latency_floor_ms'] == 125
+    assert plan['effective_rt_metric_target_ms'] == 25
     assert plan['tc_ms'] == 10 and plan['slo_ms'] == 150
     assert plan['replica_bounds'] == {'min': 3, 'max': 12}
     assert plan['pacing'] == {'rps_per_ue': 5, 'max_in_flight_per_ue': 8}

@@ -416,7 +416,7 @@ To isolate fixed UPF/inter-node path latency from queueing and autoscaling effec
 
 Run `bash experiments/run.sh ramp scaler_03` inside tmux. This shortcut now selects
 `--comparison scaling --scenario scaler-staircase`, 120s for every phase, TC 10ms, SLO 150ms,
-5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 130ms.
+5 RPS/UE, max 8 in flight/UE, and an exploratory latency reference of 125ms.
 Both methods use `default-scheduler` with required node affinity to core-5g.
 The scheduler honors that restriction; it cannot choose another node. This
 holds placement constant to isolate autoscaling. Mobility and joint comparisons
@@ -450,7 +450,7 @@ to 30s; scaling disables descheduling. Smoke profiles explicitly retain their
 shorter schedules and 60s phases. Equal observation windows do not establish
 steady state: joint's 300s scale-down stabilization spans several 120s phases.
 
-The staircase gives both HPAs matched behavior: scale up by at most 2 Pods/30s,
+The staircase gives both HPAs matched behavior: scale up by at most 4 Pods/30s,
 scale down by at most 1 Pod/30s, scale-down stabilization 60s, and scale-down
 tolerance 0.01. This requires Kubernetes support for per-direction HPA tolerance
 (v1.35 cluster used here). CPU baseline still targets 80% of requests. The `ramp` shortcut now opts into the floor-adjusted variant described below;
@@ -475,14 +475,14 @@ exploratory configuration following inspection of those runs; preserve both.
 ## Exploratory floor-adjusted latency HPA
 
 The user authorized trying this variant after examining scaler_02. The `ramp`
-shortcut now supplies `--latency-floor-ms 130`. With SLO 150ms, proposed HPA uses
-`ceil(currentReplicas * max(RT - 130ms, 0) / 20ms)`, subject to the existing
+shortcut now supplies `--latency-floor-ms 125`. With SLO 150ms, proposed HPA uses
+`ceil(currentReplicas * max(RT - 125ms, 0) / 25ms)`, subject to the existing
 replica bounds, stabilization, tolerance and rate limits. CPU baseline stays
 at 80% of requests, with the matched staircase rate/stabilization settings.
 Reporting still uses the full response time against 150ms, including failures
 and scheduled-request coverage. No Python replica controller is introduced.
 
-130ms is a fixed exploratory reference below the roughly 140ms low-load p90
+125ms is a fixed exploratory reference below the roughly 140ms low-load p90
 observed in prior runs. It is not a measured physical minimum, an identified
 queueing delay, or a Kubernetes recommendation. The difference is a heuristic
 load-sensitive latency signal. This variant needs validation and independent
@@ -494,17 +494,17 @@ as distinct experimental configurations rather than tuning an ongoing run.
 `--latency-floor-ms` accepts nonnegative whole milliseconds, requires the
 staircase scaling or full/joint comparison with native HPA when nonzero, and
 must be below the internal RT target (`SLO * --rt-target-factor`). Use
-`bash experiments/run.sh ramp scaler_floor_01` to try 130ms, or append
+`bash experiments/run.sh ramp scaler_floor_01` to try 125ms, or append
 `--latency-floor-ms 0` to retain raw RT/SLO. Direct campaign invocation defaults
-to zero. Full/joint runs can explicitly use `--latency-floor-ms 130`;
+to zero. Full/joint runs can explicitly use `--latency-floor-ms 125`;
 placement-only mobility retains its matched raw-RT autoscalers.
 
 For each nonzero reference the campaign renders a separate adapter metric, e.g.
-`ue_p90_excess_latency_130ms_seconds`, using
-`clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.13, 0)`
+`ue_p90_excess_latency_125ms_seconds`, using
+`clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.125, 0)`
 with the existing complete-telemetry-window guard. Missing/incomplete source
 telemetry stays absent, while an observed latency below the reference produces
-a legitimate zero. The HPA target is `20m` seconds for the 130/150ms example.
+a legitimate zero. The HPA target is `25m` seconds for the 125/150ms example.
 
 `--plan-only` writes the proposed HPA, adapter ConfigMap preview and run metadata
 without cluster access. During an actual campaign, after capacity checks and
@@ -808,3 +808,17 @@ bash experiments/run.sh joint_cpu80_slo150_floor130_01 --comparison full --cpu-h
 Both campaigns report full response times and failures against 150ms. Only
 proposed's autoscaling signal subtracts the fixed 130ms reference. The complete
 pair has 104 minutes of traffic, plus setup, transfer, plotting and cleanup.
+
+## PreferClose routing experiment
+
+`--prefer-close` is opt-in. The campaign temporarily labels each eligible node
+`topology.kubernetes.io/zone=<node name>`, sets the shared Service's
+`trafficDistribution: PreferClose` for baseline and proposed, and restores the
+original node labels during cleanup. The campaign records the setting and
+original zones. Proposed Go scheduling uses `traffic_share - pod_share` as its
+locality term; ordinary runs keep the previous traffic-share score. The
+Service is deleted during teardown. Both arms retain the same routing setting.
+
+Pedestrian Pods use a 35-second `preStop` wait within a 60-second termination
+grace period, allowing in-flight requests time to complete after eviction.
+The descheduler still evicts before the ReplicaSet creates its replacement.

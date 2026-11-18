@@ -19,7 +19,7 @@ from utils.plot_paths import default_csv_dir
 PROFILES = {
     'mobility': {
         'schedule': '9:1:7:1,9:1:5:3',
-        'flags': ['--scenario', 'mobility9', '--comparison', 'placement'],
+        'flags': ['--scenario', 'mobility9', '--comparison', 'full'],
         'description': 'Fixed replicas; move two UEs from gNB-2 to gNB-3.',
     },
     'scaling': {
@@ -224,7 +224,7 @@ def main(argv=None):
     parser.add_argument('--rps-per-ue', type=float, default=5)
     parser.add_argument('--max-in-flight-per-ue', type=int, default=8)
     parser.add_argument('--latency-floor-ms', type=int, default=None,
-                        help='scaling only: exploratory floor (default: 130); joint uses raw RT/SLO')
+                        help='scaling only: exploratory floor (default: 125); joint uses raw RT/SLO')
     parser.add_argument('--method-order', choices=('baseline-first', 'proposed-first', 'random'), default='baseline-first')
     args = parser.parse_args(argv)
     if args.profile == 'mobility' and (args.min_replicas is not None or args.max_replicas is not None):
@@ -244,7 +244,7 @@ def main(argv=None):
         parser.error('max replicas must be at least min replicas')
     if args.latency_floor_ms is not None and args.profile != 'scaling':
         parser.error('--latency-floor-ms is only available for the scaling profile')
-    args.latency_floor_ms = (130 if args.profile == 'scaling' else 0) if args.latency_floor_ms is None else args.latency_floor_ms
+    args.latency_floor_ms = (125 if args.profile == 'scaling' else 0) if args.latency_floor_ms is None else args.latency_floor_ms
     if args.latency_floor_ms < 0 or args.latency_floor_ms >= args.slo_ms:
         parser.error('latency floor must be nonnegative and smaller than the SLO')
     args.config = args.config.resolve(strict=True)

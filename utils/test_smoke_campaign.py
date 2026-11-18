@@ -13,7 +13,7 @@ from utils import smoke_campaign as smoke
 
 
 @pytest.mark.parametrize('profile,seconds,comparison,minimum,maximum', [
-    ('mobility', 240, 'placement', 3, 3),
+    ('mobility', 240, 'full', 3, 3),
     ('scaling', 360, 'scaling', 3, 12),
     ('joint', 480, 'full', 3, 12),
 ])
@@ -34,7 +34,7 @@ def test_offline_profiles_render_real_campaigns_without_subprocess(tmp_path, mon
     assert plan['replica_bounds'] == {'min': minimum, 'max': maximum}
     assert plan['slo_ms'] == 150 and plan['tc_ms'] == 10
     assert plan['pacing'] == {'rps_per_ue': 5, 'max_in_flight_per_ue': 8}
-    assert plan['latency_floor_ms'] == (130 if profile == 'scaling' else 0)
+    assert plan['latency_floor_ms'] == (125 if profile == 'scaling' else 0)
     for method in ['baseline', 'proposed']:
         hpa = yaml.safe_load((out / f'{method}-hpa.yaml').read_text())
         assert hpa['spec']['minReplicas'] == minimum

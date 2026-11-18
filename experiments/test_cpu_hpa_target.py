@@ -42,7 +42,7 @@ def test_invalid_cpu_target_fails_before_creating_output(tmp_path, value):
 def test_cpu_flag_cannot_silently_affect_placement_comparison(tmp_path):
     out = tmp_path / 'plan'
     with pytest.raises(SystemExit):
-        campaign.main(['--scenario', 'mobility9', '--cpu-hpa-target', '80',
+        campaign.main(['--scenario', 'mobility9', '--comparison', 'placement', '--cpu-hpa-target', '80',
                        '--plan-only', str(out)])
     assert not out.exists()
 

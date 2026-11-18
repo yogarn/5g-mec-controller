@@ -28,6 +28,7 @@ type Settings struct {
 	MobilityQuery             string             `yaml:"mobility_query"`
 	CPUSaturation             float64            `yaml:"cpu_saturation"`
 	LocalityWeight            float64            `yaml:"locality_weight"`
+	PreferClose               bool               `yaml:"prefer_close"`
 	CooldownSeconds           float64            `yaml:"cooldown_seconds"`
 	MaxMetricAgeSeconds       float64            `yaml:"max_metric_age_seconds"`
 	ScaleDownSeconds          float64            `yaml:"scale_down_seconds"`
@@ -94,7 +95,7 @@ func LoadSettings(path string) (*Settings, error) {
 		"manifest": true, "namespace": true, "prometheus_url": true, "latency_query": true,
 		"slo_seconds": true, "min_replicas": true, "max_replicas": true, "interval_seconds": true,
 		"mode": true, "mutate": true, "eligible_nodes": true, "cpu_utilization_query": true,
-		"mobility_query": true, "cpu_saturation": true, "locality_weight": true,
+		"mobility_query": true, "cpu_saturation": true, "locality_weight": true, "prefer_close": true,
 		"cooldown_seconds": true, "max_metric_age_seconds": true, "scale_down_seconds": true,
 		"resource_weights": true, "gpu_nodes": true, "gpu_utilization_query": true,
 		"vram_utilization_query": true, "zero_locality_nodes": true,

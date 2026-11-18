@@ -86,18 +86,18 @@ def selected_workload(settings):
     return settings.get('workload', 'face-detection')
 
 
-def check_service_routing(service):
+def check_service_routing(service, prefer_close=False):
     """Require cluster-wide endpoints without locality hints or client affinity."""
     spec = service['spec']
     annotations = service.get('metadata', {}).get('annotations') or {}
-    if (spec.get('trafficDistribution') is not None or
+    if (spec.get('trafficDistribution') != ('PreferClose' if prefer_close else None) or
             spec.get('externalTrafficPolicy', 'Cluster') != 'Cluster' or
             spec.get('internalTrafficPolicy', 'Cluster') != 'Cluster' or
             spec.get('sessionAffinity', 'None') != 'None' or
             any(annotations.get(key, 'Disabled').lower() not in ('disabled', '')
                 for key in ('service.kubernetes.io/topology-mode',
                             'service.kubernetes.io/topology-aware-hints'))):
-        raise RuntimeError('Workload Service requires cluster-wide routing without locality preference or session affinity')
+        raise RuntimeError('Workload Service routing does not match requested mode or has session affinity')
 
 
 class RunnerProgress:
@@ -311,6 +311,26 @@ def reset(workload='face-detection'):
              '--timeout=180s')
 
 
+def set_prefer_close_zones(nodes):
+    """Save node zones and label each node as its own zone for PreferClose."""
+    original = {}
+    try:
+        for name in nodes:
+            node = json.loads(kube('get', 'node', name, '-o', 'json', capture_output=True, text=True).stdout)
+            original[name] = (node.get('metadata', {}).get('labels') or {}).get('topology.kubernetes.io/zone')
+            kube('label', 'node', name, 'topology.kubernetes.io/zone=' + name, '--overwrite')
+    except Exception:
+        restore_prefer_close_zones(original)
+        raise
+    return original
+
+
+def restore_prefer_close_zones(original):
+    for name, zone in original.items():
+        label = 'topology.kubernetes.io/zone-' if zone is None else 'topology.kubernetes.io/zone=' + zone
+        kube('label', 'node', name, label, '--overwrite')
+
+
 def query(url, expression):
     with urlopen(url.rstrip('/') + '/api/v1/query?' + urlencode({'query': expression}), timeout=10) as response:
         result = json.load(response)
@@ -367,7 +387,7 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
-def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml'):
+def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml', prefer_close=False):
     """Write one shared workload manifest for both methods."""
     documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
@@ -378,6 +398,11 @@ def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=N
     if use_tc:
         metadata = deployments[0]['spec']['template'].setdefault('metadata', {})
         metadata.setdefault('annotations', {})['cni.projectcalico.org/ipv4pools'] = json.dumps([POOL_NAME])
+    if prefer_close:
+        service = next((doc for doc in documents if doc and doc.get('kind') == 'Service'), None)
+        if service is None:
+            raise ValueError('PreferClose requires a workload Service')
+        service['spec']['trafficDistribution'] = 'PreferClose'
     path = root / filename
     with path.open('x') as stream:
         yaml.safe_dump_all(documents, stream, sort_keys=False)
@@ -565,7 +590,7 @@ def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, ma
         period = 30 if scale_down_period_seconds is None else int(scale_down_period_seconds)
         hpa['spec']['behavior'] = {
             'scaleUp': {'stabilizationWindowSeconds': 0,
-                        'policies': [{'type': 'Pods', 'value': 2, 'periodSeconds': 30}]},
+                        'policies': [{'type': 'Pods', 'value': 4, 'periodSeconds': 30}]},
             'scaleDown': {'stabilizationWindowSeconds': stab, 'tolerance': 0.01,
                           'policies': [{'type': 'Pods', 'value': pods, 'periodSeconds': period}]},
         }
@@ -812,7 +837,7 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False):
     """Persist the exact matched replica budget and manifests used by a method."""
     if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
         raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
@@ -850,6 +875,7 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     else:
         effective_min_replicas = config['min_replicas']
     config['min_replicas'] = effective_min_replicas
+    config['prefer_close'] = bool(prefer_close and method == 'proposed')
     if type(max_replicas) is not int or max_replicas < config['min_replicas']:
         raise ValueError('max replicas must be an integer at least min_replicas')
     if resource_weights is not None:
@@ -974,7 +1000,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   scale_down_stabilization_seconds=settings.get('scale_down_stabilization_seconds'),
                                                   scale_down_pods=settings.get('scale_down_pods'),
                                                   scale_down_period_seconds=settings.get('scale_down_period_seconds'),
-                                                  cpu_hpa_target=settings.get('cpu_hpa_target', DEFAULT_CPU_HPA_TARGET))
+                                                  cpu_hpa_target=settings.get('cpu_hpa_target', DEFAULT_CPU_HPA_TARGET),
+                                                  prefer_close=settings.get('prefer_close', False))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -1026,7 +1053,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                             raise RuntimeError('controller did not deploy the workload')
                 _wait_initial_replicas_ready(app, config['min_replicas'], method=method)
                 service = get('service', app)
-                check_service_routing(service)
+                check_service_routing(service, settings.get('prefer_close', False))
                 port = service['spec']['ports'][0]['nodePort']
                 site_urls = {site: f'http://{address}:{port}/detect'
                              for site, address in settings['site_node_ips'].items()}
@@ -1228,6 +1255,7 @@ def main(argv=None):
                         help='proposed resource-score weights, nonnegative and summing to 1')
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
+    parser.add_argument('--prefer-close', action='store_true', help='enable PreferClose routing and demand-proportional proposed locality')
     args = parser.parse_args(argv)
     if args.long_run:
         if args.scenario != 'mobility9':
@@ -1261,7 +1289,7 @@ def main(argv=None):
         args.scenario = 'scaler-balanced'
     args.comparison = args.comparison or (
         'scaling' if args.scenario in SCALER_SCENARIOS else
-        'placement' if args.scenario else
+        'full' if args.scenario else
         'full'
     )
     if args.final_hold and args.scenario not in SCALER_SCENARIOS:
@@ -1353,6 +1381,7 @@ def main(argv=None):
     settings['latency_floor_ms'] = args.latency_floor_ms
     settings['rt_target_factor'] = float(args.rt_target_factor)
     settings['cpu_hpa_target'] = args.cpu_hpa_target
+    settings['prefer_close'] = args.prefer_close
     if args.scale_down_stabilization_seconds is not None:
         settings['scale_down_stabilization_seconds'] = args.scale_down_stabilization_seconds
     if args.scale_down_pods is not None:
@@ -1527,6 +1556,7 @@ def main(argv=None):
         'node_restriction': SCALER_NODE if args.comparison == 'scaling' else None,
         'hpa_targets': hpa_targets,
         'cpu_hpa_target': args.cpu_hpa_target if args.comparison != 'placement' else None,
+        'prefer_close': args.prefer_close,
         'replica_bounds': {'min': min_replicas, 'max': max_replicas},
         'pacing': {'rps_per_ue': float(args.rps_per_ue), 'max_in_flight_per_ue': args.max_in_flight_per_ue},
         'tc_ms': args.tc_ms,
@@ -1543,7 +1573,7 @@ def main(argv=None):
     if args.plan_only is not None:
         output = args.plan_only.resolve()
         output.mkdir(parents=True, exist_ok=False)
-        _campaign_manifest(output, args.tc_ms is not None, workload)
+        _campaign_manifest(output, args.tc_ms is not None, workload, prefer_close=args.prefer_close)
         for method in method_order:
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
@@ -1552,7 +1582,7 @@ def main(argv=None):
                             scale_down_stabilization_seconds=args.scale_down_stabilization_seconds,
                             scale_down_pods=args.scale_down_pods,
                             scale_down_period_seconds=args.scale_down_period_seconds,
-                            cpu_hpa_target=args.cpu_hpa_target)
+                            cpu_hpa_target=args.cpu_hpa_target, prefer_close=args.prefer_close)
         if args.latency_floor_ms or metric_unit == 'milliseconds':
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
@@ -1624,10 +1654,14 @@ def main(argv=None):
         if not ns.stdout.strip():
             kube('create', 'namespace', NAMESPACE)
         delay = TrafficDelay(args.tc_ms) if args.tc_ms is not None else None
+        original_zones = None
         try:
+            if args.prefer_close:
+                original_zones = set_prefer_close_zones(controller_config['eligible_nodes'])
+                (root / 'node-zones-before.yaml').write_text(yaml.safe_dump(original_zones))
             if delay is not None:
                 delay.start()
-            _campaign_manifest(root, delay is not None, workload)
+            _campaign_manifest(root, delay is not None, workload, prefer_close=args.prefer_close)
             if args.comparison == 'scaling':
                 reset(workload)
                 check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, workload_identity(workload))
@@ -1656,8 +1690,12 @@ def main(argv=None):
             try:
                 reset(workload)
             finally:
-                if delay is not None:
-                    delay.close()
+                try:
+                    if original_zones is not None:
+                        restore_prefer_close_zones(original_zones)
+                finally:
+                    if delay is not None:
+                        delay.close()
         print(f'Campaign complete. Raw data, logs and plots: {root}', flush=True)
 
 

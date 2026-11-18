@@ -367,6 +367,22 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 	}
 
 	var bound []BoundPodResult
+	var podShares map[string]float64
+	if c.Settings.PreferClose {
+		podShares = make(map[string]float64)
+		active := 0.0
+		for _, existing := range pods {
+			if existing.Spec.NodeName != "" && existing.DeletionTimestamp == nil {
+				podShares[existing.Spec.NodeName]++
+				active++
+			}
+		}
+		if active > 0 {
+			for name := range podShares {
+				podShares[name] /= active
+			}
+		}
+	}
 	for _, pod := range unscheduled {
 		reqs, err := policy.PodRequests(pod.Spec)
 		if err != nil {
@@ -380,7 +396,7 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 		}
 		policyStarted := time.Now()
 		targetNode, scores, err := policy.ScoreCandidateNode(
-			nodes, reqs, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, "", allowed,
+			nodes, reqs, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, "", allowed, podShares,
 		)
 		c.logDecisionTiming("scheduler_score", policyStarted, pod.Name)
 		if err != nil {

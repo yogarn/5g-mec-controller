@@ -67,7 +67,7 @@ func finiteNonNeg(v float64) bool {
 }
 
 // RankNodes implements the exact same resource headroom + traffic locality score as controller/policy.py.
-func RankNodes(nodes []Node, requests map[string]float64, saturation, localityWeight float64, weights map[string]float64) (map[string]float64, error) {
+func RankNodes(nodes []Node, requests map[string]float64, saturation, localityWeight float64, weights map[string]float64, podShares ...map[string]float64) (map[string]float64, error) {
 	if err := config.ValidateResourceWeights(weights); err != nil {
 		return nil, err
 	}
@@ -134,14 +134,17 @@ func RankNodes(nodes []Node, requests map[string]float64, saturation, localityWe
 		if total > 0 {
 			locality = n.ArrivalRate / total
 		}
+		if len(podShares) > 0 {
+			locality -= podShares[0][n.Name]
+		}
 		scores[n.Name] = (1-localityWeight)*resourceScore + localityWeight*locality
 	}
 	return scores, nil
 }
 
 // ScoreCandidateNode filters feasible nodes (optionally restricted to allowed) and returns the highest-scoring placement node.
-func ScoreCandidateNode(nodes []Node, requests map[string]float64, saturation, localityWeight float64, weights map[string]float64, exclude string, allowed map[string]bool) (string, map[string]float64, error) {
-	if _, err := RankNodes(nodes, requests, saturation, localityWeight, weights); err != nil {
+func ScoreCandidateNode(nodes []Node, requests map[string]float64, saturation, localityWeight float64, weights map[string]float64, exclude string, allowed map[string]bool, podShares ...map[string]float64) (string, map[string]float64, error) {
+	if _, err := RankNodes(nodes, requests, saturation, localityWeight, weights, podShares...); err != nil {
 		return "", nil, err
 	}
 	candidates := make(map[string]float64)
@@ -162,7 +165,7 @@ func ScoreCandidateNode(nodes []Node, requests map[string]float64, saturation, l
 		projected := make([]Node, len(nodes))
 		copy(projected, nodes)
 		projected[i] = cloneNodeWithDelta(n, requests)
-		ranked, err := RankNodes(projected, requests, saturation, localityWeight, weights)
+		ranked, err := RankNodes(projected, requests, saturation, localityWeight, weights, podShares...)
 		if err != nil {
 			return "", nil, err
 		}

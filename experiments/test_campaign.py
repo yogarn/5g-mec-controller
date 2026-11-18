@@ -27,14 +27,14 @@ def test_workload_service_accepts_cluster_wide_routing():
     ('sessionAffinity', 'ClientIP'),
 ])
 def test_campaign_rejects_restricted_or_sticky_routing(field, value):
-    with pytest.raises(RuntimeError, match='cluster-wide routing'):
+    with pytest.raises(RuntimeError, match='routing does not match'):
         campaign.check_service_routing({'spec': {field: value}})
 
 
 @pytest.mark.parametrize('key', ['service.kubernetes.io/topology-mode',
                                  'service.kubernetes.io/topology-aware-hints'])
 def test_campaign_rejects_legacy_topology_hints(key):
-    with pytest.raises(RuntimeError, match='cluster-wide routing'):
+    with pytest.raises(RuntimeError, match='routing does not match'):
         campaign.check_service_routing({'spec': {}, 'metadata': {'annotations': {key: 'Auto'}}})
 
 
@@ -480,7 +480,7 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'active_telemetry', lambda url: True)
     monkeypatch.setattr(campaign, 'stop_process', lambda p: None)
-    monkeypatch.setattr(campaign, 'check_service_routing', lambda s: None)
+    monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'transfer', lambda *a: None)
     monkeypatch.setattr(campaign, 'time', type('T', (), {'monotonic': lambda: 0.0, 'sleep': lambda _: None}))
 
@@ -548,7 +548,7 @@ def test_phase_transition_mode_is_recorded_and_forwarded(tmp_path, transition):
 def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     output = tmp_path / 'mobility-plan'
-    campaign.main(['--scenario', 'mobility9', '--plan-only', str(output)])
+    campaign.main(['--scenario', 'mobility9', '--comparison', 'placement', '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['comparison'] == 'placement'
     assert plan['slo_ms'] == 150
@@ -737,7 +737,7 @@ def test_staircase_plan_is_balanced_with_matched_bounded_hpas(tmp_path):
     hpas = [yaml.safe_load((out / f'{m}-hpa.yaml').read_text()) for m in ('baseline', 'proposed')]
     assert hpas[0]['spec']['behavior'] == hpas[1]['spec']['behavior']
     assert hpas[0]['spec']['behavior']['scaleDown']['tolerance'] == .01
-    assert hpas[0]['spec']['behavior']['scaleUp']['policies'][0]['value'] == 2
+    assert hpas[0]['spec']['behavior']['scaleUp']['policies'][0]['value'] == 4
     assert hpas[1]['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
     assert hpas[1]['spec']['metrics'][0]['external']['target']['value'] == '150m'
     for m in ('baseline', 'proposed'):

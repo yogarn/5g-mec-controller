@@ -13,6 +13,7 @@ spec:
       labels:
         app: mec-placement-pedestrian-detection
     spec:
+      terminationGracePeriodSeconds: 60
       schedulerName: default-scheduler
       affinity:
         nodeAffinity:
@@ -42,6 +43,10 @@ spec:
       - name: pedestrian-detection
         image: 10.34.211.140:30500/pedestrian-detection@sha256:44878a87af1976556d975a1748ffc730300570a98e6e692c42db6f346afe8abc
         imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 35"]
         ports:
         - name: http
           containerPort: 5000
