@@ -1,5 +1,6 @@
 """Run the matched gNB3-hotspot campaign from core, including remote UEs and plots."""
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 import fcntl
@@ -32,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
+SITE_NODES = {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
 MOBILITY9_SCHEDULE = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
 SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
 SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
@@ -107,6 +109,7 @@ class RunnerProgress:
         self.path, self.method = path, method
         self.offset = 0
         self.phase = 'starting UE runner'
+        self.traffic_started = False
         self.last_status = None
 
     def poll(self, final=False):
@@ -122,6 +125,8 @@ class RunnerProgress:
                 text = line.rstrip()
                 if text.startswith(('[..]', '[RUN]', '[--]')):
                     self.phase = text
+                if text.startswith('[RUN]'):
+                    self.traffic_started = True
                 print(f'{self.method}: {text}', flush=True)
         now = time.monotonic()
         if not final and (self.last_status is None or now - self.last_status >= 30):
@@ -232,7 +237,7 @@ def prerequisites(settings):
     kube('get', '--raw=/readyz')
     nodes = json.loads(kube('get', 'nodes', '-o', 'json', capture_output=True, text=True).stdout)
     by_name = {node['metadata']['name']: node for node in nodes['items']}
-    for site, node_name in (('gnb-1', 'gnb1'), ('gnb-2', 'gnb-2'), ('gnb-3', 'gnb-3')):
+    for site, node_name in SITE_NODES.items():
         addresses = {item['address'] for item in by_name.get(node_name, {}).get('status', {}).get('addresses', [])
                      if item.get('type') == 'InternalIP'}
         if settings['site_node_ips'][site] not in addresses:
@@ -302,7 +307,8 @@ def reset(workload='face-detection'):
     app = workload_identity(workload)
     kube('-n', NAMESPACE, 'delete', 'hpa/' + app + '-baseline',
          'hpa/' + app + '-proposed',
-         'deployment/' + app, 'service/' + app, '--ignore-not-found=true',
+         'deployment/' + app, 'service/' + app,
+         *(f'deployment/{app}-anchor-{site}' for site in SITE_NODES), '--ignore-not-found=true',
          '--cascade=foreground', '--wait=true', '--timeout=180s')
     pods = json.loads(kube('-n', NAMESPACE, 'get', 'pods', '-l', 'app=' + app,
                           '-o', 'json', capture_output=True, text=True).stdout)['items']
@@ -387,7 +393,8 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
-def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml', prefer_close=False):
+def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml',
+                       prefer_close=False, site_anchors=False):
     """Write one shared workload manifest for both methods."""
     documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
@@ -403,6 +410,27 @@ def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=N
         if service is None:
             raise ValueError('PreferClose requires a workload Service')
         service['spec']['trafficDistribution'] = 'PreferClose'
+    if site_anchors:
+        deployment = deployments[0]
+        app = deployment['metadata']['name']
+        anchors = []
+        for site, node in SITE_NODES.items():
+            anchor = deepcopy(deployment)
+            anchor['metadata']['name'] = f'{app}-anchor-{site}'
+            anchor['spec']['replicas'] = 1
+            template = anchor['spec']['template']
+            selector = {'mec-replica': f'anchor-{site}'}
+            anchor['spec']['selector']['matchLabels'].update(selector)
+            template['metadata']['labels'].update(selector)
+            template['spec']['schedulerName'] = 'default-scheduler'
+            template['spec'].setdefault('nodeSelector', {})['kubernetes.io/hostname'] = node
+            anchors.append(anchor)
+        managed = {'mec-replica': 'managed'}
+        deployment['spec']['replicas'] = 0
+        deployment['spec']['selector']['matchLabels'].update(managed)
+        deployment['spec']['template']['metadata']['labels'].update(managed)
+        with (root / 'site-anchors.yaml').open('x') as stream:
+            yaml.safe_dump_all(anchors, stream, sort_keys=False)
     path = root / filename
     with path.open('x') as stream:
         yaml.safe_dump_all(documents, stream, sort_keys=False)
@@ -837,7 +865,16 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False):
+def _managed_replica_bounds(min_replicas, max_replicas):
+    anchors = len(SITE_NODES)
+    minimum = max(1, min_replicas - anchors)
+    maximum = max_replicas - anchors
+    if maximum < minimum:
+        raise ValueError('--max-replicas must fit all site anchors and at least one managed replica')
+    return minimum, maximum
+
+
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False, site_anchors=False):
     """Persist the exact matched replica budget and manifests used by a method."""
     if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
         raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
@@ -874,10 +911,12 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
         effective_min_replicas = SCALER_MIN_REPLICAS
     else:
         effective_min_replicas = config['min_replicas']
-    config['min_replicas'] = effective_min_replicas
-    config['prefer_close'] = bool(prefer_close and method == 'proposed')
-    if type(max_replicas) is not int or max_replicas < config['min_replicas']:
+    if type(max_replicas) is not int or max_replicas < effective_min_replicas:
         raise ValueError('max replicas must be an integer at least min_replicas')
+    config['prefer_close'] = bool(prefer_close and (method == 'proposed' or site_anchors))
+    if site_anchors:
+        effective_min_replicas, max_replicas = _managed_replica_bounds(effective_min_replicas, max_replicas)
+    config['min_replicas'] = effective_min_replicas
     if resource_weights is not None:
         config['resource_weights'] = validate_resource_weights(resource_weights)
     if locality_weight is not None:
@@ -908,7 +947,9 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
                 }
             }
         }
-    if fixed_replicas is not None or min_replicas is not None:
+    if site_anchors:
+        deployments[0]['spec']['replicas'] = 0
+    elif fixed_replicas is not None or min_replicas is not None:
         deployments[0]['spec']['replicas'] = effective_min_replicas
     method_manifest = root / f'{method}-workload.yaml'
     with method_manifest.open('x') as stream:
@@ -983,6 +1024,30 @@ def _wait_initial_replicas_ready(app, expected_replicas, method=None, timeout=18
         time.sleep(1)
 
 
+def _wait_site_anchor_endpoints(app, timeout=60):
+    """Verify the common Service has a ready anchor on each gNB before traffic."""
+    expected = {node: f'{app}-anchor-{site}-' for site, node in SITE_NODES.items()}
+    deadline = time.monotonic() + timeout
+    while True:
+        slices = json.loads(kube('-n', NAMESPACE, 'get', 'endpointslices', '-l',
+                                 f'kubernetes.io/service-name={app}', '-o', 'json',
+                                 capture_output=True, text=True).stdout)['items']
+        missing = set(expected)
+        for item in slices:
+            for endpoint in item.get('endpoints', []):
+                node = endpoint.get('nodeName')
+                pod = endpoint.get('targetRef') or {}
+                if (node in expected and pod.get('kind') == 'Pod'
+                        and pod.get('name', '').startswith(expected[node])
+                        and endpoint.get('conditions', {}).get('ready') is True):
+                    missing.discard(node)
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f'{app} missing ready site-anchor endpoints on {", ".join(sorted(missing))}')
+        time.sleep(2)
+
+
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
                resource_weights=None, locality_weight=None, comparison='full',
                autoscaler='controller', placement_engine='python', deschedule_interval=None, fixed_replicas=None, min_replicas=None):
@@ -1001,7 +1066,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   scale_down_pods=settings.get('scale_down_pods'),
                                                   scale_down_period_seconds=settings.get('scale_down_period_seconds'),
                                                   cpu_hpa_target=settings.get('cpu_hpa_target', DEFAULT_CPU_HPA_TARGET),
-                                                  prefer_close=settings.get('prefer_close', False))
+                                                  prefer_close=settings.get('prefer_close', False),
+                                                  site_anchors=settings.get('site_anchors', False))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -1029,6 +1095,12 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                     placement_dep = get('deployment', 'placement-controller', PLACEMENT_NAMESPACE)
                     if placement_dep.get('status', {}).get('readyReplicas') != 1:
                         raise RuntimeError('placement/placement-controller is not ready before workload deployment')
+                if settings.get('site_anchors'):
+                    for node in SITE_NODES.values():
+                        check_node_capacity(node, config['manifest'], 1)
+                    kube('apply', '-f', str(root / 'site-anchors.yaml'))
+                    for site in SITE_NODES:
+                        _wait_initial_replicas_ready(f'{app}-anchor-{site}', 1, method=method)
                 if hpa_path is not None:
                     kube('apply', '-f', config['manifest'])
                     kube('apply', '-f', hpa_path)
@@ -1051,15 +1123,22 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                             time.sleep(1)
                         else:
                             raise RuntimeError('controller did not deploy the workload')
-                _wait_initial_replicas_ready(app, config['min_replicas'], method=method)
+                seed_managed = settings.get('site_anchors', False)
+                if not seed_managed:
+                    _wait_initial_replicas_ready(app, config['min_replicas'], method=method)
                 service = get('service', app)
                 check_service_routing(service, settings.get('prefer_close', False))
+                if settings.get('site_anchors'):
+                    _wait_site_anchor_endpoints(app)
                 port = service['spec']['ports'][0]['nodePort']
                 site_urls = {site: f'http://{address}:{port}/detect'
                              for site, address in settings['site_node_ips'].items()}
                 if delay is not None:
                     delay.check()
-                command([sys.executable, '-m', 'utils.preflight', '--config', config_path])
+                preflight = [sys.executable, '-m', 'utils.preflight', '--config', config_path]
+                if seed_managed:
+                    preflight.append('--allow-zero-replicas')
+                command(preflight)
                 sampler = subprocess.Popen([sys.executable, '-u', '-m', 'utils.monitor_resources', 'sample', str(output / 'metrics.jsonl'), '--namespace', NAMESPACE, '--app', app, '--pods-only'], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
                 processes.append(sampler)
                 if hpa_path is not None:
@@ -1078,6 +1157,11 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                 deadline = time.monotonic() + 90
                 while ue.poll() is None:
                     progress.poll()
+                    if seed_managed and progress.traffic_started:
+                        # A native HPA with a positive minimum stays inactive at zero.
+                        kube('-n', NAMESPACE, 'scale', f'deployment/{app}', '--current-replicas=0',
+                             f'--replicas={config["min_replicas"]}')
+                        seed_managed = False
                     if delay is not None:
                         delay.check()
                     if any(p.poll() is not None for p in processes):
@@ -1256,6 +1340,8 @@ def main(argv=None):
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     parser.add_argument('--prefer-close', action='store_true', help='enable PreferClose routing and demand-proportional proposed locality')
+    parser.add_argument('--site-anchors', action='store_true',
+                        help='start both arms with one fixed serving pod per gNB within the total replica budget')
     args = parser.parse_args(argv)
     if args.long_run:
         if args.scenario != 'mobility9':
@@ -1292,6 +1378,12 @@ def main(argv=None):
         'full' if args.scenario else
         'full'
     )
+    if args.site_anchors:
+        if args.comparison == 'scaling':
+            parser.error('--site-anchors requires a placement or full comparison')
+        if args.autoscaler != 'hpa':
+            parser.error('--site-anchors requires native HPA (--autoscaler hpa)')
+        args.prefer_close = True
     if args.final_hold and args.scenario not in SCALER_SCENARIOS:
         parser.error('--final-hold requires a scaling scenario')
     if args.scenario == 'mobility9':
@@ -1382,6 +1474,7 @@ def main(argv=None):
     settings['rt_target_factor'] = float(args.rt_target_factor)
     settings['cpu_hpa_target'] = args.cpu_hpa_target
     settings['prefer_close'] = args.prefer_close
+    settings['site_anchors'] = args.site_anchors
     if args.scale_down_stabilization_seconds is not None:
         settings['scale_down_stabilization_seconds'] = args.scale_down_stabilization_seconds
     if args.scale_down_pods is not None:
@@ -1441,6 +1534,11 @@ def main(argv=None):
                     else DEFAULT_MIN_REPLICAS)
     if args.fixed_replicas is None and max_replicas < min_replicas:
         parser.error('--max-replicas must be at least min_replicas')
+    if args.site_anchors:
+        try:
+            managed_min, managed_max = _managed_replica_bounds(min_replicas, max_replicas)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.fixed_replicas is None:
         # Feed the resolved default into manifests as well as metadata.
         args.min_replicas = min_replicas
@@ -1568,12 +1666,22 @@ def main(argv=None):
             'metrics_server_hpa_unchanged': True,
         },
     }
+    if args.site_anchors:
+        shared_metadata['site_anchors'] = True
+        provenance['site_anchors'] = True
+        shared_metadata['site_anchor_nodes'] = SITE_NODES
+        shared_metadata['initial_replicas'] = len(SITE_NODES)
+        shared_metadata['managed_replica_bounds'] = {'min': managed_min, 'max': managed_max}
+        shared_metadata['active_total_replica_bounds'] = {
+            'min': managed_min + len(SITE_NODES), 'max': max_replicas,
+        }
     if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
     if args.plan_only is not None:
         output = args.plan_only.resolve()
         output.mkdir(parents=True, exist_ok=False)
-        _campaign_manifest(output, args.tc_ms is not None, workload, prefer_close=args.prefer_close)
+        _campaign_manifest(output, args.tc_ms is not None, workload, prefer_close=args.prefer_close,
+                           site_anchors=args.site_anchors)
         for method in method_order:
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
@@ -1582,7 +1690,8 @@ def main(argv=None):
                             scale_down_stabilization_seconds=args.scale_down_stabilization_seconds,
                             scale_down_pods=args.scale_down_pods,
                             scale_down_period_seconds=args.scale_down_period_seconds,
-                            cpu_hpa_target=args.cpu_hpa_target, prefer_close=args.prefer_close)
+                            cpu_hpa_target=args.cpu_hpa_target, prefer_close=args.prefer_close,
+                            site_anchors=args.site_anchors)
         if args.latency_floor_ms or metric_unit == 'milliseconds':
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
@@ -1623,6 +1732,9 @@ def main(argv=None):
               f'{minutes:g} minutes traffic per method ({2 * minutes:g} minutes total), '
               'plus UE switching, setup and transfer. Objective: all-attempt p90 '
               f'<= {slo_ms:g} ms. Shared replica ceiling: {max_replicas}.', flush=True)
+        if args.site_anchors:
+            print(f'Each arm starts with {len(SITE_NODES)} site anchors, then enables HPA '
+                  f'for {managed_min}–{managed_max} managed replicas at phase 1.', flush=True)
         if args.comparison != 'scaling':
             print(f'Proposed scoring: resource weights={resource_weights}; '
                   f'locality weight={locality_weight:g}; resource contribution={1-locality_weight:g}.', flush=True)
@@ -1661,7 +1773,8 @@ def main(argv=None):
                 (root / 'node-zones-before.yaml').write_text(yaml.safe_dump(original_zones))
             if delay is not None:
                 delay.start()
-            _campaign_manifest(root, delay is not None, workload, prefer_close=args.prefer_close)
+            _campaign_manifest(root, delay is not None, workload, prefer_close=args.prefer_close,
+                               site_anchors=args.site_anchors)
             if args.comparison == 'scaling':
                 reset(workload)
                 check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, workload_identity(workload))

@@ -48,14 +48,16 @@ def get(kind, name, namespace):
     return json.loads(kubectl('-n', namespace, 'get', kind, name, '-o', 'json'))
 
 
-def check_deployment(deployment):
+def check_deployment(deployment, allow_zero_replicas=False):
     spec = deployment.get('spec', {})
     desired = spec.get('replicas', 1)
     template = spec.get('template', {})
-    if (not isinstance(desired, int) or isinstance(desired, bool) or desired < 1
+    minimum = 0 if allow_zero_replicas else 1
+    if (not isinstance(desired, int) or isinstance(desired, bool) or desired < minimum
             or not template.get('metadata', {}).get('labels')
             or not template.get('spec', {}).get('containers')):
-        raise PreflightError('Deployment must have positive replicas and a labeled pod template with containers')
+        replicas = 'nonnegative' if allow_zero_replicas else 'positive'
+        raise PreflightError(f'Deployment must have {replicas} replicas and a labeled pod template with containers')
     return {'desired': desired, 'readiness': 'not checked (cold start permitted)'}
 
 
@@ -99,6 +101,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='config.yaml', help='Controller configuration')
     parser.add_argument('--service', help='Service name (default: the Deployment name)')
+    parser.add_argument('--allow-zero-replicas', action='store_true',
+                        help='allow a managed Deployment to start at zero when site anchors serve traffic')
     parser.add_argument('--json', action='store_true', help='Print the structured JSON report')
     return parser.parse_args(argv)
 
@@ -152,7 +156,7 @@ def main(argv=None):
         def inspect_deployment():
             nonlocal resource
             resource = get('deployment', deployment, namespace)
-            return check_deployment(resource)
+            return check_deployment(resource, args.allow_zero_replicas)
 
         check('deployment', inspect_deployment)
         service_name = args.service or deployment

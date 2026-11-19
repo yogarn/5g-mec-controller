@@ -147,7 +147,9 @@ def test_progress_relays_phase_lines_without_duplicates_or_partial_lines(tmp_pat
     path = tmp_path / 'runner.log'
     path.write_text('[RUN] phase_02: 2/19 ramp-up; 9 UEs\n[--] phase_02: 10')
     progress = campaign.RunnerProgress(path, 'proposed')
+    assert not progress.traffic_started
     progress.poll()
+    assert progress.traffic_started
     first = capsys.readouterr().out
     assert 'proposed: [RUN] phase_02: 2/19 ramp-up; 9 UEs' in first
     assert '[--]' not in first
@@ -297,6 +299,79 @@ def test_campaign_manifest_reserves_pool_only_with_tc(tmp_path, use_tc):
         assert key not in annotations
 
 
+@pytest.mark.parametrize('method_order', ['baseline-first', 'proposed-first'])
+def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
+    steep = campaign.ROOT / 'experiments/campaign-steep.yaml'
+    standard = campaign.load(campaign.ROOT / 'experiments/campaign.yaml')
+    settings = campaign.load(steep)
+    assert settings == standard | {'schedule': settings['schedule'], 'phase_duration': 120}
+    phases = parse_schedule(settings['schedule'])
+    assert [(p['workload_ue'], *(p[f'gnb{i}_ues'] for i in (1, 2, 3))) for p in phases] == [
+        (3, 1, 1, 1), (8, 2, 3, 3), (12, 2, 8, 2), (18, 2, 14, 2), (24, 2, 20, 2),
+        (24, 2, 2, 20), (18, 2, 2, 14), (12, 2, 2, 8), (8, 2, 3, 3), (3, 1, 1, 1),
+    ]
+    plan = tmp_path / 'plan'
+    campaign.main([
+        '--plan-only', str(plan), '--config', str(steep), '--comparison', 'full', '--site-anchors',
+        '--prefer-close', '--min-replicas', '3', '--max-replicas', '16', '--cpu-hpa-target', '80',
+        '--slo-ms', '150', '--latency-floor-ms', '125', '--tc-ms', '10', '--locality-weight', '0.4',
+        '--method-order', method_order,
+    ])
+    metadata = yaml.safe_load((plan / 'plan.yaml').read_text())
+    assert metadata['method_order'] == [method_order.split('-')[0],
+                                        'proposed' if method_order == 'baseline-first' else 'baseline']
+    assert metadata['phase_durations_s'] == [120] * 10
+    assert metadata['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
+    assert metadata['prefer_close'] is True
+    assert metadata['provenance']['site_anchors'] is True
+    assert metadata['site_anchor_nodes'] == {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
+    assert metadata['replica_bounds'] == {'min': 3, 'max': 16}
+    assert metadata['initial_replicas'] == 3
+    assert metadata['managed_replica_bounds'] == {'min': 1, 'max': 13}
+    assert metadata['active_total_replica_bounds'] == {'min': 4, 'max': 16}
+    anchors = list(yaml.safe_load_all((plan / 'site-anchors.yaml').read_text()))
+    assert len(anchors) == 3
+    for anchor, (site, node) in zip(anchors, metadata['site_anchor_nodes'].items()):
+        spec = anchor['spec']
+        assert spec['replicas'] == 1
+        assert spec['template']['spec']['schedulerName'] == 'default-scheduler'
+        assert spec['template']['spec']['nodeSelector']['kubernetes.io/hostname'] == node
+        assert spec['selector']['matchLabels']['mec-replica'] == f'anchor-{site}'
+        assert json.loads(spec['template']['metadata']['annotations']['cni.projectcalico.org/ipv4pools']) == [campaign.POOL_NAME]
+    for method, scheduler in [('baseline', 'default-scheduler'), ('proposed', 'mec-placement-scheduler')]:
+        workload, service = yaml.safe_load_all((plan / f'{method}-workload.yaml').read_text())
+        assert workload['spec']['replicas'] == 0
+        assert workload['spec']['selector']['matchLabels']['mec-replica'] == 'managed'
+        assert workload['spec']['template']['spec']['schedulerName'] == scheduler
+        assert service['spec']['trafficDistribution'] == 'PreferClose'
+        assert service['spec']['selector'] == {'app': workload['metadata']['name']}
+        hpa = yaml.safe_load((plan / f'{method}-hpa.yaml').read_text())
+        assert hpa['spec']['scaleTargetRef']['name'] == workload['metadata']['name']
+        assert (hpa['spec']['minReplicas'], hpa['spec']['maxReplicas']) == (1, 13)
+        config = yaml.safe_load((plan / f'{method}-controller.yaml').read_text())
+        assert config['prefer_close'] is True
+        assert config['locality_weight'] == 0.4
+    baseline = yaml.safe_load((plan / 'baseline-hpa.yaml').read_text())
+    assert baseline['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    proposed = yaml.safe_load((plan / 'proposed-hpa.yaml').read_text())
+    assert proposed['spec']['metrics'][0]['external']['target']['value'] == '25m'
+
+
+def test_site_anchor_readiness_requires_an_anchor_on_each_site(monkeypatch):
+    app = 'mec-placement-face-detection'
+    endpoints = [
+        {'nodeName': node, 'targetRef': {'kind': 'Pod', 'name': f'{app}-anchor-{site}-pod'},
+         'conditions': {'ready': True}}
+        for site, node in campaign.SITE_NODES.items()
+    ]
+    monkeypatch.setattr(campaign, 'kube', lambda *a, **kw: types.SimpleNamespace(
+        stdout=json.dumps({'items': [{'endpoints': endpoints}]})))
+    campaign._wait_site_anchor_endpoints(app, timeout=0)
+    endpoints[0]['targetRef']['name'] = f'{app}-managed-pod'
+    with pytest.raises(RuntimeError, match='missing ready site-anchor endpoints on gnb1'):
+        campaign._wait_site_anchor_endpoints(app, timeout=0)
+
+
 def test_separated_comparison_a_placement_vs_comparison_b_full(tmp_path):
     placement_dir = tmp_path / 'placement'
     placement_dir.mkdir()
@@ -423,10 +498,12 @@ def test_verify_incluster_components_checks_adapter_and_go_deployment(monkeypatc
         campaign.verify_incluster_components('hpa', 'go')
 
 
-@pytest.mark.parametrize('floor_ms', [0, 130])
-def test_incluster_go_with_hpa_applies_manifests_without_host_controller_processes(monkeypatch, tmp_path, floor_ms):
+@pytest.mark.parametrize(('floor_ms', 'site_anchors'), [(0, False), (130, False), (0, True)])
+def test_incluster_go_with_hpa_applies_manifests_without_host_controller_processes(monkeypatch, tmp_path,
+                                                                                floor_ms, site_anchors):
     spawned = []
     kube_calls = []
+    local_commands = []
     metric_name = campaign._latency_metric_name(floor_ms)
 
     class FakeProc:
@@ -451,6 +528,10 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     def fake_popen(cmd, **kwargs):
         proc = FakeProc(cmd)
         spawned.append(cmd)
+        if 'experiments.campaign_ue' in ' '.join(cmd):
+            assert not any('scale' in args for args in kube_calls)
+            kwargs['stdout'].write('[RUN] phase_01: traffic started\n')
+            kwargs['stdout'].flush()
         return proc
 
     def fake_kube(*args, **kwargs):
@@ -469,7 +550,8 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         if kind == 'deployment' and name == 'placement-controller' and namespace == 'placement':
             return {'spec': {'replicas': 1}, 'status': {'readyReplicas': 1}}
         if kind == 'deployment' and namespace == campaign.NAMESPACE:
-            return {'spec': {'replicas': 3}, 'status': {'readyReplicas': 3}}
+            replicas = 1 if '-anchor-' in name else 3
+            return {'spec': {'replicas': replicas}, 'status': {'readyReplicas': replicas}}
         if kind == 'service':
             return {'spec': {'ports': [{'nodePort': 30080}]}}
         raise AssertionError(f'unexpected get {kind} {name} {namespace}')
@@ -477,18 +559,12 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     monkeypatch.setattr(campaign.subprocess, 'Popen', fake_popen)
     monkeypatch.setattr(campaign, 'kube', fake_kube)
     monkeypatch.setattr(campaign, 'get', fake_get)
-    monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
+    monkeypatch.setattr(campaign, 'command', lambda args, **kw: local_commands.append(args))
     monkeypatch.setattr(campaign, 'active_telemetry', lambda url: True)
     monkeypatch.setattr(campaign, 'stop_process', lambda p: None)
     monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'transfer', lambda *a: None)
     monkeypatch.setattr(campaign, 'time', type('T', (), {'monotonic': lambda: 0.0, 'sleep': lambda _: None}))
-
-    class DummyProgress:
-        def __init__(self, *a): pass
-        def poll(self, final=False): pass
-
-    monkeypatch.setattr(campaign, 'RunnerProgress', DummyProgress)
 
     settings = {
         'workload': 'pedestrian-detection',
@@ -508,12 +584,18 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         'token': 'tok',
         'telemetry_url': 'http://tel',
         'latency_floor_ms': floor_ms,
+        'site_anchors': site_anchors,
+        'prefer_close': site_anchors,
     }
     run_root = tmp_path / 'run'
     run_root.mkdir()
+    if site_anchors:
+        monkeypatch.setattr(campaign, 'check_node_capacity', lambda *a: None)
+        monkeypatch.setattr(campaign, '_wait_site_anchor_endpoints', lambda *a: None)
+        campaign._campaign_manifest(run_root, True, settings['workload'], prefer_close=True, site_anchors=True)
     campaign.run_method(
         settings, 'camp', run_root, 'proposed', delay=None, slo_ms=150, max_replicas=10,
-        comparison='full', autoscaler='hpa', placement_engine='go',
+        comparison='full', autoscaler='hpa', placement_engine='go', min_replicas=3 if site_anchors else None,
     )
 
     assert not any('controller' in ' '.join(map(str, c)) for c in spawned)
@@ -533,6 +615,20 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     assert cfg['prometheus_url'] == 'http://placement-prometheus.placement.svc:9090'
     assert cfg['mutate'] is True
     assert 'scheduler bound pod=test' in (run_root / 'proposed' / 'controller.log').read_text()
+    app = campaign.workload_identity(settings['workload'])
+    scale_calls = [args for args in kube_calls if 'scale' in args]
+    if site_anchors:
+        assert scale_calls == [('-n', campaign.NAMESPACE, 'scale', f'deployment/{app}',
+                                '--current-replicas=0', '--replicas=1')]
+        assert ('-n', campaign.NAMESPACE, 'rollout', 'status', f'deployment/{app}',
+                '--timeout=180s') not in kube_calls
+        for site in campaign.SITE_NODES:
+            assert ('-n', campaign.NAMESPACE, 'rollout', 'status', f'deployment/{app}-anchor-{site}',
+                    '--timeout=180s') in kube_calls
+    else:
+        assert scale_calls == []
+    preflight = next(cmd for cmd in local_commands if 'utils.preflight' in cmd)
+    assert ('--allow-zero-replicas' in preflight) == site_anchors
 
 
 @pytest.mark.parametrize('transition', ['continuous', 'restart'])
