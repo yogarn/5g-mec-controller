@@ -67,11 +67,12 @@ class SummaryTests(unittest.TestCase):
 
     def test_three_site_counts_and_percentiles(self):
         events = records()
+        events[1]['server_node'] = 'core-5g'
         first = {'group': 'gnb-1', 'source_address': '10.0.0.3'}
         events[0]['workload_ue'] = events[-1]['workload_ue'] = 3
         events[0]['gnb1_ues'] = events[-1]['gnb1_ues'] = 1
         events[0]['ues'].append(first)
-        events.insert(-1, dict(events[1], **first, duration_ms=30))
+        events.insert(-1, dict(events[1], **first, duration_ms=30, server_node='gnb1'))
         events[-1]['attempts'] = 5
         events[-1]['successes'] = 3
         events[-1]['per_ue'].append({**first, 'attempts': 1, 'successes': 1})
@@ -80,9 +81,14 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(result['latency_p50_ms'], 20)
         self.assertEqual(result['latency_p90_ms'], 28)
         ue_rows = []
-        summarize.summarize(self.source, 15, ue_rows)
+        site_rows = []
+        summarize.summarize(self.source, 15, ue_rows, site_rows)
         site1 = next(row for row in ue_rows if row['group'] == 'gnb-1')
         self.assertEqual((site1['attempts'], site1['latency_p90_ms']), (1, 30))
+        self.assertEqual(
+            [(row['local_successes'], row['remote_successes'], row['unattributed_successes']) for row in site_rows],
+            [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+        )
 
     def test_per_ue_outputs_and_collision(self):
         self.load(records())

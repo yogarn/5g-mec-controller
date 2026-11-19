@@ -393,8 +393,13 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
+SPILL_READINESS_PROBE = {
+    'periodSeconds': 2, 'failureThreshold': 1, 'successThreshold': 2, 'timeoutSeconds': 1,
+}
+
+
 def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml',
-                       prefer_close=False, site_anchors=False):
+                       prefer_close=False, site_anchors=False, spill_high=None, spill_low=None):
     """Write one shared workload manifest for both methods."""
     documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
@@ -410,6 +415,15 @@ def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=N
         if service is None:
             raise ValueError('PreferClose requires a workload Service')
         service['spec']['trafficDistribution'] = 'PreferClose'
+    if spill_high is not None:
+        container = deployments[0]['spec']['template']['spec']['containers'][0]
+        container.setdefault('env', []).extend([
+            {'name': 'SPILL_HIGH', 'value': str(spill_high)},
+            {'name': 'SPILL_LOW', 'value': str(spill_low)},
+        ])
+        container['readinessProbe'].update(SPILL_READINESS_PROBE)
+        # Startup probe failures can restart the container, just like liveness.
+        container['startupProbe']['httpGet']['path'] = '/health'
     if site_anchors:
         deployment = deployments[0]
         app = deployment['metadata']['name']
@@ -874,6 +888,11 @@ def _managed_replica_bounds(min_replicas, max_replicas):
     return minimum, maximum
 
 
+def _supports_latency_floor(comparison, staircase, site_anchors):
+    return (comparison == 'full' or (comparison == 'scaling' and staircase)
+            or (comparison == 'placement' and site_anchors))
+
+
 def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False, site_anchors=False):
     """Persist the exact matched replica budget and manifests used by a method."""
     if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
@@ -890,11 +909,11 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     if rt_target_factor != 1.0 and comparison == 'placement':
         raise ValueError('rt_target_factor != 1.0 is not supported with --comparison placement (baseline and proposed must share the same latency autoscaler)')
     internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(rt_target_factor))
-    if latency_floor_ms and (not (comparison == 'full' or (comparison == 'scaling' and staircase))
+    if latency_floor_ms and (not _supports_latency_floor(comparison, staircase, site_anchors)
                             or autoscaler != 'hpa'
                             or type(latency_floor_ms) is not int or latency_floor_ms <= 0
                             or internal_target_dec <= Decimal(str(latency_floor_ms))):
-        raise ValueError('latency floor requires full/joint or staircase scaling with native HPA and 0 < floor < internal RT target')
+        raise ValueError('latency floor requires full, placement with site anchors, or staircase scaling with native HPA and 0 < floor < internal RT target')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     if min_replicas is not None:
         if type(min_replicas) is not int or min_replicas < 1:
@@ -1170,7 +1189,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                         prom_ok = active_telemetry(config['prometheus_url'])
                         if autoscaler != 'hpa':
                             adapter_ok = True
-                        elif method == 'proposed' and (settings.get('latency_floor_ms') or settings.get('rt_metric_unit') == 'milliseconds'):
+                        elif ((method == 'proposed' or comparison == 'placement')
+                              and (settings.get('latency_floor_ms') or settings.get('rt_metric_unit') == 'milliseconds')):
                             metric_unit = settings.get('rt_metric_unit', 'seconds')
                             adapter_ok = bool(_query_external_latency_metric(
                                 allow_not_found=True,
@@ -1307,7 +1327,7 @@ def main(argv=None):
     parser.add_argument('--rt-target-factor', type=float, default=1.0,
                         help='experimental headroom multiplier in (0, 1] applied only to proposed RT autoscaler internal target (default: 1.0)')
     parser.add_argument('--latency-floor-ms', type=int, default=0,
-                        help='full/joint or staircase scaling: fixed reference latency in whole milliseconds; 0 keeps raw RT/SLO')
+                        help='full, placement with site anchors, or staircase scaling: fixed reference latency in whole milliseconds; 0 keeps raw RT/SLO')
     parser.add_argument('--fixed-replicas', type=int,
                         help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
     parser.add_argument('--min-replicas', type=int,
@@ -1340,6 +1360,8 @@ def main(argv=None):
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     parser.add_argument('--prefer-close', action='store_true', help='enable PreferClose routing and demand-proportional proposed locality')
+    parser.add_argument('--spill-high', type=int, metavar='N', help='mark a pod unready at N pending detections')
+    parser.add_argument('--spill-low', type=int, metavar='N', help='restore readiness at N or fewer pending detections')
     parser.add_argument('--site-anchors', action='store_true',
                         help='start both arms with one fixed serving pod per gNB within the total replica budget')
     args = parser.parse_args(argv)
@@ -1378,6 +1400,14 @@ def main(argv=None):
         'full' if args.scenario else
         'full'
     )
+    spill_enabled = args.spill_high is not None or args.spill_low is not None
+    if spill_enabled:
+        if args.spill_high is None or args.spill_low is None:
+            parser.error('--spill-high and --spill-low must be supplied together')
+        if not 0 <= args.spill_low < args.spill_high:
+            parser.error('spill thresholds require 0 <= --spill-low < --spill-high')
+        if not (args.prefer_close and args.site_anchors):
+            parser.error('spillover requires --prefer-close and --site-anchors')
     if args.site_anchors:
         if args.comparison == 'scaling':
             parser.error('--site-anchors requires a placement or full comparison')
@@ -1434,9 +1464,8 @@ def main(argv=None):
     if args.latency_floor_ms:
         if args.autoscaler != 'hpa':
             parser.error('--latency-floor-ms requires native HPA (--autoscaler hpa)')
-        if not (args.comparison == 'full' or
-                (args.comparison == 'scaling' and args.scenario == 'scaler-staircase')):
-            parser.error('--latency-floor-ms requires --comparison full or --scenario scaler-staircase')
+        if not _supports_latency_floor(args.comparison, args.scenario == 'scaler-staircase', args.site_anchors):
+            parser.error('--latency-floor-ms requires --comparison full, --comparison placement with --site-anchors, or --scenario scaler-staircase')
     if args.max_replicas is not None and args.max_replicas < 1:
         parser.error('--max-replicas must be a positive integer')
     if args.phase_duration is not None and (not math.isfinite(args.phase_duration) or args.phase_duration < 60):
@@ -1468,6 +1497,8 @@ def main(argv=None):
         if args.scenario != 'mobility9':
             settings['schedule'] = args.phase_schedule
     workload = args.workload if args.workload is not None else selected_workload(settings)
+    if spill_enabled and workload != 'pedestrian-detection':
+        parser.error('spillover requires the pedestrian-detection workload')
     settings['workload'] = workload
     settings['staircase'] = args.scenario == 'scaler-staircase'
     settings['latency_floor_ms'] = args.latency_floor_ms
@@ -1578,6 +1609,8 @@ def main(argv=None):
                 metric_unit=metric_unit,
                 hpa_target_value=hpa_target_value,
             )
+        if args.comparison == 'placement':
+            hpa_targets['baseline'] = hpa_targets['proposed'].copy()
     if args.rt_target_factor == 1.0:
         scaling_formula = ('max(RT-floor, 0)/(SLO-floor)' if args.latency_floor_ms
                            else 'RT/SLO (unchanged; rounding can retain excess replicas)')
@@ -1607,12 +1640,15 @@ def main(argv=None):
             else (30 if settings['staircase'] else None)
         ),
     }
+    workload_image = _workload_image_ref(workload)
+    image_digest = (workload_image or '').partition('@')[2] or None
     provenance = {
         'core_git': _local_git_provenance(),
         'ue_git': None,
         'kubernetes_server_version': None,
         'kube_proxy_mode': None,
-        'workload_image': _workload_image_ref(workload),
+        'workload_image': workload_image,
+        'workload_image_digest': image_digest,
         'method_order': method_order,
     }
     shared_metadata = {
@@ -1620,6 +1656,7 @@ def main(argv=None):
         'response_contract': 'detection',
         'response_log_schema_version': 1,
         'http_threads': _workload_http_threads(workload),
+        'workload_image_digest': image_digest,
         'phase_transition': args.phase_transition,
         'comparison': args.comparison,
         'scenario': args.scenario,
@@ -1666,6 +1703,11 @@ def main(argv=None):
             'metrics_server_hpa_unchanged': True,
         },
     }
+    if spill_enabled:
+        spill_metadata = {'spill_high': args.spill_high, 'spill_low': args.spill_low,
+                          'spill_readiness_probe': SPILL_READINESS_PROBE.copy()}
+        shared_metadata.update(spill_metadata)
+        provenance.update(spill_metadata)
     if args.site_anchors:
         shared_metadata['site_anchors'] = True
         provenance['site_anchors'] = True
@@ -1681,7 +1723,7 @@ def main(argv=None):
         output = args.plan_only.resolve()
         output.mkdir(parents=True, exist_ok=False)
         _campaign_manifest(output, args.tc_ms is not None, workload, prefer_close=args.prefer_close,
-                           site_anchors=args.site_anchors)
+                           site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low)
         for method in method_order:
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
@@ -1774,7 +1816,7 @@ def main(argv=None):
             if delay is not None:
                 delay.start()
             _campaign_manifest(root, delay is not None, workload, prefer_close=args.prefer_close,
-                               site_anchors=args.site_anchors)
+                               site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low)
             if args.comparison == 'scaling':
                 reset(workload)
                 check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, workload_identity(workload))

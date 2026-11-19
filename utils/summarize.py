@@ -2,6 +2,7 @@
 """Summarize benchmark/client.py JSONL without modifying experiment data."""
 
 import argparse
+from collections import Counter
 import csv
 import json
 from contextlib import ExitStack
@@ -10,6 +11,8 @@ from pathlib import Path
 import sys
 
 from utils import defaults
+
+SITE_NODES = {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
 
 
 def number(value, name, *, minimum=None):
@@ -113,7 +116,8 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                             or len({address for _, address in keys}) != len(keys)):
                         raise ValueError('UE list does not match phase counts')
                     current = {'info': info, 'start': start, 'duration': duration,
-                               'ues': {key: [0, 0, [], 0] for key in keys}, 'latencies': [], 'slo_met': 0}
+                               'ues': {key: [0, 0, [], 0] for key in keys}, 'latencies': [], 'slo_met': 0,
+                               'serving_nodes': Counter()}
                 elif event == 'request':
                     if current is None or record['phase'] != current['info'][0]:
                         raise ValueError('request outside its phase')
@@ -144,6 +148,9 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                     stats[0] += 1
                     if success:
                         stats[1] += 1
+                        node = record.get('server_node')
+                        if isinstance(node, str) and node.strip():
+                            current['serving_nodes'][key[0], node] += 1
                         current['latencies'].append(latency)
                         stats[2].append(latency)
                         stats[3] += latency <= slo_ms
@@ -237,7 +244,7 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                                         'slo_ms': slo_ms, 'slo_met_attempts': ue_slo_met,
                                         'slo_attainment_all_attempts': ue_slo_met / ue_attempts if ue_attempts else None,
                                         'slo_attainment_scheduled': ue_slo_met / ue_scheduled if ue_scheduled else None})
-                    for group in ('gnb-1', 'gnb-2', 'gnb-3'):
+                    for group, local_node in SITE_NODES.items():
                         site_keys = [key for key in current['ues'] if key[0] == group]
                         site_scheduled = sum(ue_arrival[k][0] for k in site_keys)
                         site_started = sum(ue_arrival[k][1] for k in site_keys)
@@ -245,11 +252,16 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                         site_missed = sum(ue_arrival[k][3] for k in site_keys)
                         site_attempts = sum(current['ues'][k][0] for k in site_keys)
                         site_successes = sum(current['ues'][k][1] for k in site_keys)
+                        local = current['serving_nodes'][group, local_node]
+                        attributed = sum(n for (site, _), n in current['serving_nodes'].items() if site == group)
                         site_slo_met = sum(current['ues'][k][3] for k in site_keys)
                         site_latencies = sorted(lat for k in site_keys for lat in current['ues'][k][2])
                         site_rows.append({'phase': phase, 'group': group, 'ues': len(site_keys),
                                           'scheduled': site_scheduled, 'started': site_started, 'completed': site_completed,
                                           'attempts': site_attempts, 'successes': site_successes,
+                                          'local_successes': local,
+                                          'remote_successes': attributed - local,
+                                          'unattributed_successes': site_successes - attributed,
                                           'failures': site_attempts - site_successes,
                                           'missed': site_missed,
                                           'actual_start_rate': site_started / generation,

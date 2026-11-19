@@ -15,7 +15,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 class HealthState:
     """Thread-safe model and inference-worker health state."""
 
-    def __init__(self, hang_timeout_s=30.0):
+    def __init__(self, hang_timeout_s=30.0, spill_high=None, spill_low=None):
         self._lock = threading.Lock()
         self.ready = False
         self.failed = False
@@ -24,6 +24,10 @@ class HealthState:
         self.input_size = None
         self.inference_started_at = None
         self.hang_timeout_s = float(hang_timeout_s)
+        self.spill_high = spill_high
+        self.spill_low = spill_low
+        self.pending = 0
+        self.saturated = False
 
     def mark_ready(self, model_sha256, input_size):
         with self._lock:
@@ -47,7 +51,15 @@ class HealthState:
         with self._lock:
             self.inference_started_at = None
 
-    def status(self, check_hang=True):
+    def update_pending(self, delta):
+        with self._lock:
+            self.pending += delta
+            if self.pending >= self.spill_high:
+                self.saturated = True
+            elif self.pending <= self.spill_low:
+                self.saturated = False
+
+    def status(self, check_hang=True, check_saturation=False):
         with self._lock:
             if self.failed:
                 return 503, {'status': 'error', 'error': self.error or 'worker failed'}
@@ -57,6 +69,8 @@ class HealthState:
                 elapsed = time.monotonic() - self.inference_started_at
                 if elapsed > self.hang_timeout_s:
                     return 503, {'status': 'hung', 'elapsed_seconds': round(elapsed, 3)}
+            if check_saturation and self.saturated:
+                return 503, {'status': 'saturated', 'pending': self.pending}
             return 200, {'status': 'ok', 'model_sha256': self.model_sha256, 'input_size': self.input_size}
 
 
@@ -65,7 +79,7 @@ def start_health_server(state, host='0.0.0.0', port=5001):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path in ('/ready', '/health'):
-                code, payload = state.status(check_hang=True)
+                code, payload = state.status(check_saturation=self.path == '/ready')
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -87,7 +101,17 @@ def start_health_server(state, host='0.0.0.0', port=5001):
 
 
 def create_app(detector=None, health_port=None):
-    state = HealthState(hang_timeout_s=float(os.getenv('HEALTH_INFERENCE_HANG_SECONDS', '30')))
+    spill_high = spill_low = None
+    if os.getenv('SPILL_HIGH'):
+        try:
+            spill_high = int(os.environ['SPILL_HIGH'])
+            spill_low = int(os.environ.get('SPILL_LOW', ''))
+            if not 0 <= spill_low < spill_high:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError('SPILL_HIGH and SPILL_LOW must be integers with 0 <= SPILL_LOW < SPILL_HIGH') from exc
+    state = HealthState(hang_timeout_s=float(os.getenv('HEALTH_INFERENCE_HANG_SECONDS', '30')),
+                        spill_high=spill_high, spill_low=spill_low)
     if health_port is None:
         env_port = os.getenv('HEALTH_PORT', '').strip()
         if env_port:
@@ -119,11 +143,20 @@ def create_app(detector=None, health_port=None):
 
     @app.get('/ready')
     def ready():
-        code, payload = state.status(check_hang=True)
+        code, payload = state.status(check_saturation=True)
         return jsonify(payload), code
 
     @app.post('/detect')
     def detect():
+        if spill_high is None:
+            return detect_image()
+        state.update_pending(1)
+        try:
+            return detect_image()
+        finally:
+            state.update_pending(-1)
+
+    def detect_image():
         started = time.perf_counter()
         request_id = request.headers.get('X-Request-ID') or uuid.uuid4().hex
         if 'image' not in request.files:

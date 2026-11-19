@@ -10,7 +10,7 @@ import pytest
 
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
-from app import create_app
+from app import HealthState, create_app
 from detector import Detector, letterbox, person_boxes
 
 
@@ -75,12 +75,18 @@ def test_bad_export_shape_fails_instead_of_silent_detections():
         person_boxes(np.zeros((1, 300, 6)), (640, 480), (1, 1, 0, 0))
 
 
-def test_health_listener_stays_responsive_while_detect_is_blocked():
+@pytest.mark.parametrize('spill_enabled', [False, True])
+def test_health_listener_stays_responsive_while_detect_is_blocked(monkeypatch, spill_enabled):
     import json
     import threading
     from urllib.request import urlopen
+    from urllib.error import HTTPError
     from werkzeug.serving import make_server
-    from app import HealthState
+
+    monkeypatch.delenv('SPILL_HIGH', raising=False)
+    if spill_enabled:
+        monkeypatch.setenv('SPILL_HIGH', '1')
+        monkeypatch.setenv('SPILL_LOW', '0')
 
     entered = threading.Event()
     release = threading.Event()
@@ -129,12 +135,24 @@ def test_health_listener_stays_responsive_while_detect_is_blocked():
         with urlopen(f'http://127.0.0.1:{health_port}/health', timeout=1) as resp:
             assert resp.status == 200
             assert json.loads(resp.read())['status'] == 'ok'
-        with urlopen(f'http://127.0.0.1:{health_port}/ready', timeout=1) as resp:
-            assert resp.status == 200
+        ready_url = f'http://127.0.0.1:{health_port}/ready'
+        if spill_enabled:
+            with pytest.raises(HTTPError) as exc:
+                urlopen(ready_url, timeout=1)
+            assert exc.value.code == 503
+            assert json.loads(exc.value.read()) == {'status': 'saturated', 'pending': 1}
+            assert flask_app.test_client().get('/ready').status_code == 503
+            assert flask_app.test_client().get('/health').status_code == 200
+        else:
+            with urlopen(ready_url, timeout=1) as resp:
+                assert resp.status == 200
+            assert flask_app.extensions['health_state'].pending == 0
 
         release.set()
         t.join(timeout=3)
         assert detect_result['status'] == 200
+        with urlopen(ready_url, timeout=1) as resp:
+            assert resp.status == 200
     finally:
         release.set()
         api_server.shutdown()
@@ -144,8 +162,6 @@ def test_health_listener_stays_responsive_while_detect_is_blocked():
 
 
 def test_health_reflects_startup_hang_and_worker_failure(monkeypatch, tmp_path):
-    from app import HealthState
-
     state = HealthState(hang_timeout_s=0.05)
     code, body = state.status(check_hang=True)
     assert code == 503 and body['status'] == 'starting'
@@ -187,6 +203,8 @@ def test_health_reflects_startup_hang_and_worker_failure(monkeypatch, tmp_path):
         def predict(self, _image):
             raise RuntimeError('ort failure')
 
+    monkeypatch.setenv('SPILL_HIGH', '1')
+    monkeypatch.setenv('SPILL_LOW', '0')
     app = create_app(FailingDetector())
     app.config['TESTING'] = True
     client = app.test_client()
@@ -195,7 +213,52 @@ def test_health_reflects_startup_hang_and_worker_failure(monkeypatch, tmp_path):
         client.post('/detect', data=payload())
     assert client.get('/health').status_code == 503
     assert client.get('/ready').status_code == 503
+    assert app.extensions['health_state'].pending == 0
+    assert not app.extensions['health_state'].saturated
 
     monkeypatch.setenv('MODEL_PATH', str(tmp_path / 'missing.onnx'))
     with pytest.raises(Exception):
         create_app()
+
+
+@pytest.mark.parametrize(('high', 'low'), [('five', '3'), ('5', ''), ('5', '-1'), ('5', '5'), ('0', '0')])
+def test_invalid_spill_configuration_fails_at_startup(monkeypatch, high, low):
+    monkeypatch.setenv('SPILL_HIGH', high)
+    monkeypatch.setenv('SPILL_LOW', low)
+    with pytest.raises(ValueError, match='0 <= SPILL_LOW < SPILL_HIGH'):
+        create_app()
+
+
+def test_pending_hysteresis_and_concurrent_updates():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    state = HealthState(spill_high=5, spill_low=3)
+    state.mark_ready('abc', 320)
+    for _ in range(4):
+        state.update_pending(1)
+    assert state.status(check_saturation=True)[0] == 200
+    state.update_pending(1)
+    state.update_pending(-1)
+    assert state.status(check_saturation=True) == (503, {'status': 'saturated', 'pending': 4})
+    state.update_pending(-1)
+    assert state.status(check_saturation=True)[0] == 200
+    state.update_pending(-3)
+
+    barrier = Barrier(9, timeout=5)
+
+    def request_pending():
+        state.update_pending(1)
+        barrier.wait()
+        barrier.wait()
+        state.update_pending(-1)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(request_pending) for _ in range(8)]
+        barrier.wait()
+        assert state.status(check_saturation=True) == (503, {'status': 'saturated', 'pending': 8})
+        barrier.wait()
+        for future in futures:
+            future.result()
+    assert state.pending == 0
+    assert state.status(check_saturation=True)[0] == 200

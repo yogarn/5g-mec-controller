@@ -822,3 +822,114 @@ Service is deleted during teardown. Both arms retain the same routing setting.
 Pedestrian Pods use a 35-second `preStop` wait within a 60-second termination
 grace period, allowing in-flight requests time to complete after eviction.
 The descheduler still evicts before the ReplicaSet creates its replacement.
+
+### Steep placement spillover smoke test
+
+Run this in Bash on core from the repository root before the four commands in
+`run-experiments-steep.sh`. Use an idle cluster and a shell with `kubectl`,
+`jq`, `curl`, and the campaign virtual environment. The smoke test uses one
+anchor per site in a temporary namespace, with no UEs, HPA, or TC changes.
+The shell restores the four original zone labels and deletes the namespace
+on exit.
+
+```bash
+(
+set -euo pipefail
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+scratch=$(mktemp -d /tmp/steep-spill-smoke.XXXXXX)
+ns=steep-spill-smoke-${scratch##*.}
+ns=${ns,,}
+app=mec-placement-pedestrian-detection
+image=apps/pedestrian-detection/images/bus.jpg
+zone=topology.kubernetes.io/zone
+nodes=(gnb1 gnb-2 gnb-3 core-5g)
+loads=()
+bash experiments/run.sh --plan-only "$scratch/plan" --config experiments/campaign-steep.yaml \
+  --comparison placement --autoscaler hpa --prefer-close --site-anchors \
+  --min-replicas 3 --max-replicas 16 --slo-ms 150 --latency-floor-ms 125 --spill-high 5 --spill-low 3
+kubectl get nodes "${nodes[@]}" -o json > "$scratch/nodes.json"
+kubectl create namespace "$ns"
+cleanup() {
+  set +e
+  for pid in "${loads[@]}"; do kill "$pid" 2>/dev/null || true; done
+  kubectl delete namespace "$ns" --wait=true --timeout=120s
+  for node in "${nodes[@]}"; do
+    label=$(jq -r --arg node "$node" --arg zone "$zone" \
+      '.items[] | select(.metadata.name == $node) | .metadata.labels[$zone] |
+       if . == null then $zone + "-" else $zone + "=" + . end' "$scratch/nodes.json")
+    kubectl label node "$node" "$label" --overwrite
+  done
+}
+trap cleanup EXIT
+for node in "${nodes[@]}"; do kubectl label node "$node" "$zone=$node" --overwrite; done
+# Use regular Pod IPs for this smoke test by dropping the campaign's TC pool annotation.
+{
+  cat "$scratch/plan/site-anchors.yaml"
+  printf '%s\n' '---'
+  cat "$scratch/plan/workload.yaml"
+} | sed -e "s/^  namespace: services$/  namespace: $ns/" -e '/cni\.projectcalico\.org\/ipv4pools:/d' |
+  kubectl -n "$ns" apply -f -
+kubectl -n "$ns" wait --for=condition=Available --timeout=180s \
+  "deployment/$app-anchor-gnb-1" "deployment/$app-anchor-gnb-2" "deployment/$app-anchor-gnb-3"
+pod=$(kubectl -n "$ns" get pod -l mec-replica=anchor-gnb-2 -o jsonpath='{.items[0].metadata.name}')
+ip=$(kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.podIP}')
+port=$(kubectl -n "$ns" get service "$app" -o jsonpath='{.spec.ports[0].nodePort}')
+
+endpoints() {
+  kubectl -n "$ns" get endpointslice -l "kubernetes.io/service-name=$app" -o json |
+    jq -r '.items[].endpoints[] | [.nodeName, .targetRef.name, .conditions.ready, ([.hints.forZones[]?.name] | join(","))] | @tsv'
+}
+serving() {
+  for i in {1..8}; do
+    curl -fsS --max-time 5 -F "image=@$image" "http://10.34.211.196:$port/detect" |
+      jq -er '.server_node' || return
+  done | sort | uniq -c
+}
+
+echo 'Before load: all anchors ready, responses from gnb-2'
+endpoints
+serving
+for i in {1..5}; do
+  curl -sS --limit-rate 2k --max-time 90 -H 'Expect:' -F "image=@$image" \
+    "http://$ip:5000/detect" > "$scratch/upload-$i.log" 2>&1 &
+  loads+=("$!")
+done
+kubectl -n "$ns" wait pod/"$pod" --for=condition=Ready=false --timeout=20s
+sleep 3
+echo 'Under load: readiness 503 at pending 5, health 200, gnb-2 endpoint not ready, remote responses'
+curl -sS --max-time 5 -w ' HTTP %{http_code}\n' "http://$ip:5001/ready"
+curl -sS --max-time 5 -w ' HTTP %{http_code}\n' "http://$ip:5001/health"
+endpoints
+serving
+
+kill "${loads[4]}"
+wait "${loads[4]}" || true
+sleep 3
+echo 'At pending 4: readiness stays 503'
+curl -sS --max-time 5 -w ' HTTP %{http_code}\n' "http://$ip:5001/ready"
+kill "${loads[3]}"
+wait "${loads[3]}" || true
+kubectl -n "$ns" wait pod/"$pod" --for=condition=Ready --timeout=20s
+for pid in "${loads[@]:0:3}"; do kill "$pid"; wait "$pid" || true; done
+sleep 3
+echo 'After pending reaches 3: readiness recovers, then gnb-2 serves again'
+curl -sS --max-time 5 -w ' HTTP %{http_code}\n' "http://$ip:5001/ready"
+endpoints
+serving
+)
+```
+
+The slow uploads go directly to the site pod to hold handler slots while
+the NodePort checks use new connections. Proceed with the campaigns after
+observing all three routing states and the readiness transition at pending 4
+and 3. Kubernetes documents cluster-wide fallback when a zone has no
+available endpoints. The smoke test checks the actual NodePort dataplane.
+
+For each arm, `summary-sites.csv` groups successful responses by `phase` and
+`group` (UE site). Local-served fraction is `local_successes / attributed`
+and spill rate is `remote_successes / attributed`, where `attributed` is
+`local_successes + remote_successes`. Report `unattributed_successes`
+separately, and leave either fraction blank when the denominator is zero.
+Remote successes include both other gNBs and core. The spill-on minus
+spill-off comparison accounts for remote routing that also occurs without
+the readiness gate.

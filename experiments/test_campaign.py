@@ -357,6 +357,83 @@ def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
     assert proposed['spec']['metrics'][0]['external']['target']['value'] == '25m'
 
 
+@pytest.mark.parametrize('method_order', ['baseline-first', 'proposed-first'])
+@pytest.mark.parametrize('spill_enabled', [False, True])
+def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled):
+    plan = tmp_path / 'plan'
+    spill_flags = ['--spill-high', '5', '--spill-low', '3'] if spill_enabled else []
+    campaign.main([
+        '--plan-only', str(plan), '--config', str(campaign.ROOT / 'experiments/campaign-steep.yaml'),
+        '--comparison', 'placement', '--autoscaler', 'hpa', '--prefer-close', '--site-anchors',
+        '--min-replicas', '3', '--max-replicas', '16', '--slo-ms', '150', '--latency-floor-ms', '125',
+        '--method-order', method_order, *spill_flags,
+    ])
+    meta = yaml.safe_load((plan / 'plan.yaml').read_text())
+    assert meta['method_order'][0] == method_order.split('-')[0]
+    assert meta['comparison'] == 'placement'
+    assert meta['phase_durations_s'] == [120] * 10
+    assert meta['prefer_close'] is True
+    assert meta['hpa_targets']['baseline'] == meta['hpa_targets']['proposed']
+    assert meta['workload_image_digest'] == meta['provenance']['workload_image'].split('@')[1]
+    assert meta['provenance']['workload_image_digest'] == meta['workload_image_digest']
+    readiness = {'periodSeconds': 2, 'failureThreshold': 1, 'successThreshold': 2, 'timeoutSeconds': 1}
+    spill_meta = {'spill_high': 5, 'spill_low': 3, 'spill_readiness_probe': readiness}
+    for item in (meta, meta['provenance']):
+        if spill_enabled:
+            assert {key: item[key] for key in spill_meta} == spill_meta
+        else:
+            assert spill_meta.keys().isdisjoint(item)
+
+    baseline, proposed = [yaml.safe_load((plan / f'{method}-hpa.yaml').read_text())['spec']
+                          for method in ('baseline', 'proposed')]
+    assert baseline == proposed
+    assert (baseline['minReplicas'], baseline['maxReplicas']) == (1, 13)
+    metric = baseline['metrics'][0]['external']
+    assert metric['metric']['name'] == 'ue_p90_excess_latency_125ms_seconds'
+    assert metric['target']['value'] == '25m'
+
+    original = next(yaml.safe_load_all(campaign.workload_manifest('pedestrian-detection').read_text()))
+    original_container = original['spec']['template']['spec']['containers'][0]
+    anchors = list(yaml.safe_load_all((plan / 'site-anchors.yaml').read_text()))
+    assert {dep['spec']['template']['spec']['nodeSelector']['kubernetes.io/hostname']
+            for dep in anchors} == {'gnb1', 'gnb-2', 'gnb-3'}
+    workloads = []
+    for method in ('baseline', 'proposed'):
+        deployment, service = yaml.safe_load_all((plan / f'{method}-workload.yaml').read_text())
+        assert service['spec']['trafficDistribution'] == 'PreferClose'
+        workloads.append(deployment)
+    for deployment in workloads + anchors:
+        container = deployment['spec']['template']['spec']['containers'][0]
+        assert container['image'].endswith('@' + meta['workload_image_digest'])
+        assert container['livenessProbe'] == original_container['livenessProbe']
+        if spill_enabled:
+            assert container['readinessProbe'] == original_container['readinessProbe'] | readiness
+            assert {env['name']: env['value'] for env in container['env'] if env['name'].startswith('SPILL_')} == {
+                'SPILL_HIGH': '5', 'SPILL_LOW': '3',
+            }
+            assert container['startupProbe']['httpGet']['path'] == '/health'
+        else:
+            assert container == original_container
+
+
+@pytest.mark.parametrize(('flags', 'error'), [
+    (['--spill-high', '5'], 'must be supplied together'),
+    (['--spill-low', '3'], 'must be supplied together'),
+    (['--spill-high', '5', '--spill-low', '5'], '0 <= --spill-low < --spill-high'),
+    (['--spill-high', '5', '--spill-low', '-1'], '0 <= --spill-low < --spill-high'),
+    (['--spill-high', '5', '--spill-low', '3', '--prefer-close'], 'requires --prefer-close and --site-anchors'),
+    (['--spill-high', '5', '--spill-low', '3', '--site-anchors'], 'requires --prefer-close and --site-anchors'),
+    (['--cpu-hpa-target', '80'], 'placement uses latency HPA for both methods'),
+])
+def test_steep_placement_rejects_invalid_flags(tmp_path, capsys, flags, error):
+    plan = tmp_path / 'plan'
+    with pytest.raises(SystemExit) as exc:
+        campaign.main(['--comparison', 'placement', '--plan-only', str(plan), *flags])
+    assert exc.value.code == 2
+    assert error in capsys.readouterr().err
+    assert not plan.exists()
+
+
 def test_site_anchor_readiness_requires_an_anchor_on_each_site(monkeypatch):
     app = 'mec-placement-face-detection'
     endpoints = [

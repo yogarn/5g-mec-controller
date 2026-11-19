@@ -41,7 +41,7 @@ spec:
                 - core-5g
       containers:
       - name: pedestrian-detection
-        image: 10.34.211.140:30500/pedestrian-detection@sha256:c853a0a07a685127f89ac5a6e6a49bd38908a8ee62f10e9d36b01de7fe163d32
+        image: 10.34.211.140:30500/pedestrian-detection@sha256:5245d82fcec53c68db02844135a38eed05e7ee263b987571d38e16d1f4e0d269
         imagePullPolicy: IfNotPresent
         lifecycle:
           preStop:
