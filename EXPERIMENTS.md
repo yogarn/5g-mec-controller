@@ -823,10 +823,21 @@ Pedestrian Pods use a 35-second `preStop` wait within a 60-second termination
 grace period, allowing in-flight requests time to complete after eviction.
 The descheduler still evicts before the ReplicaSet creates its replacement.
 
+### Edge-only steep placement
+
+The two `steep_pl_off_*` commands in `run-experiments-steep.sh` use
+`--edge-only` with spillover off. The eligible workload nodes are `gnb1`,
+`gnb-2`, and `gnb-3`, which are the three UE ingress sites. Each has a fixed
+anchor. Both arms use the same latency HPA and PreferClose, which routes
+within the ingress zone while a local endpoint is ready. If an anchor and all
+other local endpoints are unavailable, PreferClose can route to another gNB.
+Compare local-served fractions using the per-site CSV below. Record the pinned
+image digest when comparing with earlier runs.
+
 ### Steep placement spillover smoke test
 
-Run this in Bash on core from the repository root before the four commands in
-`run-experiments-steep.sh`. Use an idle cluster and a shell with `kubectl`,
+Run this in Bash on core from the repository root before the two spill-on
+commands in `run-experiments-steep.sh`. Use an idle cluster and a shell with `kubectl`,
 `jq`, `curl`, and the campaign virtual environment. The smoke test uses one
 anchor per site in a temporary namespace, with no UEs, HPA, or TC changes.
 The shell restores the four original zone labels and deletes the namespace

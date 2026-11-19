@@ -34,6 +34,7 @@ NAMESPACE = 'services'
 APP = 'mec-placement-face-detection'
 WORKLOADS = ('face-detection', 'pedestrian-detection')
 SITE_NODES = {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
+EDGE_NODES = tuple(SITE_NODES.values())
 MOBILITY9_SCHEDULE = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
 SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
 SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
@@ -274,6 +275,8 @@ def connectivity_probe(settings):
     app = workload_identity(selected_workload(settings))
     for document in documents:
         document['metadata']['namespace'] = probe_id
+        if settings.get('edge_only') and document.get('kind') == 'Deployment':
+            _restrict_workload_nodes(document, EDGE_NODES)
     created = False
     remote_started = False
     try:
@@ -398,13 +401,25 @@ SPILL_READINESS_PROBE = {
 }
 
 
+def _restrict_workload_nodes(deployment, nodes):
+    pod_spec = deployment['spec']['template']['spec']
+    node_affinity = pod_spec.setdefault('affinity', {}).setdefault('nodeAffinity', {})
+    node_affinity['requiredDuringSchedulingIgnoredDuringExecution'] = {
+        'nodeSelectorTerms': [{
+            'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': list(nodes)}],
+        }],
+    }
+
+
 def _campaign_manifest(root, use_tc, workload='face-detection', scheduler_name=None, filename='workload.yaml',
-                       prefer_close=False, site_anchors=False, spill_high=None, spill_low=None):
+                       prefer_close=False, site_anchors=False, spill_high=None, spill_low=None, edge_only=False):
     """Write one shared workload manifest for both methods."""
     documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
     deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
     if len(deployments) != 1:
         raise ValueError('application manifest requires exactly one Deployment')
+    if edge_only:
+        _restrict_workload_nodes(deployments[0], EDGE_NODES)
     if scheduler_name is not None:
         deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
     if use_tc:
@@ -893,7 +908,7 @@ def _supports_latency_floor(comparison, staircase, site_anchors):
             or (comparison == 'placement' and site_anchors))
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False, site_anchors=False):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='face-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False, site_anchors=False, edge_only=False):
     """Persist the exact matched replica budget and manifests used by a method."""
     if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
         raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
@@ -915,6 +930,15 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
                             or internal_target_dec <= Decimal(str(latency_floor_ms))):
         raise ValueError('latency floor requires full, placement with site anchors, or staircase scaling with native HPA and 0 < floor < internal RT target')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
+    if edge_only:
+        config['eligible_nodes'] = list(EDGE_NODES)
+        for key in ('zero_locality_nodes', 'gpu_nodes'):
+            config[key] = [node for node in config.get(key, []) if node in EDGE_NODES]
+        # The Go telemetry client rejects series for nodes outside eligible_nodes.
+        node_filter = (
+            f'node_cpu_seconds_total{{job="node-exporter",mode="idle",node=~"{"|".join(EDGE_NODES)}"}}'
+        )
+        config['cpu_utilization_query'] = f'({config["cpu_utilization_query"]}) and on(node) {node_filter}'
     if min_replicas is not None:
         if type(min_replicas) is not int or min_replicas < 1:
             raise ValueError('min replicas must be a positive integer')
@@ -953,19 +977,9 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
     if comparison == 'scaling':
         deployments[0]['spec']['replicas'] = effective_min_replicas
-        deployments[0]['spec']['template']['spec']['affinity'] = {
-            'nodeAffinity': {
-                'requiredDuringSchedulingIgnoredDuringExecution': {
-                    'nodeSelectorTerms': [{
-                        'matchFields': [{
-                            'key': 'metadata.name',
-                            'operator': 'In',
-                            'values': [SCALER_NODE],
-                        }]
-                    }]
-                }
-            }
-        }
+        _restrict_workload_nodes(deployments[0], [SCALER_NODE])
+    elif edge_only:
+        _restrict_workload_nodes(deployments[0], EDGE_NODES)
     if site_anchors:
         deployments[0]['spec']['replicas'] = 0
     elif fixed_replicas is not None or min_replicas is not None:
@@ -1086,7 +1100,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   scale_down_period_seconds=settings.get('scale_down_period_seconds'),
                                                   cpu_hpa_target=settings.get('cpu_hpa_target', DEFAULT_CPU_HPA_TARGET),
                                                   prefer_close=settings.get('prefer_close', False),
-                                                  site_anchors=settings.get('site_anchors', False))
+                                                  site_anchors=settings.get('site_anchors', False),
+                                                  edge_only=settings.get('edge_only', False))
     app = workload_identity(selected_workload(settings))
     processes = []
     remote_started = False
@@ -1115,7 +1130,7 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                     if placement_dep.get('status', {}).get('readyReplicas') != 1:
                         raise RuntimeError('placement/placement-controller is not ready before workload deployment')
                 if settings.get('site_anchors'):
-                    for node in SITE_NODES.values():
+                    for node in EDGE_NODES:
                         check_node_capacity(node, config['manifest'], 1)
                     kube('apply', '-f', str(root / 'site-anchors.yaml'))
                     for site in SITE_NODES:
@@ -1360,6 +1375,8 @@ def main(argv=None):
     parser.add_argument('--locality-weight', type=float,
                         help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
     parser.add_argument('--prefer-close', action='store_true', help='enable PreferClose routing and demand-proportional proposed locality')
+    parser.add_argument('--edge-only', action='store_true',
+                        help='place workload replicas only on the three gNB nodes')
     parser.add_argument('--spill-high', type=int, metavar='N', help='mark a pod unready at N pending detections')
     parser.add_argument('--spill-low', type=int, metavar='N', help='restore readiness at N or fewer pending detections')
     parser.add_argument('--site-anchors', action='store_true',
@@ -1400,6 +1417,8 @@ def main(argv=None):
         'full' if args.scenario else
         'full'
     )
+    if args.edge_only and args.comparison == 'scaling':
+        parser.error('--edge-only requires a placement or full comparison; scaling runs on core-5g')
     spill_enabled = args.spill_high is not None or args.spill_low is not None
     if spill_enabled:
         if args.spill_high is None or args.spill_low is None:
@@ -1506,6 +1525,8 @@ def main(argv=None):
     settings['cpu_hpa_target'] = args.cpu_hpa_target
     settings['prefer_close'] = args.prefer_close
     settings['site_anchors'] = args.site_anchors
+    if args.edge_only:
+        settings['edge_only'] = True
     if args.scale_down_stabilization_seconds is not None:
         settings['scale_down_stabilization_seconds'] = args.scale_down_stabilization_seconds
     if args.scale_down_pods is not None:
@@ -1708,6 +1729,10 @@ def main(argv=None):
                           'spill_readiness_probe': SPILL_READINESS_PROBE.copy()}
         shared_metadata.update(spill_metadata)
         provenance.update(spill_metadata)
+    if args.edge_only:
+        edge_metadata = {'edge_only': True, 'eligible_nodes': list(EDGE_NODES)}
+        shared_metadata.update(edge_metadata)
+        provenance.update(edge_metadata)
     if args.site_anchors:
         shared_metadata['site_anchors'] = True
         provenance['site_anchors'] = True
@@ -1723,7 +1748,8 @@ def main(argv=None):
         output = args.plan_only.resolve()
         output.mkdir(parents=True, exist_ok=False)
         _campaign_manifest(output, args.tc_ms is not None, workload, prefer_close=args.prefer_close,
-                           site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low)
+                           site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low,
+                           edge_only=args.edge_only)
         for method in method_order:
             _method_configs(output, method, slo_ms, max_replicas, args.debug,
                             resource_weights, locality_weight, workload, args.comparison, args.autoscaler, args.deschedule_interval, args.fixed_replicas,
@@ -1733,7 +1759,7 @@ def main(argv=None):
                             scale_down_pods=args.scale_down_pods,
                             scale_down_period_seconds=args.scale_down_period_seconds,
                             cpu_hpa_target=args.cpu_hpa_target, prefer_close=args.prefer_close,
-                            site_anchors=args.site_anchors)
+                            site_anchors=args.site_anchors, edge_only=args.edge_only)
         if args.latency_floor_ms or metric_unit == 'milliseconds':
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
@@ -1811,12 +1837,14 @@ def main(argv=None):
         original_zones = None
         try:
             if args.prefer_close:
-                original_zones = set_prefer_close_zones(controller_config['eligible_nodes'])
+                zone_nodes = EDGE_NODES if args.edge_only else controller_config['eligible_nodes']
+                original_zones = set_prefer_close_zones(zone_nodes)
                 (root / 'node-zones-before.yaml').write_text(yaml.safe_dump(original_zones))
             if delay is not None:
                 delay.start()
             _campaign_manifest(root, delay is not None, workload, prefer_close=args.prefer_close,
-                               site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low)
+                               site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low,
+                               edge_only=args.edge_only)
             if args.comparison == 'scaling':
                 reset(workload)
                 check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, workload_identity(workload))

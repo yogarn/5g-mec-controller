@@ -358,15 +358,15 @@ def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
 
 
 @pytest.mark.parametrize('method_order', ['baseline-first', 'proposed-first'])
-@pytest.mark.parametrize('spill_enabled', [False, True])
-def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled):
+@pytest.mark.parametrize(('spill_enabled', 'edge_only'), [(False, False), (True, False), (False, True)])
+def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled, edge_only):
     plan = tmp_path / 'plan'
     spill_flags = ['--spill-high', '5', '--spill-low', '3'] if spill_enabled else []
     campaign.main([
         '--plan-only', str(plan), '--config', str(campaign.ROOT / 'experiments/campaign-steep.yaml'),
         '--comparison', 'placement', '--autoscaler', 'hpa', '--prefer-close', '--site-anchors',
         '--min-replicas', '3', '--max-replicas', '16', '--slo-ms', '150', '--latency-floor-ms', '125',
-        '--method-order', method_order, *spill_flags,
+        '--method-order', method_order, *spill_flags, *(['--edge-only'] if edge_only else []),
     ])
     meta = yaml.safe_load((plan / 'plan.yaml').read_text())
     assert meta['method_order'][0] == method_order.split('-')[0]
@@ -376,6 +376,11 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled):
     assert meta['hpa_targets']['baseline'] == meta['hpa_targets']['proposed']
     assert meta['workload_image_digest'] == meta['provenance']['workload_image'].split('@')[1]
     assert meta['provenance']['workload_image_digest'] == meta['workload_image_digest']
+    expected_nodes = ['gnb1', 'gnb-2', 'gnb-3'] if edge_only else ['gnb1', 'gnb-2', 'gnb-3', 'core-5g']
+    for item in (meta, meta['provenance'], meta['campaign_settings']):
+        assert item.get('edge_only', False) is edge_only
+    if edge_only:
+        assert meta['eligible_nodes'] == meta['provenance']['eligible_nodes'] == expected_nodes
     readiness = {'periodSeconds': 2, 'failureThreshold': 1, 'successThreshold': 2, 'timeoutSeconds': 1}
     spill_meta = {'spill_high': 5, 'spill_low': 3, 'spill_readiness_probe': readiness}
     for item in (meta, meta['provenance']):
@@ -401,9 +406,18 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled):
     for method in ('baseline', 'proposed'):
         deployment, service = yaml.safe_load_all((plan / f'{method}-workload.yaml').read_text())
         assert service['spec']['trafficDistribution'] == 'PreferClose'
+        controller = yaml.safe_load((plan / f'{method}-controller.yaml').read_text())
+        assert controller['eligible_nodes'] == expected_nodes
+        assert controller['zero_locality_nodes'] == ([] if edge_only else ['core-5g'])
+        if edge_only:
+            assert controller['cpu_utilization_query'].endswith(
+                'and on(node) node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}')
         workloads.append(deployment)
     for deployment in workloads + anchors:
-        container = deployment['spec']['template']['spec']['containers'][0]
+        spec = deployment['spec']['template']['spec']
+        terms = spec['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
+        assert [node for term in terms for node in term['matchFields'][0]['values']] == expected_nodes
+        container = spec['containers'][0]
         assert container['image'].endswith('@' + meta['workload_image_digest'])
         assert container['livenessProbe'] == original_container['livenessProbe']
         if spill_enabled:
@@ -431,6 +445,15 @@ def test_steep_placement_rejects_invalid_flags(tmp_path, capsys, flags, error):
         campaign.main(['--comparison', 'placement', '--plan-only', str(plan), *flags])
     assert exc.value.code == 2
     assert error in capsys.readouterr().err
+    assert not plan.exists()
+
+
+def test_edge_only_rejects_scaling_comparison(tmp_path, capsys):
+    plan = tmp_path / 'plan'
+    with pytest.raises(SystemExit) as exc:
+        campaign.main(['--comparison', 'scaling', '--edge-only', '--plan-only', str(plan)])
+    assert exc.value.code == 2
+    assert 'scaling runs on core-5g' in capsys.readouterr().err
     assert not plan.exists()
 
 
@@ -575,12 +598,14 @@ def test_verify_incluster_components_checks_adapter_and_go_deployment(monkeypatc
         campaign.verify_incluster_components('hpa', 'go')
 
 
-@pytest.mark.parametrize(('floor_ms', 'site_anchors'), [(0, False), (130, False), (0, True)])
+@pytest.mark.parametrize(('floor_ms', 'site_anchors', 'edge_only'),
+                         [(0, False, False), (130, False, False), (0, True, False), (125, True, True)])
 def test_incluster_go_with_hpa_applies_manifests_without_host_controller_processes(monkeypatch, tmp_path,
-                                                                                floor_ms, site_anchors):
+                                                                                floor_ms, site_anchors, edge_only):
     spawned = []
     kube_calls = []
     local_commands = []
+    capacity_checks = []
     metric_name = campaign._latency_metric_name(floor_ms)
 
     class FakeProc:
@@ -663,16 +688,19 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         'latency_floor_ms': floor_ms,
         'site_anchors': site_anchors,
         'prefer_close': site_anchors,
+        'edge_only': edge_only,
     }
     run_root = tmp_path / 'run'
     run_root.mkdir()
     if site_anchors:
-        monkeypatch.setattr(campaign, 'check_node_capacity', lambda *a: None)
+        monkeypatch.setattr(campaign, 'check_node_capacity', lambda node, *a: capacity_checks.append(node))
         monkeypatch.setattr(campaign, '_wait_site_anchor_endpoints', lambda *a: None)
-        campaign._campaign_manifest(run_root, True, settings['workload'], prefer_close=True, site_anchors=True)
+        campaign._campaign_manifest(run_root, True, settings['workload'], prefer_close=True, site_anchors=True,
+                                    edge_only=edge_only)
     campaign.run_method(
         settings, 'camp', run_root, 'proposed', delay=None, slo_ms=150, max_replicas=10,
-        comparison='full', autoscaler='hpa', placement_engine='go', min_replicas=3 if site_anchors else None,
+        comparison='placement' if edge_only else 'full', autoscaler='hpa', placement_engine='go',
+        min_replicas=3 if site_anchors else None,
     )
 
     assert not any('controller' in ' '.join(map(str, c)) for c in spawned)
@@ -685,12 +713,14 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     assert any(args[:2] == ('get', '--raw') and metric_name in args[2] for args in kube_calls)
     hpa = yaml.safe_load((run_root / 'proposed-hpa.yaml').read_text())
     assert hpa['spec']['metrics'][0]['external']['metric']['name'] == metric_name
-    assert hpa['spec']['metrics'][0]['external']['target']['value'] == ('20m' if floor_ms else '150m')
+    assert hpa['spec']['metrics'][0]['external']['target']['value'] == f'{150 - floor_ms}m'
     cm = yaml.safe_load(cm_file.read_text())
     cfg = yaml.safe_load(cm['data']['config.yaml'])
     assert cfg['manifest'] == '/etc/placement/manifest.yaml'
     assert cfg['prometheus_url'] == 'http://placement-prometheus.placement.svc:9090'
     assert cfg['mutate'] is True
+    assert ('core-5g' in cfg['eligible_nodes']) is not edge_only
+    assert capacity_checks == (['gnb1', 'gnb-2', 'gnb-3'] if site_anchors else [])
     assert 'scheduler bound pod=test' in (run_root / 'proposed' / 'controller.log').read_text()
     app = campaign.workload_identity(settings['workload'])
     scale_calls = [args for args in kube_calls if 'scale' in args]
