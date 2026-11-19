@@ -405,9 +405,10 @@ def _restrict_workload_nodes(deployment, nodes):
     pod_spec = deployment['spec']['template']['spec']
     node_affinity = pod_spec.setdefault('affinity', {}).setdefault('nodeAffinity', {})
     node_affinity['requiredDuringSchedulingIgnoredDuringExecution'] = {
+        # Kubernetes combines terms with OR and accepts one value per node field match.
         'nodeSelectorTerms': [{
-            'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': list(nodes)}],
-        }],
+            'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [node]}],
+        } for node in nodes],
     }
 
 

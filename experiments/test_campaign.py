@@ -416,7 +416,10 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled, edge_
     for deployment in workloads + anchors:
         spec = deployment['spec']['template']['spec']
         terms = spec['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
-        assert [node for term in terms for node in term['matchFields'][0]['values']] == expected_nodes
+        assert terms == [
+            {'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [node]}]}
+            for node in expected_nodes
+        ]
         container = spec['containers'][0]
         assert container['image'].endswith('@' + meta['workload_image_digest'])
         assert container['livenessProbe'] == original_container['livenessProbe']
@@ -455,6 +458,28 @@ def test_edge_only_rejects_scaling_comparison(tmp_path, capsys):
     assert exc.value.code == 2
     assert 'scaling runs on core-5g' in capsys.readouterr().err
     assert not plan.exists()
+
+
+def test_edge_only_connectivity_probe_renders_one_node_per_match_term(monkeypatch):
+    settings = campaign.load(campaign.ROOT / 'experiments/campaign-steep.yaml')
+    documents = []
+
+    def fake_kube(*args, **kwargs):
+        if args == ('create', '-f', '-'):
+            documents.extend(yaml.safe_load_all(kwargs['input']))
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(campaign, '_pod_nodes', lambda _: [])
+    monkeypatch.setattr(campaign, 'get', lambda *_: {'spec': {'ports': [{'nodePort': 30000}]}})
+    monkeypatch.setattr(campaign, 'command', lambda *args, **kwargs: None)
+    campaign.connectivity_probe(settings | {'edge_only': True})
+
+    deployment = next(doc for doc in documents if doc['kind'] == 'Deployment')
+    affinity = deployment['spec']['template']['spec']['affinity']['nodeAffinity']
+    assert affinity['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'] == [
+        {'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [node]}]}
+        for node in ('gnb1', 'gnb-2', 'gnb-3')
+    ]
 
 
 def test_site_anchor_readiness_requires_an_anchor_on_each_site(monkeypatch):
