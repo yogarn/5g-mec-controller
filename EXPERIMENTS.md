@@ -825,8 +825,18 @@ The descheduler still evicts before the ReplicaSet creates its replacement.
 
 ### Edge-only steep placement
 
-The two `steep_pl_off_*` commands in `run-experiments-steep.sh` use
-`--edge-only` with spillover off. The eligible workload nodes are `gnb1`,
+From the repository root on core, start both edge-only experiments with one command.
+
+```bash
+bash run-experiments-steep.sh
+```
+
+The script runs `steep_pl_off_01` (baseline first), then `steep_pl_off_02`
+(proposed first). It prints node CPU usage and gnb1's allocated resources
+before each campaign and stops if a campaign fails. For an offline preview of both
+campaigns, run `bash run-experiments-steep.sh --plan-only /tmp/steep-edge-plans`.
+
+Both campaigns use `--edge-only` with spillover off. The eligible workload nodes are `gnb1`,
 `gnb-2`, and `gnb-3`, which are the three UE ingress sites. Each has a fixed
 anchor. Both arms use the same latency HPA and PreferClose, which routes
 within the ingress zone while a local endpoint is ready. If an anchor and all
@@ -836,8 +846,8 @@ image digest when comparing with earlier runs.
 
 ### Steep placement spillover smoke test
 
-Run this in Bash on core from the repository root before the two spill-on
-commands in `run-experiments-steep.sh`. Use an idle cluster and a shell with `kubectl`,
+Run this in Bash on core from the repository root before launching the
+later spill-on pair with `bash run-experiments-steep.sh --spill`. Use an idle cluster and a shell with `kubectl`,
 `jq`, `curl`, and the campaign virtual environment. The smoke test uses one
 anchor per site in a temporary namespace, with no UEs, HPA, or TC changes.
 The shell restores the four original zone labels and deletes the namespace
