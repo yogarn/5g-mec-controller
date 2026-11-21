@@ -1,11 +1,24 @@
 window_seconds: 15
+placement_window_seconds: 5
+offload_window_seconds: 15
+offload_stale_seconds: 5
 max_observations: 100000
-mapping_refresh_seconds: 3
-mapping_max_age_seconds: 10
-slo_seconds: 0.5
+mapping_refresh_seconds: 1
+mapping_max_age_seconds: 5
+slo_seconds: 0.15
 smf_url: http://10.34.211.140:9090/pdu-info
 amf_url: http://10.34.211.140:9005/ue-info
+core_node: core-5g
+site_nodes:
+  gnb-1: gnb1
+  gnb-2: gnb-2
+  gnb-3: gnb-3
 gnb_nodes:
   0: gnb1
   2: gnb-2
   3: gnb-3
+upf_nodes:
+  "10.34.211.140": core-5g
+  "172.16.30.11": gnb1
+  "172.16.20.70": gnb-2
+  "172.16.20.200": gnb-3

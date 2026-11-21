@@ -143,91 +143,6 @@ data:
           - record: node:vram_utilization:percent:avg15s
             expr: avg_over_time(node:vram_utilization:percent[15s])
 
-          # =======================================================
-          # 5. UPF Envoy Response Time & UE Mobility (N6 -> vLLM)
-          # =======================================================
-          # Instant Mean Response Time in ms (active 30s window; drops to 0 when idle)
-          - record: upf:response_time_ms:mean
-            expr: |
-              (
-                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_sum{envoy_cluster_name=~"vllm.*"}[30s]))
-                /
-                (sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}[30s])) > 0)
-              )
-              or
-              (
-                sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_sum{envoy_http_conn_manager_prefix=~"upf_.*"}[30s]))
-                /
-                (sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}[30s])) > 0)
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
-
-          # 15s Sliding Window Normalized Response Time (ms)
-          - record: upf:response_time_ms:avg15s
-            expr: avg_over_time(upf:response_time_ms:mean[15s])
-
-          # P90 Response Time in ms (SLO Metric; drops to 0 when idle)
-          - record: upf:response_time_ms:p90
-            expr: |
-              (
-                histogram_quantile(
-                  0.90,
-                  sum by (le, node, upf, pod) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"vllm.*"}[30s]))
-                )
-                and on(node, upf, pod)
-                (sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}[30s])) > 0)
-              )
-              or
-              (
-                histogram_quantile(
-                  0.90,
-                  sum by (le, node, upf, pod) (rate(envoy_http_downstream_rq_time_bucket{envoy_http_conn_manager_prefix=~"upf_.*"}[30s]))
-                )
-                and on(node, upf, pod)
-                (sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}[30s])) > 0)
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
-
-          # P50 (Median) Response Time in ms (drops to 0 when idle)
-          - record: upf:response_time_ms:p50
-            expr: |
-              (
-                histogram_quantile(
-                  0.50,
-                  sum by (le, node, upf, pod) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"vllm.*"}[30s]))
-                )
-                and on(node, upf, pod)
-                (sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}[30s])) > 0)
-              )
-              or
-              (
-                histogram_quantile(
-                  0.50,
-                  sum by (le, node, upf, pod) (rate(envoy_http_downstream_rq_time_bucket{envoy_http_conn_manager_prefix=~"upf_.*"}[30s]))
-                )
-                and on(node, upf, pod)
-                (sum by (node, upf, pod) (rate(envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}[30s])) > 0)
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
-
-          # Last Recorded Response Time (Cumulative Historical Average in ms)
-          - record: upf:response_time_ms:last_recorded
-            expr: |
-              (
-                sum by (node, upf, pod) (envoy_cluster_upstream_rq_time_sum{envoy_cluster_name=~"vllm.*"})
-                /
-                (sum by (node, upf, pod) (envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~"vllm.*"}) > 0)
-              )
-              or
-              (
-                sum by (node, upf, pod) (envoy_http_downstream_rq_time_sum{envoy_http_conn_manager_prefix=~"upf_.*"})
-                /
-                (sum by (node, upf, pod) (envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix=~"upf_.*"}) > 0)
-              )
-
           # Time-to-First-Token (TTFT) Recording Rules in ms (drops to 0 when idle)
           - record: upf:ttft_ms:p90
             expr: |
@@ -265,157 +180,10 @@ data:
               or
               (0 * sum by (node, pod) (vllm:time_to_first_token_seconds_count))
 
-          # UE Request Arrival Rate lambda_n (req/s) forwarded to vLLM (15s sliding window; drops to 0 when idle)
-          - record: upf:request_rate:lambda
-            expr: |
-              (
-                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*"}[15s]))
-              )
-              or
-              (
-                sum by (node, upf, pod) (rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}[15s]))
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"}))
-
-          # UE Requests Processed in last 15s sliding window (drops to 0 when idle)
-          - record: upf:requests:window15s
-            expr: round(upf:request_rate:lambda * 15)
-
-          # Total UE Requests Processed to vLLM per UPF/Node
-          - record: upf:requests:total
-            expr: |
-              (
-                sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*"})
-              )
-              or
-              (
-                sum by (node, upf, pod) (envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"upf_.*"})
-              )
-
-          # Active In-Flight UE Requests to vLLM per UPF/Node (drops to 0 when idle)
-          - record: upf:requests:active
-            expr: |
-              (
-                sum by (node, upf, pod) (envoy_cluster_upstream_rq_active{envoy_cluster_name=~"vllm.*"})
-              )
-              or
-              (
-                sum by (node, upf, pod) (envoy_http_downstream_rq_active{envoy_http_conn_manager_prefix=~"upf_.*"})
-              )
-
-          # =======================================================
-          # 6. Serving gNodeB Request Counters & UE Mobility (Core UE-Info Inferred)
-          # =======================================================
-          # Cumulative UE requests originating from serving gNB-2
-          - record: gnb:requests:total
-            expr: |
-              (
-                sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"})
-              )
-              or
-              (
-                sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_2"})
-              )
-            labels:
-              gnb: gnb-2
-
-          # Cumulative UE requests originating from serving gNB-3
-          - record: gnb:requests:total
-            expr: |
-              (
-                sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"})
-              )
-              or
-              (
-                sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_3"})
-              )
-            labels:
-              gnb: gnb-3
-
-          # UE Request Arrival Rate lambda_gnb (req/s) from serving gNB-2 (15s sliding window)
-          - record: gnb:request_rate:lambda
-            expr: |
-              (
-                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"}[15s]))
-              )
-              or
-              (
-                sum by (node, upf, pod) (rate(envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_2"}[15s]))
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"}))
-            labels:
-              gnb: gnb-2
-
-          # UE Request Arrival Rate lambda_gnb (req/s) from serving gNB-3 (15s sliding window)
-          - record: gnb:request_rate:lambda
-            expr: |
-              (
-                sum by (node, upf, pod) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"}[15s]))
-              )
-              or
-              (
-                sum by (node, upf, pod) (rate(envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_3"}[15s]))
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"}))
-            labels:
-              gnb: gnb-3
-
-          # UE Requests originating from serving gNB in last 15s sliding window (drops to 0 when idle)
-          - record: gnb:requests:window15s
-            expr: round(gnb:request_rate:lambda * 15)
-
-          # Active In-Flight UE Requests originating from serving gNB-2
-          - record: gnb:requests:active
-            expr: |
-              sum by (node, upf, pod) (
-                envoy_cluster_upstream_rq_active{envoy_cluster_name=~"vllm.*", upf="upf-gnb-2"}
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_2"}))
-            labels:
-              gnb: gnb-2
-
-          # Active In-Flight UE Requests originating from serving gNB-3
-          - record: gnb:requests:active
-            expr: |
-              sum by (node, upf, pod) (
-                envoy_cluster_upstream_rq_active{envoy_cluster_name=~"vllm.*", upf="upf-gnb-3"}
-              )
-              or
-              (0 * sum by (node, upf, pod) (envoy_vhost_vcluster_upstream_rq_total{envoy_virtual_cluster="from_gnb_3"}))
-            labels:
-              gnb: gnb-3
-
-          # Total requests across all UPF entry points grouped by serving gNB
-          - record: gnb:requests:aggregate:total
-            expr: sum by (gnb) (gnb:requests:total)
-
-          # Aggregate Request Arrival Rate lambda_gnb across all UPFs
-          - record: gnb:request_rate:aggregate:lambda
-            expr: sum by (gnb) (gnb:request_rate:lambda)
-
-          # Aggregate Active In-Flight Requests across all UPFs per serving gNB
-          - record: gnb:requests:aggregate:active
-            expr: sum by (gnb) (gnb:requests:active)
-
-          # UE Mobility Share per serving gNB: M_gnb = lambda_gnb / sum(lambda)
-          - record: gnb:mobility:share
-            expr: |
-              (
-                sum by (gnb) (gnb:request_rate:lambda)
-                / on() group_left
-                sum(gnb:request_rate:lambda > 0)
-              )
-              or
-              (0 * count by (gnb) (gnb:request_rate:lambda))
-
   prometheus.yml: |
     global:
-      scrape_interval: 1s
-      evaluation_interval: 1s
+      scrape_interval: 15s
+      evaluation_interval: 15s
       scrape_timeout: 1s
 
     rule_files:
@@ -464,32 +232,6 @@ data:
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
 
-      # Scrape Envoy Sidecar Proxies on UPF pods in open5gs namespace
-      - job_name: 'upf-envoy'
-        metrics_path: /stats/prometheus
-        kubernetes_sd_configs:
-          - role: pod
-            namespaces:
-              names:
-                - open5gs
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_pod_label_app]
-            regex: upf.*
-            action: keep
-          - source_labels: [__meta_kubernetes_pod_container_name]
-            regex: envoy
-            action: keep
-          - source_labels: [__meta_kubernetes_pod_ip]
-            regex: (.+)
-            target_label: __address__
-            replacement: ${1}:9901
-          - source_labels: [__meta_kubernetes_pod_node_name]
-            target_label: node
-          - source_labels: [__meta_kubernetes_pod_label_app]
-            target_label: upf
-          - source_labels: [__meta_kubernetes_pod_name]
-            target_label: pod
-
       # Scrape vLLM Inference Endpoints on GPU-enabled pods in services namespace
       - job_name: 'vllm-edge'
         metrics_path: /metrics
@@ -514,6 +256,13 @@ data:
       # Scrape UE Telemetry Collector in placement namespace
       - job_name: 'ue-telemetry'
         scrape_interval: 15s
+        static_configs:
+          - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
+
+      # Scrape dedicated 5s per-gNB placement demand metric every 1s without affecting HPA 15s cadence
+      - job_name: 'ue-telemetry-placement'
+        scrape_interval: 1s
+        metrics_path: /metrics/placement
         static_configs:
           - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
 

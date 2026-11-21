@@ -4,3 +4,8 @@ scrape_configs:
     scrape_interval: 15s
     static_configs:
       - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
+  - job_name: ue-telemetry-placement
+    scrape_interval: 1s
+    metrics_path: /metrics/placement
+    static_configs:
+      - targets: ['ue-telemetry.placement.svc.cluster.local:8080']

@@ -70,7 +70,7 @@ data:
         name:
           matches: '^ue_request_attempt_duration_p90_seconds$'
           as: ue_p90_latency_seconds
-        metricsQuery: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} and on() (ue_request_window_complete{job="ue-telemetry"} == 1)'
+        metricsQuery: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
 ---
 apiVersion: apps/v1
 kind: Deployment
