@@ -131,6 +131,8 @@ class SiteState:
     hold_until: float | None = None
     pending_weight_since: float | None = None
     pending_weight_level: int | None = None
+    pending_weight_fast: bool = False
+    spread_wait_seconds: float | None = None
     breach_started_at: float | None = None
     breach_last_seq: int = 0
     breach_fresh_updates: int = 0
@@ -165,6 +167,8 @@ class SiteState:
         self.hold_until = None
         self.pending_weight_since = None
         self.pending_weight_level = None
+        self.pending_weight_fast = False
+        self.spread_wait_seconds = None
         self.breach_started_at = None
         self.breach_last_seq = 0
         self.breach_fresh_updates = 0
@@ -267,7 +271,13 @@ def _bucket_stale(bucket, stale_after):
     return False
 
 
-def _post_ack_window(snapshot, confirmed_since):
+def _post_ack_window(snapshot, confirmed_since, wait=None):
+    """Return the snapshot window once enough time has passed since the ACK.
+
+    By default a full collector window must pass so no sample predates the change. A retreat step that
+    followed a healthy level may be judged after `wait` seconds instead; the window then still holds the
+    previous level's (already healthy) samples, and any slow samples of the new level lift the p90.
+    """
     if not isinstance(snapshot, dict):
         return None
     window = snapshot.get('window_seconds')
@@ -276,8 +286,10 @@ def _post_ack_window(snapshot, confirmed_since):
         confirmed_since is None
         or not isinstance(window, (int, float)) or not math.isfinite(window) or window <= 0
         or not isinstance(generated, (int, float)) or not math.isfinite(generated)
-        or generated - confirmed_since < window
     ):
+        return None
+    required = window if wait is None else min(window, wait)
+    if generated - confirmed_since < required:
         return None
     return window
 
@@ -374,6 +386,7 @@ class VerticalOffloadPolicy:
         for other in self.states.values():
             if other.site != changed_site and other.desired_route == 'SPREAD':
                 other.spread_confirmed_since = wall_now
+                other.spread_wait_seconds = None
                 self._clear_breach(other)
                 self._clear_recovery(other)
 
@@ -473,8 +486,11 @@ class VerticalOffloadPolicy:
             return False
         self.last_route_switch_at = now
         self.last_switched_site = st.site
+        st.pending_weight_fast = int(new_level) > st.retreat_level
+        st.spread_wait_seconds = None
         st.retreat_level = int(new_level)
-        st.last_transition_time = now
+        # last_transition_time stays the time of the last route change: the dwell applies to route changes,
+        # while retreat steps are spaced by the global switch interval and post-ACK evaluation.
         st.pending_weight_since = now
         st.pending_weight_level = int(new_level)
         st.spread_confirmed_since = None
@@ -555,6 +571,7 @@ class VerticalOffloadPolicy:
                 st.local_confirmed_since = None
                 if st.spread_confirmed_since is None or old_active != 'SPREAD':
                     st.spread_confirmed_since = now
+                    st.spread_wait_seconds = None
         if old_active != route or st.last_status_note == 'envoy_update_failed':
             st.last_status_note = 'envoy_acked'
             extra = {'envoy_ack_version': version}
@@ -594,6 +611,10 @@ class VerticalOffloadPolicy:
         if monotonic_now is not None:
             self.last_route_switch_at = monotonic_now
         st.spread_confirmed_since = now
+        # A retreat step is judged after the global switch interval; a restore waits a full window so the
+        # slow samples that triggered it have left the window.
+        st.spread_wait_seconds = self.config.route_switch_interval_seconds if st.pending_weight_fast else None
+        st.pending_weight_fast = False
         self._clear_breach(st)
         self._clear_recovery(st)
         st.last_status_note = 'envoy_eds_acked'
@@ -738,6 +759,7 @@ class VerticalOffloadPolicy:
                 and math.isfinite(wall_now)
             ):
                 st.spread_confirmed_since = wall_now
+                st.spread_wait_seconds = None
 
             # Detect Envoy RDS ACK timeout for an outstanding route change.
             if (
@@ -1087,7 +1109,7 @@ class VerticalOffloadPolicy:
                     )
                     continue
 
-                if st.active_route != 'SPREAD' or _post_ack_window(snapshot, st.spread_confirmed_since) is None:
+                if st.active_route != 'SPREAD' or _post_ack_window(snapshot, st.spread_confirmed_since, st.spread_wait_seconds) is None:
                     self._clear_breach(st)
                     self._clear_recovery(st)
                     self._note_hold(
@@ -1133,13 +1155,15 @@ class VerticalOffloadPolicy:
 
                 if spread_p90_breach or spread_error_breach:
                     self._clear_recovery(st)
-                    if st.retreat_level > st.good_level:
+                    if st.retreat_level > st.good_level or st.good_level > 0:
                         if self._advance_breach(st, now, seq) and st.breach_fresh_updates >= cfg.min_fresh_updates:
                             reason = 'spread_retreat_error_breach' if spread_error_breach and not spread_p90_breach else 'spread_retreat_p90_breach'
                             restore_candidates.append({
                                 'site': site,
                                 'st': st,
                                 'reason': reason,
+                                # A level already judged healthy that now breaches goes one level further back.
+                                'target_level': st.good_level if st.retreat_level > st.good_level else st.good_level - 1,
                                 'core_ratio': spread_core_ratio(core_ready, local_ready, k_current, st.retreat_level),
                                 'p90_ms': p90_ms,
                                 'samples': successes,
@@ -1268,9 +1292,10 @@ class VerticalOffloadPolicy:
             chosen = restore_candidates[0]
             st = chosen['st']
             site = chosen['site']
-            target_level = st.good_level
+            target_level = chosen['target_level']
             if self._try_start_weight_change(st, target_level, now, snapshot=snapshot):
                 switched = True
+                st.good_level = min(st.good_level, target_level)
                 st.hold_until = now + cfg.min_dwell_seconds
                 st.last_decision_reason = chosen['reason']
                 st.last_status_note = 'spread_retreat_restore'

@@ -1740,3 +1740,82 @@ def test_verify_vertical_path_smoke_manual_uses_spread(monkeypatch, capsys):
     assert out['all_ok'] is True
     assert out['during']['expected_route'] == 'spread'
     assert out['during']['selected_route'] == 'spread'
+
+
+def _spread_site_policy(*, level=0, good=0):
+    policy = VerticalOffloadPolicy(OffloadConfig(
+        offload_p90_threshold_ms=150.0, min_samples=15, min_fresh_updates=2,
+        min_dwell_seconds=15.0, route_switch_interval_seconds=5.0,
+    ))
+    st = policy.states['gnb-1']
+    st.desired_route = st.active_route = 'SPREAD'
+    st.last_transition_time = 0.0
+    st.retreat_level = level
+    st.good_level = good
+    st.spread_confirmed_since = 1700000000.0
+    return policy, st
+
+
+def _tick(policy, t, p90, seq, local_ready=None, core_ready=4):
+    snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=p90, seq=seq)}})
+    snap['generated_at'] = 1700000000.0 + t
+    return policy.evaluate(float(t), snap, local_ready or {s: 1 for s in SITES}, core_ready)
+
+
+def test_retreat_step_is_judged_five_seconds_after_the_eds_ack_not_a_full_window():
+    policy, st = _spread_site_policy()
+    seq = 0
+    for t in (16, 17, 18):
+        seq += 1
+        _tick(policy, t, 110.0, seq)
+    assert st.retreat_level == 1
+    policy.record_envoy_eds_ack('gnb-1', 1, 'eds-1', 1700000000.0 + 18, monotonic_now=18.0)
+    assert st.spread_wait_seconds == 5.0
+
+    for t in (20, 21, 22):  # fewer than five seconds after the ACK
+        seq += 1
+        _tick(policy, t, 110.0, seq)
+    assert st.retreat_level == 1 and st.good_level == 0
+    for t in (24, 25, 26):  # five seconds after the ACK, well inside a 15 s window
+        seq += 1
+        _tick(policy, t, 110.0, seq)
+    assert st.good_level == 1 and st.retreat_level == 2
+
+
+def test_restore_is_judged_only_after_a_full_window():
+    policy, st = _spread_site_policy(level=1, good=0)
+    seq = 0
+    events = []
+    for t in (20, 21, 22):
+        seq += 1
+        events += _tick(policy, t, 210.0, seq)
+    assert [e.event for e in events if e.event == 'spread_retreat_restore'] and st.retreat_level == 0
+    policy.record_envoy_eds_ack('gnb-1', 0, 'eds-r', 1700000000.0 + 22, monotonic_now=22.0)
+    assert st.spread_wait_seconds is None
+    for t in (28, 30, 34):  # slow samples still sit in the window
+        seq += 1
+        events = _tick(policy, t, 210.0, seq)
+    assert st.retreat_level == 0 and st.good_level == 0
+    assert not [e for e in events if e.event == 'spread_retreat_restore']
+
+
+def test_a_level_judged_healthy_that_later_breaches_goes_one_level_further_back():
+    policy, st = _spread_site_policy(level=2, good=2)
+    seq = 0
+    events = []
+    for t in (40, 41, 42, 43):
+        seq += 1
+        events += _tick(policy, t, 210.0, seq)
+    restores = [e for e in events if e.event == 'spread_retreat_restore']
+    assert len(restores) == 1
+    assert st.retreat_level == 1 and st.good_level == 1
+    assert restores[0].extra['n'] == 1
+    assert st.hold_until == pytest.approx(restores[0].timestamp + 15.0)
+
+
+def test_breach_at_level_zero_only_holds():
+    policy, st = _spread_site_policy(level=0, good=0)
+    for seq, t in enumerate((40, 41, 42, 43), start=1):
+        events = _tick(policy, t, 210.0, seq)
+    assert st.retreat_level == 0 and st.good_level == 0
+    assert not [e for e in events if e.event == 'spread_retreat_restore']
