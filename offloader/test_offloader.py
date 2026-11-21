@@ -1769,3 +1769,59 @@ def test_breach_at_level_zero_only_holds():
         events = _tick(policy, t, 210.0, seq)
     assert st.retreat_level == 0 and st.good_level == 0
     assert not [e for e in events if e.event == 'spread_retreat_restore']
+
+
+def _failed_retreat_attempt(policy, st, t, seq, tag):
+    """Run one retreat step that is rolled back; return (t, seq, wait before the next attempt)."""
+    wall = 1700000000.0
+    while st.retreat_level == 0:
+        t += 1
+        seq += 1
+        _tick(policy, t, 110.0, seq)
+        assert t < 2000
+    policy.record_envoy_eds_ack('gnb-1', 1, f'eds-step-{tag}', wall + t, monotonic_now=float(t))
+    while st.retreat_level == 1:
+        t += 1
+        seq += 1
+        _tick(policy, t, 210.0, seq)
+        assert t < 2000
+    wait = st.hold_until - t
+    policy.record_envoy_eds_ack('gnb-1', 0, f'eds-restore-{tag}', wall + t, monotonic_now=float(t))
+    return t, seq, wait
+
+
+def test_failed_retreat_attempts_back_off_15_30_60_120_and_stay_at_120():
+    policy, st = _spread_site_policy()
+    t, seq, waits = 0, 0, []
+    for attempt in range(6):
+        t, seq, wait = _failed_retreat_attempt(policy, st, t, seq, attempt)
+        waits.append(wait)
+    assert waits == pytest.approx([15.0, 30.0, 60.0, 120.0, 120.0, 120.0])
+    assert st.retreat_failures == 6 and st.good_level == 0
+
+
+def test_backoff_resets_once_a_deeper_level_is_confirmed_healthy():
+    policy, st = _spread_site_policy()
+    t, seq = 0, 0
+    for attempt in range(3):
+        t, seq, _ = _failed_retreat_attempt(policy, st, t, seq, attempt)
+    assert st.retreat_failures == 3
+    wall = 1700000000.0
+    while st.retreat_level == 0:  # the next attempt succeeds: p90 stays healthy after the ACK
+        t += 1
+        seq += 1
+        _tick(policy, t, 110.0, seq)
+        assert t < 2000
+    policy.record_envoy_eds_ack('gnb-1', 1, 'eds-ok', wall + t, monotonic_now=float(t))
+    while st.good_level < 1:
+        t += 1
+        seq += 1
+        _tick(policy, t, 110.0, seq)
+        assert t < 2000
+    assert st.retreat_failures == 0
+
+
+def test_backoff_wait_never_drops_below_min_dwell_and_is_capped():
+    from offloader.spread import retry_wait_seconds
+    assert [retry_wait_seconds(15.0, f) for f in range(6)] == [15.0, 30.0, 60.0, 120.0, 120.0, 120.0]
+    assert retry_wait_seconds(200.0, 0) == 200.0

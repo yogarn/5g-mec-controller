@@ -93,6 +93,9 @@ PROFILES = {
     # Demo: the real joint schedule (11 phases, about 30 minutes with setup) for ONE arm; see demo.sh.
     **{f'demo-{spec[0]}': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE,
                            'arms': spec[0]} for spec in FOUR_ARM_SPECS},
+    # The two offloading arms of the joint run with the full schedule (the local arms do not use the offloader).
+    'vertical-joint-vertical': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE,
+                                'arms': 'vertical'},
     'vertical-smoke': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_SMOKE_SCHEDULE,
                        'phase_duration': 60.0, 'arms': 'vertical'},
     'vertical-mobility': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,

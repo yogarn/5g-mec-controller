@@ -1,4 +1,5 @@
 """Serialized execution of route and retreat-weight transitions for VerticalOffloadPolicy."""
+from offloader.spread import retry_wait_seconds
 from offloader.state import DecisionEvent, SiteState
 
 
@@ -80,7 +81,8 @@ def _apply_restore(policy, chosen: dict, now: float, snapshot, k_current: int, e
     if not policy._try_start_weight_change(st, target_level, now, snapshot=snapshot):
         return False
     st.good_level = min(st.good_level, target_level)
-    st.hold_until = now + policy.config.min_dwell_seconds
+    st.hold_until = now + retry_wait_seconds(policy.config.min_dwell_seconds, st.retreat_failures)
+    st.retreat_failures += 1
     st.last_decision_reason = chosen['reason']
     st.last_status_note = 'spread_retreat_restore'
     policy._clear_breach(st)

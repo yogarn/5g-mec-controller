@@ -32,7 +32,7 @@
                                             p90 > 150 ms atau error_rate >= 0.5,
                                             >= 2 update segar -> target_level =
                                             good_level (jika n > good_level) atau
-                                            good_level - 1; set hold_until = now + min_dwell
+                                            good_level - 1; set hold_until = now + min_dwell × 2^gagal (maks 120 dtk)
 ```
 
 Serialisasi global: paling banyak satu perubahan rute/bobot dieksekusi per interval (`route_switch_interval_seconds = 5s`) dengan prioritas: **(1) enter SPREAD** > **(2) restore level** > **(3) step/complete retreat**.
@@ -60,6 +60,8 @@ Serialisasi global: paling banyak satu perubahan rute/bobot dieksekusi per inter
 | Nama | Nilai Default | Arti |
 | --- | --- | --- |
 | `SPREAD_RETREAT_FACTOR` | `2` | Pembagi porsi Core per langkah retreat: $s_n = s_0 / 2^n$ dengan $s_0 = c / (c + k \cdot x_i)$. |
+| `SPREAD_RETRY_BACKOFF_FACTOR` | `2` | Setelah langkah retreat dibatalkan (restore karena pelanggaran SLO), jeda sebelum percobaan berikutnya menjadi `min_dwell_seconds × 2^gagal` (15 → 30 → 60 → 120 detik). Hitungan direset ketika level yang lebih dalam terbukti sehat atau situs meninggalkan `SPREAD`. |
+| `SPREAD_RETRY_BACKOFF_MAX_SECONDS` | `120.0` | Batas atas jeda tersebut (satu fase 120 detik), supaya penurunan beban tetap terdeteksi. |
 | `SPREAD_RETREAT_FLOOR` | `0.01` | Ambang porsi Core minimum; jika $s_{n+1} < 0.01$, retreat selesai dan situs kembali ke `LOCAL`. |
 | `mode` | `'vertical'` | Mode operasi: `'vertical'` (otomatis `LOCAL`/`SPREAD`) atau `'local-only'` (terkunci di `LOCAL`). |
 | `poll_interval_seconds` | `1.0` | Periode loop kontrol (detik). |

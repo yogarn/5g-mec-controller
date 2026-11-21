@@ -89,6 +89,7 @@ class SiteState:
     spread_confirmed_since: float | None = None
     retreat_level: int = 0
     good_level: int = 0
+    retreat_failures: int = 0
     hold_until: float | None = None
     pending_weight_since: float | None = None
     pending_weight_level: int | None = None
@@ -169,6 +170,7 @@ class SiteState:
             'spread_confirmed_since': self.spread_confirmed_since,
             'retreat_level': self.retreat_level,
             'good_level': self.good_level,
+            'retreat_failures': self.retreat_failures,
             'hold_until': self.hold_until,
             'pending_weight_since': self.pending_weight_since,
             'last_status_note': self.last_status_note,

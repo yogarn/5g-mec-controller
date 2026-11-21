@@ -126,6 +126,7 @@ def evaluate_spread_retreat(policy, *, site: str, st: SiteState, now: float, sna
         return None, None
     if st.retreat_level > st.good_level:
         st.good_level = st.retreat_level
+        st.retreat_failures = 0
     if st.hold_until is not None and now < st.hold_until:
         policy._note_hold(events, st, site, 'spread_retreat_hold', local_ready=local_ready, core_ready=core_ready)
         return None, None

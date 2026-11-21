@@ -62,7 +62,7 @@ def test_mobility_profile_uses_24_ues_with_hotspot_at_most_18():
 
 def test_only_smoke_and_demo_profiles_select_arms():
     assert {n: p.get('arms', 'all') for n, p in campaign.PROFILES.items()} == {
-        'vertical-joint': 'all', 'vertical-smoke': 'vertical',
+        'vertical-joint': 'all', 'vertical-smoke': 'vertical', 'vertical-joint-vertical': 'vertical',
         'vertical-mobility': 'all', 'scaling-staircase': 'all',
         'demo-baseline-local': 'baseline-local', 'demo-proposed-local': 'proposed-local',
         'demo-baseline-vertical': 'baseline-vertical', 'demo-proposed-vertical': 'proposed-vertical',

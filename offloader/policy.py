@@ -62,7 +62,7 @@ class VerticalOffloadPolicy:
                 self._clear_recovery(other)
 
     def _reset_retreat_state(self, st: SiteState):
-        st.retreat_level = st.good_level = 0
+        st.retreat_level = st.good_level = st.retreat_failures = 0
         st.hold_until = st.pending_weight_since = st.pending_weight_level = None
 
     def _clear_breach(self, st: SiteState):

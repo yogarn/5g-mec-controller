@@ -4,6 +4,16 @@
 SPREAD_RETREAT_FACTOR = 2
 # Below 1% remaining Core share, Core contribution is negligible so the site returns to LOCAL.
 SPREAD_RETREAT_FLOOR = 0.01
+# After a retreat step is rolled back (SLO breach), wait min_dwell * 2^failures before the next try, so a
+# site whose local pods cannot take more traffic stops probing every few seconds.
+SPREAD_RETRY_BACKOFF_FACTOR = 2
+# Upper bound of that wait (one 120 s phase), so a drop in load is still noticed.
+SPREAD_RETRY_BACKOFF_MAX_SECONDS = 120.0
+
+
+def retry_wait_seconds(min_dwell: float, failures: int) -> float:
+    """Wait before the next retreat attempt after `failures` consecutive rolled-back attempts."""
+    return max(min_dwell, min(min_dwell * SPREAD_RETRY_BACKOFF_FACTOR ** failures, SPREAD_RETRY_BACKOFF_MAX_SECONDS))
 
 
 def spread_core_ratio(

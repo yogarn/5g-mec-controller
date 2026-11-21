@@ -11,6 +11,7 @@ from pathlib import Path
 import random
 import sys
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -215,7 +216,7 @@ def _policy_state_signature(policy) -> dict:
         'last_switched_site': policy.last_switched_site,
         'sites': {
             site: {
-                'to_dict': st.to_dict(),
+                'to_dict': {k: v for k, v in st.to_dict().items() if k != 'retreat_failures'},
                 'retreat_level': st.retreat_level,
                 'good_level': st.good_level,
                 'hold_until': st.hold_until,
@@ -237,6 +238,12 @@ def _policy_state_signature(policy) -> dict:
 
 
 class TestPolicyEquivalence(unittest.TestCase):
+    def setUp(self):
+        # The baseline predates the retry backoff; with factor 1 the new code must behave identically.
+        patcher = mock.patch('offloader.spread.SPREAD_RETRY_BACKOFF_FACTOR', 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     SEQUENCES = 350
     STEPS_PER_SEQUENCE = 32
 
