@@ -12,7 +12,7 @@ def user_home():
 
 HOME = user_home()
 INVENTORY = HOME / '.config/5g-mec/ue-inventory.yaml'
-IMAGE = Path(__file__).resolve().parent.parent / 'apps/face-detection/images'
+IMAGE = Path(__file__).resolve().parent.parent / 'apps/pedestrian-detection/images'
 NR_UE = HOME / 'ueransim/build/nr-ue'
 SCHEDULE = '1:1:0:0,1:0:1:0,1:0:0:1'
 PHASE_DURATION = 30.0

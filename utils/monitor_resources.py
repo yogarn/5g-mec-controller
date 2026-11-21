@@ -16,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from utils.control_overhead import pod_timing_fields
 
-LABEL = 'app=mec-placement-face-detection'
-PREFIX = 'mec-placement-face-detection-'
+LABEL = 'app=mec-placement-pedestrian-detection'
+PREFIX = 'mec-placement-pedestrian-detection-'
 NODES = ('core-5g', 'gnb1', 'gnb-2', 'gnb-3', '<pending>')
 MAX_ROUND_SKEW_S = 20.0
 POD_LOOKUP_MAX_AGE_S = 8.0
@@ -68,7 +68,7 @@ def quantity(value, kind):
     raise ValueError(f'unsupported {kind} quantity: {value}')
 
 
-def sample(output, namespace='services', app='mec-placement-face-detection', pods_only=False, *, core_app=None):
+def sample(output, namespace='services', app='mec-placement-pedestrian-detection', pods_only=False, *, core_app=None):
     stop = False
     def request_stop(signum, frame):
         nonlocal stop
@@ -443,7 +443,7 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('sample'); p.add_argument('output')
     p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
-    p.add_argument('--app', default='mec-placement-face-detection', help='workload app label and Pod prefix')
+    p.add_argument('--app', default='mec-placement-pedestrian-detection', help='workload app label and Pod prefix')
     p.add_argument('--pods-only', action='store_true', help='record Pod lifecycle/placement only without querying Metrics Server')
     p.add_argument('--core-app', help='record Core fallback pods separately for placement plots')
     p = sub.add_parser('hpa-sample'); p.add_argument('output')

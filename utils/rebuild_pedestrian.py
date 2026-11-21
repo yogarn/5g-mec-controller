@@ -16,7 +16,7 @@ from utils.redeploy_placement import LOCK, command, published_digest
 ROOT = Path(__file__).resolve().parent.parent
 PUSH_REPOSITORY = 'localhost:30500/pedestrian-detection'
 PULL_REPOSITORY = '10.34.211.140:30500/pedestrian-detection'
-MANIFESTS = ('apps/pedestrian-detection/manifest.yaml', 'apps/face-detection/manifest.yaml')
+MANIFESTS = ('apps/pedestrian-detection/manifest.yaml',)
 HEALTH_CHECK = (
     'from app import create_app; from urllib.request import urlopen; '
     'app = create_app(); '

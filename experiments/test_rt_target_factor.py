@@ -161,23 +161,6 @@ def test_method_configs_rejects_invalid_factor(tmp_path, factor):
         )
 
 
-def test_controller_autoscaler_rejects_non_unit_factor(tmp_path):
-    out = tmp_path / 'plan_ctrl'
-    with pytest.raises(SystemExit):
-        campaign.main([
-            '--comparison', 'full', '--autoscaler', 'controller',
-            '--slo-ms', '150', '--rt-target-factor', '0.95', '--plan-only', str(out),
-        ])
-    assert not out.exists()
-
-    with pytest.raises(ValueError, match='native HPA'):
-        campaign._method_configs(
-            tmp_path, 'proposed', 150, 10,
-            comparison='full', autoscaler='controller',
-            rt_target_factor=0.95,
-        )
-
-
 def test_placement_comparison_rejects_non_unit_factor(tmp_path):
     out = tmp_path / 'plan_placement'
     with pytest.raises(SystemExit):

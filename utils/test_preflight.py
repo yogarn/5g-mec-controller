@@ -3,6 +3,7 @@ import io
 import json
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -95,7 +96,8 @@ class PreflightTests(unittest.TestCase):
         self.assertIn('[NOT CHECKED] UE-to-NodePort paths from gNB1, gNB2 and gNB3', text)
 
     def test_all_attempt_latency_with_failure_only_traffic_is_verified(self):
-        collector = Collector(load_collector_settings('collector/config.yaml'))
+        cfg_path = Path(__file__).resolve().parent.parent / 'collector/config.yaml'
+        collector = Collector(load_collector_settings(str(cfg_path)))
         for duration, status in [(100, None), (800, 503), (200, 200)]:
             self.assertTrue(collector.ingest({'ue_ip': '127.0.0.1', 'duration_ms': duration,
                                               'http_status': status, 'success': False}))

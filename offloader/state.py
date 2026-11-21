@@ -1,46 +1,32 @@
-"""State, configuration, and event dataclasses for the vertical offloading controller.
-
-Defines the validated OffloadConfig, mutable per-site SiteState, RouteSwitchBusy
-exception, and structured DecisionEvent records emitted by VerticalOffloadPolicy.
-"""
+"""State, configuration, and event dataclasses for the vertical offloading controller."""
 from dataclasses import dataclass, field
 import math
 
 SITES = ('gnb-1', 'gnb-2', 'gnb-3')
 ROUTES = ('LOCAL', 'SPREAD')
 MODES = ('local-only', 'vertical')
+DEFAULT_SITE_NODES = {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
 
-DEFAULT_SITE_NODES = {
-    'gnb-1': 'gnb1',
-    'gnb-2': 'gnb-2',
-    'gnb-3': 'gnb-3',
-}
+_POSITIVE_FLOAT_FIELDS = (
+    'poll_interval_seconds',
+    'collector_timeout_seconds',
+    'offload_p90_threshold_ms',
+    'breach_duration_seconds',
+    'min_dwell_seconds',
+    'route_switch_interval_seconds',
+    'stale_after_seconds',
+    'envoy_ack_timeout_seconds',
+)
+_POSITIVE_INT_FIELDS = ('min_samples', 'min_error_samples', 'min_fresh_updates')
 
 
 class RouteSwitchBusy(RuntimeError):
-    """The offloader cannot start another route or weight change yet."""
+    """Raised when a route or weight change cannot start yet due to global serialization."""
 
 
 @dataclass(frozen=True)
 class OffloadConfig:
-    """Validated vertical offloading parameters.
-
-    Default rationale (for 5 RPS/UE campaign schedule with 15s collector window):
-    - poll_interval_seconds=1.0: 1 Hz telemetry read cadence (never on data path).
-    - offload_p90_threshold_ms=150.0: matches campaign SLO target (150 ms) for both
-      entering SPREAD (> SLO) and evaluating gradual retreat steps (overall p90 <= SLO).
-    - min_samples=15: 1 UE at 5 RPS produces ~75 req in 15s; 15 successes (~3s of 1 UE)
-      gives a statistically meaningful p90 without delaying overload detection.
-    - min_error_samples=5 & offload_error_rate_threshold=0.5: repeated failures/timeouts
-      trigger SPREAD or retreat restore even when successes=0 (p90_ms=None).
-    - breach_duration_seconds=5.0 with min_fresh_updates=2: requires sustained overload
-      across multiple fresh sample arrivals, not repeated reads of the same rolling window.
-    - min_dwell_seconds=15.0: holds a newly applied route or restored retreat level at least
-      one collector window to avoid oscillation while the rolling window flushes.
-    - route_switch_interval_seconds=5.0: spaces route and weight changes globally across sites.
-    - stale_after_seconds=5.0: holds the last applied route when telemetry stops advancing.
-    - envoy_ack_timeout_seconds=5.0: flags failed/unacknowledged Envoy xDS updates.
-    """
+    """Validated vertical offloading parameters."""
 
     mode: str = 'vertical'
     poll_interval_seconds: float = 1.0
@@ -59,20 +45,11 @@ class OffloadConfig:
     def __post_init__(self):
         if self.mode not in MODES:
             raise ValueError(f'mode must be one of {MODES}')
-        for name in (
-            'poll_interval_seconds',
-            'collector_timeout_seconds',
-            'offload_p90_threshold_ms',
-            'breach_duration_seconds',
-            'min_dwell_seconds',
-            'route_switch_interval_seconds',
-            'stale_after_seconds',
-            'envoy_ack_timeout_seconds',
-        ):
+        for name in _POSITIVE_FLOAT_FIELDS:
             val = getattr(self, name)
             if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or val <= 0:
                 raise ValueError(f'{name} must be finite and positive')
-        for name in ('min_samples', 'min_error_samples', 'min_fresh_updates'):
+        for name in _POSITIVE_INT_FIELDS:
             val = getattr(self, name)
             if isinstance(val, bool) or not isinstance(val, int) or val < 1:
                 raise ValueError(f'{name} must be a positive integer')
@@ -82,7 +59,51 @@ class OffloadConfig:
 
 
 @dataclass
+class DecisionEvent:
+    """Structured audit record emitted on route, weight, hold, ACK, or failure transitions."""
+
+    timestamp: float
+    event: str
+    site: str
+    old_route: str
+    new_route: str
+    desired_route: str
+    active_route: str
+    reason: str
+    p90_ms: float | None
+    samples: int
+    attempts: int
+    error_rate: float | None
+    local_ready_endpoints: int
+    core_ready_endpoints: int
+    extra: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        record = {
+            'timestamp': self.timestamp,
+            'event': self.event,
+            'site': self.site,
+            'old_route': self.old_route,
+            'new_route': self.new_route,
+            'desired_route': self.desired_route,
+            'active_route': self.active_route,
+            'reason': self.reason,
+            'p90_ms': self.p90_ms,
+            'samples': self.samples,
+            'attempts': self.attempts,
+            'error_rate': self.error_rate,
+            'local_ready_endpoints': self.local_ready_endpoints,
+            'core_ready_endpoints': self.core_ready_endpoints,
+        }
+        if self.extra:
+            record.update(self.extra)
+        return record
+
+
+@dataclass
 class SiteState:
+    """Mutable per-site offloading state tracked across 1 Hz evaluation ticks."""
+
     site: str
     desired_route: str = 'LOCAL'
     active_route: str = 'LOCAL'
@@ -120,40 +141,51 @@ class SiteState:
     envoy_last_nack: str | None = None
 
     def reset(self, *, active_route: str = 'LOCAL'):
-        self.desired_route = 'LOCAL'
-        self.active_route = active_route
-        self.manual_override = None
-        self.last_transition_time = None
-        self.local_confirmed_since = None
-        self.spread_confirmed_since = None
-        self.retreat_level = 0
-        self.good_level = 0
-        self.hold_until = None
-        self.pending_weight_since = None
-        self.pending_weight_level = None
-        self.pending_weight_fast = False
-        self.spread_wait_seconds = None
-        self.breach_started_at = None
-        self.breach_last_seq = 0
-        self.breach_fresh_updates = 0
-        self.recovery_started_at = None
-        self.recovery_last_seq = 0
-        self.recovery_fresh_updates = 0
+        keep_local, keep_core = self.last_local_ready, self.last_core_ready
+        fresh = SiteState(site=self.site, active_route=active_route)
+        self.__dict__.update(fresh.__dict__)
+        self.last_local_ready = keep_local
+        self.last_core_ready = keep_core
         self.last_status_note = 'reset'
         self.last_decision_reason = 'reset'
-        self.last_p90_ms = None
-        self.last_samples = 0
-        self.last_attempts = 0
-        self.last_error_rate = None
-        self.last_unlabeled_timeouts = 0
-        self.last_spread_k = 0
-        self.last_core_ratio = 0.0
-        self.last_local_weight = 1
-        self.pending_update_since = None
-        self.envoy_update_failed = False
-        self.envoy_last_nack = None
 
-    def to_dict(self):
+    def make_event(
+        self,
+        *,
+        timestamp: float,
+        event: str,
+        old_route: str,
+        new_route: str,
+        reason: str,
+        desired_route: str | None = None,
+        p90_ms=...,
+        samples: int | None = None,
+        attempts: int | None = None,
+        error_rate=...,
+        local_ready: int | None = None,
+        core_ready: int | None = None,
+        extra: dict | None = None,
+    ) -> DecisionEvent:
+        """Build a DecisionEvent defaulting telemetry fields from this site's latest state."""
+        return DecisionEvent(
+            timestamp=timestamp,
+            event=event,
+            site=self.site,
+            old_route=old_route,
+            new_route=new_route,
+            desired_route=self.desired_route if desired_route is None else desired_route,
+            active_route=self.active_route,
+            reason=reason,
+            p90_ms=self.last_p90_ms if p90_ms is ... else p90_ms,
+            samples=self.last_samples if samples is None else samples,
+            attempts=self.last_attempts if attempts is None else attempts,
+            error_rate=self.last_error_rate if error_rate is ... else error_rate,
+            local_ready_endpoints=self.last_local_ready if local_ready is None else local_ready,
+            core_ready_endpoints=self.last_core_ready if core_ready is None else core_ready,
+            extra=extra or {},
+        )
+
+    def to_dict(self) -> dict:
         return {
             'site': self.site,
             'desired_route': self.desired_route,
@@ -181,43 +213,3 @@ class SiteState:
             'envoy_update_failed': self.envoy_update_failed,
             'envoy_last_nack': self.envoy_last_nack,
         }
-
-
-@dataclass
-class DecisionEvent:
-    timestamp: float
-    event: str
-    site: str
-    old_route: str
-    new_route: str
-    desired_route: str
-    active_route: str
-    reason: str
-    p90_ms: float | None
-    samples: int
-    attempts: int
-    error_rate: float | None
-    local_ready_endpoints: int
-    core_ready_endpoints: int
-    extra: dict = field(default_factory=dict)
-
-    def to_dict(self):
-        record = {
-            'timestamp': self.timestamp,
-            'event': self.event,
-            'site': self.site,
-            'old_route': self.old_route,
-            'new_route': self.new_route,
-            'desired_route': self.desired_route,
-            'active_route': self.active_route,
-            'reason': self.reason,
-            'p90_ms': self.p90_ms,
-            'samples': self.samples,
-            'attempts': self.attempts,
-            'error_rate': self.error_rate,
-            'local_ready_endpoints': self.local_ready_endpoints,
-            'core_ready_endpoints': self.core_ready_endpoints,
-        }
-        if self.extra:
-            record.update(self.extra)
-        return record

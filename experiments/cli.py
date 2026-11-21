@@ -49,9 +49,9 @@ def _build_parser():
     parser.add_argument('--comparison', choices=COMPARISONS, default=None,
                         help='placement: same latency autoscaler; full: CPU HPA vs full proposed; scaling: CPU HPA vs latency HPA on core-5g')
     parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
-                        help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter) or controller (Python fallback)')
+                        help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter)')
     parser.add_argument('--placement-engine', choices=PLACEMENT_ENGINES, default='go',
-                        help='scheduler/descheduler runtime for proposed method: go (in-cluster Deployment) or python (host fallback)')
+                        help='scheduler/descheduler runtime for proposed method: go (in-cluster Deployment)')
     parser.add_argument('--plan-only', type=Path, metavar='DIRECTORY',
                         help='write workload/controller/HPA manifests locally without any probes or cluster access')
     parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))

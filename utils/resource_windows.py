@@ -34,7 +34,7 @@ def build_resource_windows(method_dir, windows, node=None):
     path = directory / 'resources-prometheus.json'
     prom = json.loads(path.read_text()) if path.exists() else {}
     result = prom.get('results') or {}
-    prefix = prom.get('pod_prefix', 'mec-placement-face-detection-')
+    prefix = prom.get('pod_prefix', 'mec-placement-pedestrian-detection-')
     cpu, _, cpu_containers, _ = _dedupe_series(result.get('cpu_seconds_total', []), prefix)
     memory, _, mem_containers, _ = _dedupe_series(result.get('memory_working_set_bytes', []), prefix)
     running_at = (_load_running_lookup(directory / 'metrics.jsonl', node=node) if prom else lambda when: None)

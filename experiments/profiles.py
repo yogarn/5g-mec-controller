@@ -111,8 +111,8 @@ PROFILES = {
 }
 FINAL_HOLD_SECONDS = 360
 COMPARISONS = ('full', 'placement', 'scaling')
-AUTOSCALERS = ('controller', 'hpa')
-PLACEMENT_ENGINES = ('python', 'go')
+AUTOSCALERS = ('hpa',)
+PLACEMENT_ENGINES = ('go',)
 PLACEMENT_NAMESPACE = 'placement'
 PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
 COMPARISON_NOTES = {

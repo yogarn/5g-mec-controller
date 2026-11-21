@@ -46,7 +46,7 @@ def test_envoy_preflight_retries_only_transient_unavailable(monkeypatch, status_
 
 
 def test_workload_service_accepts_cluster_wide_routing():
-    documents = yaml.safe_load_all((campaign.ROOT / 'apps/face-detection/manifest.yaml').read_text())
+    documents = yaml.safe_load_all((campaign.ROOT / 'apps/pedestrian-detection/manifest.yaml').read_text())
     service = next(document for document in documents if document['kind'] == 'Service')
     campaign.check_service_routing(service)
 
@@ -265,12 +265,12 @@ def test_joint_campaign_has_symmetric_load_and_left_to_right_hotspot():
 @pytest.mark.parametrize('cap', [1, 3, 8, 100])
 def test_replica_cap_is_identical_in_saved_baseline_hpa_and_proposed_config(tmp_path, cap):
     baseline, _, hpa_path = campaign._method_configs(tmp_path, 'baseline', 500, cap)
-    proposed, proposed_path, no_hpa = campaign._method_configs(tmp_path, 'proposed', 500, cap)
+    proposed, proposed_path, prop_hpa_path = campaign._method_configs(tmp_path, 'proposed', 500, cap)
     hpa = yaml.safe_load(hpa_path.read_text())
+    prop_hpa = yaml.safe_load(prop_hpa_path.read_text())
     saved = yaml.safe_load(proposed_path.read_text())
-    assert baseline['max_replicas'] == proposed['max_replicas'] == saved['max_replicas'] == hpa['spec']['maxReplicas'] == cap
-    assert baseline['min_replicas'] == proposed['min_replicas'] == hpa['spec']['minReplicas']
-    assert no_hpa is None
+    assert baseline['max_replicas'] == proposed['max_replicas'] == saved['max_replicas'] == hpa['spec']['maxReplicas'] == prop_hpa['spec']['maxReplicas'] == cap
+    assert baseline['min_replicas'] == proposed['min_replicas'] == hpa['spec']['minReplicas'] == prop_hpa['spec']['minReplicas']
     assert hpa['spec']['metrics'][0]['resource']['target'] == {
         'type': 'Utilization', 'averageUtilization': 80}
 
@@ -605,13 +605,12 @@ def test_site_anchor_readiness_requires_an_anchor_on_each_site(monkeypatch):
 def test_separated_comparison_a_placement_vs_comparison_b_full(tmp_path):
     placement_dir = tmp_path / 'placement'
     placement_dir.mkdir()
-    base_p, _, no_hpa = campaign._method_configs(
+    base_p, _, base_hpa = campaign._method_configs(
         placement_dir, 'baseline', 500, 10, comparison='placement')
     prop_p, _, prop_hpa = campaign._method_configs(
         placement_dir, 'proposed', 500, 10, comparison='placement')
-    assert no_hpa is None
-    assert prop_hpa is None
-    assert base_p['mode'] == 'scaling-only' and base_p['mutate'] is True
+    assert base_hpa is not None and prop_hpa is not None
+    assert base_p['mutate'] is False
     assert prop_p['mode'] == 'mobility-aware' and prop_p['mutate'] is True
     base_dep = next(d for d in yaml.safe_load_all(Path(base_p['manifest']).read_text()) if d['kind'] == 'Deployment')
     prop_dep = next(d for d in yaml.safe_load_all(Path(prop_p['manifest']).read_text()) if d['kind'] == 'Deployment')

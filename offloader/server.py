@@ -1,4 +1,4 @@
-"""Core-side vertical offloading controller with 1-second collector polling and Envoy xDS."""
+"""Core-side vertical offloading controller with 1 Hz collector polling and Envoy xDS."""
 import argparse
 from collections import deque
 import json
@@ -45,7 +45,6 @@ class VerticalOffloadController:
         epoch: str | None = None,
     ):
         self.policy = VerticalOffloadPolicy(config)
-        # Start active_route as UNKNOWN until Envoy ACKs a version from this offloader epoch.
         self.policy.reset(active_route='UNKNOWN')
         self.xds = XdsState(route_timeout=route_timeout, clock=wall_clock, epoch=epoch)
         self.collector_snapshot_url = collector_snapshot_url
@@ -59,9 +58,7 @@ class VerticalOffloadController:
         self._last_discovery_error: str | None = None
 
     def _emit_events(self, events):
-        if not events:
-            return
-        for ev in events:
+        for ev in events or ():
             record = ev.to_dict()
             with self.lock:
                 self.recent_events.append(record)
@@ -75,9 +72,7 @@ class VerticalOffloadController:
     def handle_rds(self, req: dict) -> tuple[int, dict | None]:
         def on_ack(site, route, version, now_wall):
             with self.lock:
-                ev = self.policy.record_envoy_ack(
-                    site, route, version, now_wall, monotonic_now=self.clock(),
-                )
+                ev = self.policy.record_envoy_ack(site, route, version, now_wall, monotonic_now=self.clock())
             if ev is not None:
                 self._emit_events([ev])
 
@@ -91,9 +86,7 @@ class VerticalOffloadController:
     def handle_eds(self, req: dict) -> tuple[int, dict | None]:
         def on_ack(site, level, version, now_wall):
             with self.lock:
-                ev = self.policy.record_envoy_eds_ack(
-                    site, level, version, now_wall, monotonic_now=self.clock(),
-                )
+                ev = self.policy.record_envoy_eds_ack(site, level, version, now_wall, monotonic_now=self.clock())
             if ev is not None:
                 self._emit_events([ev])
 
@@ -108,12 +101,11 @@ class VerticalOffloadController:
         with self.lock:
             ev = self.policy.set_manual_override(site, route, self.clock())
             state = self.policy.states[site]
-            desired = state.desired_route
-            version = self.xds.set_site_route(site, desired)
+            version = self.xds.set_site_route(site, state.desired_route)
             self.xds.set_site_retreat_level(site, state.retreat_level)
         if ev is not None:
             self._emit_events([ev])
-        return {'site': site, 'desired_route': desired, 'desired_version': version}
+        return {'site': site, 'desired_route': state.desired_route, 'desired_version': version}
 
     def set_mode(self, mode: str) -> dict:
         with self.lock:
@@ -126,7 +118,6 @@ class VerticalOffloadController:
 
     def reset(self, *, mode: str | None = None) -> dict:
         with self.lock:
-            # Mark active_route UNKNOWN until Envoy ACKs the newly issued LOCAL version.
             self.policy.reset(active_route='UNKNOWN')
             if mode is not None:
                 self.policy.set_mode(mode)
@@ -145,45 +136,29 @@ class VerticalOffloadController:
                 or self.policy.states[site].active_route == 'SPREAD'
             ]
 
-    def poll_once(self) -> list[dict]:
-        """Run one 1-second control tick: discover endpoints, fetch collector snapshot, evaluate."""
-        local_counts = {site: 0 for site in SITES}
-        core_count = 0
+    def _discover_ready_counts(self) -> tuple[dict[str, int], int]:
         if self.discoverer is not None:
             try:
                 local_by_site, core_eps = self.discoverer.discover()
                 self.xds.update_endpoints(local_by_site, core_eps)
-                local_counts = {site: len(local_by_site.get(site, [])) for site in SITES}
-                core_count = len(core_eps)
                 self._last_discovery_error = None
+                return {site: len(local_by_site.get(site, [])) for site in SITES}, len(core_eps)
             except Exception as exc:
                 self._last_discovery_error = f'{type(exc).__name__}: {exc}'
-                eps = self.xds.get_endpoints_snapshot()
-                local_counts = {site: len(eps.get(local_eds_service_name(site), [])) for site in SITES}
-                core_count = len(eps.get(CORE_EDS_SERVICE_NAME, []))
-        else:
-            eps = self.xds.get_endpoints_snapshot()
-            local_counts = {site: len(eps.get(local_eds_service_name(site), [])) for site in SITES}
-            core_count = len(eps.get(CORE_EDS_SERVICE_NAME, []))
+        eps = self.xds.get_endpoints_snapshot()
+        return {site: len(eps.get(local_eds_service_name(site), [])) for site in SITES}, len(eps.get(CORE_EDS_SERVICE_NAME, []))
 
-        snapshot = None
-        collector_error = None
+    def poll_once(self) -> list[dict]:
+        """Run one 1 Hz tick: discover endpoints, fetch collector snapshot, evaluate, push xDS."""
+        local_counts, core_count = self._discover_ready_counts()
+        snapshot, collector_error = None, None
         try:
-            snapshot = self.snapshot_fetcher(
-                self.collector_snapshot_url,
-                timeout=self.policy.config.collector_timeout_seconds,
-            )
+            snapshot = self.snapshot_fetcher(self.collector_snapshot_url, timeout=self.policy.config.collector_timeout_seconds)
         except Exception as exc:
             collector_error = f'{type(exc).__name__}: {exc}'
 
         with self.lock:
-            events = self.policy.evaluate(
-                self.clock(),
-                snapshot,
-                local_counts,
-                core_count,
-                collector_error=collector_error,
-            )
+            events = self.policy.evaluate(self.clock(), snapshot, local_counts, core_count, collector_error=collector_error)
             for site, state in self.policy.states.items():
                 self.xds.set_site_route(site, state.desired_route)
                 self.xds.set_site_retreat_level(site, state.retreat_level)
@@ -196,11 +171,8 @@ class VerticalOffloadController:
             policy_states = {site: st.to_dict() for site, st in self.policy.states.items()}
             cfg = dict(self.policy.config.__dict__)
         return {
-            'mode': cfg['mode'],
-            'config': cfg,
-            'sites': policy_states,
-            'xds': self.xds.status_snapshot(),
-            'last_discovery_error': self._last_discovery_error,
+            'mode': cfg['mode'], 'config': cfg, 'sites': policy_states,
+            'xds': self.xds.status_snapshot(), 'last_discovery_error': self._last_discovery_error,
         }
 
     def get_recent_events(self) -> list[dict]:
@@ -216,92 +188,70 @@ def load_offloader_settings(path: str) -> dict:
     return data
 
 
+def _resolve_admin_token(raw: dict) -> str:
+    token = os.environ.get('OFFLOADER_ADMIN_TOKEN', '').strip() or os.environ.get('UE_TELEMETRY_TOKEN', '').strip()
+    for key in ('admin_token_file', 'collector_token_file'):
+        if not token and raw.get(key) and Path(raw[key]).is_file():
+            token = Path(raw[key]).read_text(encoding='utf-8').strip()
+    if not token:
+        raise ValueError('OFFLOADER_ADMIN_TOKEN or UE_TELEMETRY_TOKEN must be set for the admin control listener')
+    return token
+
+
+def _maybe_start_probe_worker(raw: dict, controller: VerticalOffloadController, admin_token: str) -> LocalProbeWorker | None:
+    probe_urls = raw.get('site_probe_urls') or {}
+    collector_obs_url = raw.get('collector_observations_url')
+    collector_token = os.environ.get('UE_TELEMETRY_TOKEN', '').strip() or admin_token
+    if not (probe_urls and collector_obs_url and collector_token):
+        return None
+    worker = LocalProbeWorker(
+        probe_urls, collector_obs_url, collector_token, controller.sites_requiring_probe,
+        probe_image_path=raw.get('probe_image_path'),
+        interval_seconds=float(raw.get('probe_interval_seconds', 1.0)),
+        timeout_seconds=float(raw.get('probe_timeout_seconds', 2.0)),
+    )
+    worker.start()
+    return worker
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Core-side vertical offloading controller and Envoy xDS server')
     parser.add_argument('--config', default='offloader/config.yaml', help='Path to offloader YAML config')
-    args = parser.parse_args(argv)
-
-    raw = load_offloader_settings(args.config)
-    policy_keys = set(OffloadConfig.__dataclass_fields__.keys())
-    policy_cfg = OffloadConfig(**{k: v for k, v in raw.items() if k in policy_keys})
-
-    site_nodes = raw.get('site_nodes') or dict(DEFAULT_SITE_NODES)
+    raw = load_offloader_settings(parser.parse_args(argv).config)
+    policy_cfg = OffloadConfig(**{k: v for k, v in raw.items() if k in OffloadConfig.__dataclass_fields__})
     discoverer = KubernetesEndpointDiscoverer(
         namespace=raw.get('namespace', 'services'),
-        site_nodes=site_nodes,
+        site_nodes=raw.get('site_nodes') or dict(DEFAULT_SITE_NODES),
         core_node=raw.get('core_node', 'core-5g'),
         edge_app_label=raw.get('edge_app_label', 'mec-placement-pedestrian-detection'),
         core_app_label=raw.get('core_app_label', 'mec-placement-pedestrian-detection-core'),
         container_port=int(raw.get('container_port', 5000)),
     )
     controller = VerticalOffloadController(
-        policy_cfg,
-        collector_snapshot_url=raw['collector_snapshot_url'],
-        discoverer=discoverer,
-        events_log_path=raw.get('events_log_path'),
+        policy_cfg, collector_snapshot_url=raw['collector_snapshot_url'],
+        discoverer=discoverer, events_log_path=raw.get('events_log_path'),
         route_timeout=raw.get('envoy_route_timeout', '10s'),
     )
-
-    listen_host = raw.get('listen_host', '0.0.0.0')
-    listen_port = int(raw.get('listen_port', 8085))
-    admin_host = raw.get('admin_host', '0.0.0.0')
-    admin_port = int(raw.get('admin_port', 8086))
-    xds_server = start_xds_server(controller, host=listen_host, port=listen_port)
-
-    token = (
-        os.environ.get('OFFLOADER_ADMIN_TOKEN', '').strip()
-        or os.environ.get('UE_TELEMETRY_TOKEN', '').strip()
-    )
-    if not token and raw.get('admin_token_file') and Path(raw['admin_token_file']).is_file():
-        token = Path(raw['admin_token_file']).read_text(encoding='utf-8').strip()
-    if not token and raw.get('collector_token_file') and Path(raw['collector_token_file']).is_file():
-        token = Path(raw['collector_token_file']).read_text(encoding='utf-8').strip()
-    if not token:
-        raise ValueError('OFFLOADER_ADMIN_TOKEN or UE_TELEMETRY_TOKEN must be set for the admin control listener')
-    admin_server = start_admin_server(controller, token, host=admin_host, port=admin_port)
-
-    probe_worker = None
-    probe_urls = raw.get('site_probe_urls') or {}
-    collector_obs_url = raw.get('collector_observations_url')
-    collector_token = os.environ.get('UE_TELEMETRY_TOKEN', '').strip() or token
-    if probe_urls and collector_obs_url and collector_token:
-        probe_worker = LocalProbeWorker(
-            probe_urls,
-            collector_obs_url,
-            collector_token,
-            controller.sites_requiring_probe,
-            probe_image_path=raw.get('probe_image_path'),
-            interval_seconds=float(raw.get('probe_interval_seconds', 1.0)),
-            timeout_seconds=float(raw.get('probe_timeout_seconds', 2.0)),
-        )
-        probe_worker.start()
+    xds_server = start_xds_server(controller, host=raw.get('listen_host', '0.0.0.0'), port=int(raw.get('listen_port', 8085)))
+    token = _resolve_admin_token(raw)
+    admin_server = start_admin_server(controller, token, host=raw.get('admin_host', '0.0.0.0'), port=int(raw.get('admin_port', 8086)))
+    probe_worker = _maybe_start_probe_worker(raw, controller, token)
 
     stop_event = threading.Event()
-
-    def _stop(_sig, _frame):
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-
-    print(
-        f'vertical-offloader xds={listen_host}:{listen_port} admin={admin_host}:{admin_port} '
-        f'mode={policy_cfg.mode} epoch={controller.xds.epoch}',
-        flush=True,
-    )
+    signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
+    signal.signal(signal.SIGINT, lambda *_: stop_event.set())
+    print(f'vertical-offloader mode={policy_cfg.mode} epoch={controller.xds.epoch}', flush=True)
     try:
         while not stop_event.is_set():
             tick = time.monotonic()
             controller.poll_once()
-            elapsed = time.monotonic() - tick
-            stop_event.wait(max(0.05, policy_cfg.poll_interval_seconds - elapsed))
+            stop_event.wait(max(0.05, policy_cfg.poll_interval_seconds - (time.monotonic() - tick)))
     finally:
         if probe_worker is not None:
             probe_worker.stop()
-        admin_server.shutdown()
-        admin_server.server_close()
-        xds_server.shutdown()
-        xds_server.server_close()
+        for srv in (admin_server, xds_server):
+            srv.shutdown()
+            srv.server_close()
 
 
 if __name__ == '__main__':

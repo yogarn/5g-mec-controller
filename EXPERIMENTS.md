@@ -96,10 +96,10 @@ The command performs the complete sequence:
 
 1. Checks dependencies, Kubernetes, collector health/scraping, SSH, passwordless sudo, reserved UE inventory and matching project revisions.
 2. Removes the old experiment's app and HPA. It never deletes the collector, gNBs, UPFs or other services.
-3. **Baseline:** applies the face-detection manifest (one fresh pod) and HPA, waits for readiness, runs preflight, starts resource sampling and remotely starts the UE workload.
+3. **Baseline:** applies the pedestrian-detection manifest and HPA, waits for readiness, runs preflight, starts resource sampling and remotely starts the UE workload.
 4. Verifies active latency telemetry appears, waits for UE completion and cleanup, stops the sampler, transfers results and verifies their checksums. Produces the baseline summaries.
 5. Deletes baseline HPA and app resources, including any managed groups from an earlier experiment.
-6. **Proposed:** starts the controller with `--deploy`; the controller creates its own missing face-detection Deployment and Service. Waits for readiness, runs preflight, starts a fresh sampler and the identical UE workload.
+6. **Proposed:** applies the pedestrian-detection Deployment/Service and proposed HPA with the in-cluster Go `placement-controller`. Waits for readiness, runs preflight, starts a fresh sampler and the identical UE workload.
 7. Stops the controller and sampler, transfers/checksums and summarizes proposed results, generates PNG/PDF plots including per-phase SLO-violation percentages and a p90 target line, and removes the experiment app/HPA resources.
 
 Progress is printed in the terminal. Per-method controller, sampler and UE logs are retained under `results/NAME/baseline/` and `results/NAME/proposed/`. UE console logs and original UE results also remain on the UE host. Final plots are in `results/NAME/plots/` on core.
@@ -151,7 +151,7 @@ These are installation/provisioning tasks, **not per-run commands**:
 - The 24 reserved subscribers, with static IPs and private UE configurations for all three sites. No other UE workload may use these reservations during a campaign.
 - One ready collector in `placement/ue-telemetry`, NodePort **31669**, using the same token as the UE host.
 - Prometheus in `placement`, reachable at `http://10.34.211.140:30990`, scraping `ue-telemetry.placement.svc.cluster.local:8080/metrics` and the configured node/GPU metrics.
-- Metrics Server, the face-detection image registry and all three eligible Kubernetes nodes.
+- Metrics Server, the pedestrian-detection image registry and all three eligible Kubernetes nodes.
 
 Reuse this infrastructure. Do not restart or reapply the shared monitoring or 5G manifests for every experiment. If the collector must be installed, review `collector/manifest.yaml`, create its token Secret in **placement**, and merge only `collector/prometheus-scrape.yaml` into the existing Prometheus configuration. The collector image is digest-pinned; a build alone does not update its running image. Never replace other Prometheus jobs.
 
@@ -166,7 +166,7 @@ The tool inserts only new subscribers; do not reprovision the existing pool. Wri
 
 ## Fixed experiment conditions
 
-The application remains in namespace **services**. The runner deletes only the named `mec-placement-face-detection` Deployment/Service and `mec-placement-face-detection-baseline` HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
+The application remains in namespace **services**. The runner deletes only the named `mec-placement-pedestrian-detection` Deployment/Service and its HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
 
 For joint and mobility in the vertical suite, `gnb1` is an eligible AN-MEC node alongside `gnb-2` and `gnb-3`. UEs use local PDU sessions and send traffic through their site Envoy. Vertical arms add `core-5g` as a fallback. The scaling stage uses the Core-DNN profile for gNB1 and pins the workload to `core-5g` with Kubernetes' default scheduler. Proposed Go placement measures request demand by serving UPF. Each campaign records its topology in the metadata.
 
@@ -207,7 +207,7 @@ this as a transient workload experiment. The schedule is `total:gnb1:gnb2:gnb3`:
 3:1:1:1
 ```
 
-The original 19-phase schedule is preserved in `experiments/campaign-19-phase.yaml` for explicit coverage runs with `--config`. For the pedestrian experiment, pass `--slo-ms 100` so the controller, summaries and plots share the candidate deadline.
+For the pedestrian experiment, pass `--slo-ms 150` (or `--slo-ms 100` for tighter targets) so the controller, summaries and plots share the candidate deadline.
 
 UE switching is stop-and-reattach, **not handover**. Traffic uses **fixed arrival-rate (open-loop) pacing** (`5` RPS/UE by default via `--rps-per-ue`, bounded by `--max-in-flight-per-ue`, default `8`) rather than closed-loop pacing; `5` RPS/UE (`15` RPS at 3 UEs, `45` at 9, `75` at 15, `120` at 24) is an **initial rate requiring calibration, not proven capacity**. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, missed starts, request coverage, telemetry drops and mapping coverage; a fast failure or omitted request can otherwise make latency look better. The response-time plots use **successful requests only**; SLO attainment uses all attempts and is reported alongside request coverage (`completed / scheduled`). Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.
 
@@ -280,16 +280,11 @@ bash experiments/run.sh mobility9_fixed6_tc10_01 --scenario mobility9 --fixed-re
 
 ## Fixed arrival-rate load generation & calibration
 
-All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, `--fixed-replicas`, and `utils/fixed_replica_harness.py`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and bounded in-flight concurrency (`--max-in-flight-per-ue`, default `8`). If concurrency is saturated or the pacer lags past a slot boundary, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. With the default `--phase-transition continuous`, unchanged UEs retain their sessions and request pacing across boundaries. Only moved/removed UEs pause and drain their own requests; their unavailable scheduled slots are counted as missed. New UEs attach without stopping existing traffic. `--phase-transition restart` retains the legacy global stop, drain, and reattachment behavior.
+All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, and `--fixed-replicas`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and bounded in-flight concurrency (`--max-in-flight-per-ue`, default `8`). If concurrency is saturated or the pacer lags past a slot boundary, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. With the default `--phase-transition continuous`, unchanged UEs retain their sessions and request pacing across boundaries. Only moved/removed UEs pause and drain their own requests; their unavailable scheduled slots are counted as missed. New UEs attach without stopping existing traffic. `--phase-transition restart` retains the legacy global stop, drain, and reattachment behavior.
 
 Treat the default `--rps-per-ue 5` as an **initial rate requiring calibration, not proven capacity** (`3` UEs = `15` RPS, `9` UEs = `45` RPS, `15` UEs = `75` RPS, `24` UEs = `120` RPS). Calibrate single-replica and multi-replica capacity before full comparisons:
 
 ```bash
-# Fixed-replica calibration run (adjust --rps-per-ue / --max-in-flight-per-ue as needed):
-.venv/bin/python -m utils.fixed_replica_harness \
-  --campaign-dir results/cal_fixed1 --stage cal --block 1 --run-id r1_5rps \
-  --replicas 1 --node gnb-2 --schedule 6:0:6:0 --rps-per-ue 5 --max-in-flight-per-ue 8
-
 # Standard scaling campaign at explicit rate:
 bash experiments/run.sh run_5rps_01 --comparison full --slo-ms 100 --rps-per-ue 5 --max-in-flight-per-ue 8
 
@@ -299,10 +294,6 @@ bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-re
 ```
 
 `utils/summarize.py` writes `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` across `summary.csv` (by phase), `summary-sites.csv` (by phase and gNB site), and `summary-ues.csv` (by phase and UE). `utils/plot_autoscaler.py` exports 300 DPI PNG figures only (no PDFs) on an aligned cumulative traffic-time axis with seconds ticks followed by phase brackets and UE-distribution labels below the plots (excluding setup, draining, and stop-and-reattach gaps), computing 15-second reporting windows (`[0, 15), [15, 30), ...`, plus partial final windows) from raw `requests.jsonl` and `metrics.jsonl`, and writes `window-metrics-15s.csv`, `pod-placement-15s.csv`, `slo-violations.png` (lines with small markers for SLO violations (%) and request coverage), `response-time.png`, `response-time-zoom.png`, and `pod-placement.png` (stacked bars of per-node ready replicas at each 15-second window end, with freshness enforcement; bar widths provide visual spacing, not interval-average counts).
-
-### Short calibration command
-
-On core, use `.venv/bin/python -m utils.calibrate_mobility calib_01` to run one balanced `9:3:3:3` phase per method with six replicas, 10 ms TC, 5 RPS/UE, and 60-second phases. This reuses campaign preflight, collection, and cleanup. Choose a fresh name on each run. Other campaign flags can override the defaults. Preview without traffic using `.venv/bin/python -m utils.calibrate_mobility --plan-only /tmp/calibration-plan`.
 
 ## Scaler-only balanced scenario (`scaler-balanced`)
 
@@ -838,18 +829,7 @@ The descheduler still evicts before the ReplicaSet creates its replacement.
 
 ### Edge-only steep placement
 
-From the repository root on core, start both edge-only experiments with one command.
-
-```bash
-bash run-experiments-steep.sh
-```
-
-The script runs `steep_pl_off_01` (baseline first), then `steep_pl_off_02`
-(proposed first). It prints node CPU usage
-before each campaign and stops if a campaign fails. For an offline preview of both
-campaigns, run `bash run-experiments-steep.sh --plan-only /tmp/steep-edge-plans`.
-
-Both campaigns use `--edge-only` with spillover off. Only gNB2 and gNB3 host
+Use `experiments/campaign.py` with `--config experiments/campaign-steep.yaml --edge-only` to run edge-only steep placement campaigns. Both campaigns use `--edge-only` with spillover off. Only gNB2 and gNB3 host
 application pods, including one fixed anchor each. gNB1 UEs still enter via core,
 where the Service falls back to ready endpoints on the two eligible edge nodes.
 Both arms use the same latency HPA and PreferClose. Compare local-served
@@ -858,8 +838,8 @@ comparing with earlier runs.
 
 ### Steep placement spillover smoke test
 
-Run this in Bash on core from the repository root before launching the
-later spill-on pair with `bash run-experiments-steep.sh --spill`. Use an idle cluster and a shell with `kubectl`,
+Run this in Bash on core from the repository root before launching a
+spill-on campaign. Use an idle cluster and a shell with `kubectl`,
 `jq`, `curl`, and the campaign virtual environment. The smoke test uses one
 anchor per site in a temporary namespace, with no UEs, HPA, or TC changes.
 The shell restores the three original compute-node zone labels and deletes the namespace

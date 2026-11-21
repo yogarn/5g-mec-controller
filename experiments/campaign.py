@@ -699,7 +699,7 @@ def _wait_site_anchor_endpoints(app, timeout=60, *, edge_only=False, site_nodes=
 
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
                resource_weights=None, locality_weight=None, comparison='full',
-               autoscaler='controller', placement_engine='python', deschedule_interval=None, fixed_replicas=None, min_replicas=None,
+               autoscaler='hpa', placement_engine='go', deschedule_interval=None, fixed_replicas=None, min_replicas=None,
                *, output_name=None, vertical_mode='off', initial_core_replicas=None, restore_core_pool=True):
     if placement_engine not in PLACEMENT_ENGINES:
         raise ValueError(f'placement_engine must be one of {PLACEMENT_ENGINES}')
@@ -785,25 +785,6 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                     kube('apply', '-f', config['manifest'])
                 if hpa_path is not None:
                     kube('apply', '-f', hpa_path)
-                if placement_engine == 'python' and (method == 'proposed' or (comparison == 'placement' and autoscaler == 'controller')):
-                    cmd = [sys.executable, '-u', '-m', 'controller', '--config', str(config_path)]
-                    if hpa_path is None and not vertical_active:
-                        cmd.append('--deploy')
-                    else:
-                        cmd.append('--placement-only')
-                    controller_process = subprocess.Popen(cmd, stdout=control_log, stderr=subprocess.STDOUT, start_new_session=True)
-                    processes.append(controller_process)
-                    if hpa_path is None and not vertical_active:
-                        deadline = time.monotonic() + 30
-                        while time.monotonic() < deadline:
-                            if controller_process.poll() is not None:
-                                raise RuntimeError('controller startup failed; see controller.log')
-                            check = kube('-n', NAMESPACE, 'get', 'deployment', app, '--ignore-not-found', '-o', 'name', capture_output=True, text=True)
-                            if check.stdout.strip():
-                                break
-                            time.sleep(1)
-                        else:
-                            raise RuntimeError('controller did not deploy the workload')
                 seed_managed = (
                     settings.get('site_anchors', False)
                     and fixed_replicas is None

@@ -5,13 +5,14 @@ Latency-aware Kubernetes pod placement (Go scheduler + descheduler) and SLO-driv
 ## Repository Layout
 
 ```text
-apps/          Edge workloads (face-detection/, pedestrian-detection/)
+apps/          Edge workload (pedestrian-detection/)
 autoscaler/    Kubernetes HPA manifests (hpa-baseline.yaml, hpa-proposed.yaml)
 benchmark/     UE request client and telemetry publisher
 collector/     UE telemetry HTTP-to-Prometheus collector (manifest.yaml)
 experiments/   Campaign orchestrator (campaign.py, campaign_ue.py, campaign.yaml, run.sh)
+offloader/     Core-side vertical offloading controller & Envoy xDS (server.py, manifest.yaml)
 placement/     Go in-cluster scheduler & descheduler (cmd/, internal/, Dockerfile, deploy.yaml)
-telemetry/     Prometheus, Node/DCGM exporters, Grafana, Prometheus Adapter (00..05-*.yaml)
+telemetry/     Prometheus, Node Exporter, Grafana, Prometheus Adapter (00..05-*.yaml)
 utils/         Shared config, Prometheus client, preflight, UE lifecycle, tc, monitoring, plotting
 ```
 
@@ -112,8 +113,7 @@ To run the proposed system outside an experiment campaign (assuming Section 1 on
 
 1. **Deploy the edge workload** (ensure `spec.template.spec.schedulerName: mec-placement-scheduler` is set in the Deployment):
    ```bash
-   kubectl apply -f apps/face-detection/manifest.yaml
-   # or: kubectl apply -f apps/pedestrian-detection/manifest.yaml
+   kubectl apply -f apps/pedestrian-detection/manifest.yaml
    ```
 2. **Deploy the proposed latency HPA** (edit `scaleTargetRef`, `minReplicas`/`maxReplicas`, and `target.value` SLO in seconds if needed):
    ```bash

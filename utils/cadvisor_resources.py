@@ -28,7 +28,7 @@ DEFAULT_FRESHNESS_S = 25.0
 POD_LOOKUP_MAX_AGE_S = 8.0
 
 
-def build_queries(namespace='services', pod_prefix='mec-placement-face-detection-', job='kubelet-cadvisor'):
+def build_queries(namespace='services', pod_prefix='mec-placement-pedestrian-detection-', job='kubelet-cadvisor'):
     selector = f'job="{job}",namespace="{namespace}",pod=~"{pod_prefix}.*",container!="",container!="POD"'
     return {
         'cpu_seconds_total': f'container_cpu_usage_seconds_total{{{selector}}}',
@@ -60,7 +60,7 @@ def export_prometheus_resources(
     output_dir,
     prometheus_url=DEFAULT_PROMETHEUS_URL,
     namespace='services',
-    pod_prefix='mec-placement-face-detection-',
+    pod_prefix='mec-placement-pedestrian-detection-',
     step_s=DEFAULT_SCRAPE_INTERVAL_S,
     rate_window_s=DEFAULT_RATE_WINDOW_S,
     scrape_interval_s=DEFAULT_SCRAPE_INTERVAL_S,
@@ -262,7 +262,7 @@ def summarize_cadvisor(
     if {r['phase'] for r in summary} != set(starts):
         raise ValueError('summary.csv phases do not match requests.jsonl')
 
-    pod_prefix = prom.get('pod_prefix', 'mec-placement-face-detection-')
+    pod_prefix = prom.get('pod_prefix', 'mec-placement-pedestrian-detection-')
     step_s = float(prom.get('step_seconds', DEFAULT_SCRAPE_INTERVAL_S))
     rate_window_s = float(rate_window_s if rate_window_s is not None else prom.get('rate_window_seconds', DEFAULT_RATE_WINDOW_S))
     freshness_s = float(freshness_s if freshness_s is not None else prom.get('freshness_seconds', DEFAULT_FRESHNESS_S))
@@ -564,7 +564,7 @@ def main(argv=None):
     exp.add_argument('output', type=Path)
     exp.add_argument('--prometheus-url', default=DEFAULT_PROMETHEUS_URL)
     exp.add_argument('--namespace', default='services')
-    exp.add_argument('--pod-prefix', default='mec-placement-face-detection-')
+    exp.add_argument('--pod-prefix', default='mec-placement-pedestrian-detection-')
     exp.add_argument('--step', type=float, default=DEFAULT_SCRAPE_INTERVAL_S)
     exp.add_argument('--rate-window', type=float, default=DEFAULT_RATE_WINDOW_S)
     exp.add_argument('--freshness', type=float, default=DEFAULT_FRESHNESS_S)
@@ -587,7 +587,7 @@ def main(argv=None):
     run_p.add_argument('--metrics-jsonl', type=Path, default=None)
     run_p.add_argument('--prometheus-url', default=DEFAULT_PROMETHEUS_URL)
     run_p.add_argument('--namespace', default='services')
-    run_p.add_argument('--pod-prefix', default='mec-placement-face-detection-')
+    run_p.add_argument('--pod-prefix', default='mec-placement-pedestrian-detection-')
     run_p.add_argument('--step', type=float, default=DEFAULT_SCRAPE_INTERVAL_S)
     run_p.add_argument('--rate-window', type=float, default=DEFAULT_RATE_WINDOW_S)
     run_p.add_argument('--scrape-interval', type=float, default=DEFAULT_SCRAPE_INTERVAL_S)

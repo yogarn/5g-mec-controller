@@ -410,7 +410,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     destination = parser.add_mutually_exclusive_group(required=True)
     destination.add_argument('--url', help='Face-detection URL using a reachable Kubernetes node IP and Service NodePort, e.g. http://NODE_IP:NODEPORT/detect')
-    destination.add_argument('--site-urls', type=json.loads, help='JSON mapping gnb-1, gnb-2 and gnb-3 to face-detection URLs')
+    destination.add_argument('--site-urls', type=json.loads, help='JSON mapping gnb-1, gnb-2 and gnb-3 to pedestrian-detection URLs')
     parser.add_argument('--image', default=str(defaults.IMAGE), help='Image file or directory of JPG, PNG, BMP, WebP, GIF or TIFF files; assigned in sorted order')
     parser.add_argument('--ue-config', default=str(defaults.INVENTORY), help='Private UE inventory YAML')
     parser.add_argument('--nr-ue', default=str(defaults.NR_UE), help='Absolute path to the UERANSIM nr-ue executable')

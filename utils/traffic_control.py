@@ -1,4 +1,4 @@
-"""Campaign-owned configurable inter-node delay for the reserved face-detection pool.
+"""Campaign-owned configurable inter-node delay for the reserved pedestrian-detection pool.
 
 The Calico IP pool is deliberately retained after use: ordinary pods cannot
 allocate from it, so stale rules after a crash cannot select ordinary workloads.

@@ -422,7 +422,7 @@ def _supports_latency_floor(comparison, staircase, site_anchors):
             or (comparison == 'placement' and site_anchors))
 
 
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='pedestrian-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, pod_share_scoring=False, site_anchors=False, edge_only=False, no_hpa=False, asymmetric_latency=False, site_nodes=SITE_NODES, *, base_manifest=None, vertical_budget=None, proposed_scale_down_period_seconds=None):
+def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='pedestrian-detection', comparison='full', autoscaler='hpa', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, pod_share_scoring=False, site_anchors=False, edge_only=False, no_hpa=False, asymmetric_latency=False, site_nodes=SITE_NODES, *, base_manifest=None, vertical_budget=None, proposed_scale_down_period_seconds=None):
     """Persist the exact matched replica budget and manifests used by a method."""
     if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
         raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
@@ -523,9 +523,6 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
         yaml.safe_dump_all(documents, stream, sort_keys=False)
     if method == 'proposed':
         mode = 'mobility-aware'
-        mutate = True
-    elif comparison == 'placement' and autoscaler == 'controller':
-        mode = 'scaling-only'
         mutate = True
     else:
         mode = 'mobility-aware'

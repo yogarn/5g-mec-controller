@@ -24,7 +24,6 @@ from offloader.policy import (
     spread_core_ratio,
     spread_local_weight,
 )
-from offloader.scaler import PodAccounting, VerticalDynamicScaler, account_edge_pods
 from offloader.server import VerticalOffloadController
 from offloader.xds import (
     CORE_EDS_SERVICE_NAME,
@@ -1039,7 +1038,7 @@ def test_vertical_mode_cli_rejects_missing_site_anchors(tmp_path):
     assert exc.value.code == 2
 
 
-def test_unified_budget_and_dynamic_scaler_6_to_7_to_18_and_back_to_6():
+def test_unified_budget_6_to_18():
     budget = VerticalBudget(min_replicas=6, max_replicas=18, edge_anchors=3, core_fallback_replicas=3)
     assert budget.fixed_replicas == 6
     assert budget.dynamic_min == 0 and budget.dynamic_max == 12
@@ -1052,55 +1051,6 @@ def test_unified_budget_and_dynamic_scaler_6_to_7_to_18_and_back_to_6():
         VerticalBudget(min_replicas=5, max_replicas=18)
     with pytest.raises(ValueError):
         VerticalBudget(min_replicas=6, max_replicas=18, core_counts_toward_budget=False)
-
-    # Test both baseline (CPU) and proposed (latency) scaling lifecycle: 6 -> 7 -> 18 -> 6.
-    for method, hi_one, hi_max, low_sig in (
-        ('baseline', 95.0, 600.0, 10.0),
-        ('proposed', 180.0, 900.0, 20.0),
-    ):
-        scaler = VerticalDynamicScaler(
-            method,
-            budget,
-            cpu_target_percent=80.0,
-            slo_ms=150.0,
-            latency_floor_ms=0.0,
-            scale_down_stabilization_seconds=30.0,
-            scale_up_cooldown_seconds=5.0,
-        )
-        # 1. Start at 6 total (3 anchors Ready, 0 dynamic). Signal breaches -> scales up to 7 total (1 dynamic).
-        acc0 = PodAccounting(spec_replicas=0, ready_dynamic=0, starting_dynamic=0, terminating_dynamic=0, ready_anchors=3)
-        d1 = scaler.evaluate(0.0, acc0, hi_one)
-        assert d1['changed'] is True and d1['target_dynamic'] == 1 and d1['target_total'] == 7
-
-        # 2. While the new dynamic pod is starting, rollout guard holds spec_replicas at 1 (no overscaling).
-        acc_starting = PodAccounting(spec_replicas=1, ready_dynamic=0, starting_dynamic=1, terminating_dynamic=0, ready_anchors=3)
-        d_wait = scaler.evaluate(10.0, acc_starting, hi_max)
-        assert d_wait['changed'] is False and d_wait['reason'] == 'wait_starting_pods'
-
-        # 3. Once Ready, extreme load hits max_replicas=18 (clamped at 12 dynamic, never >12).
-        acc_ready1 = PodAccounting(spec_replicas=1, ready_dynamic=1, starting_dynamic=0, terminating_dynamic=1, ready_anchors=3)
-        d_max = scaler.evaluate(15.0, acc_ready1, hi_max)
-        assert d_max['changed'] is True and d_max['target_dynamic'] == 12 and d_max['target_total'] == 18
-        assert d_max['accounting']['terminating_dynamic'] == 1
-
-        # 4. Load drops -> waits stabilization window -> scales back down to 0 dynamic (6 total).
-        acc_max = PodAccounting(spec_replicas=12, ready_dynamic=12, starting_dynamic=0, terminating_dynamic=0, ready_anchors=3)
-        d_hold = scaler.evaluate(20.0, acc_max, low_sig)
-        assert d_hold['changed'] is False and d_hold['reason'] == 'scale_down_stabilizing'
-        d_down = scaler.evaluate(60.0, acc_max, low_sig)
-        assert d_down['changed'] is True and d_down['target_dynamic'] == 0 and d_down['target_total'] == 6
-
-    # Verify pod accounting classifies anchors, ready managed, starting managed, and terminating managed.
-    pods = [
-        {'metadata': {'labels': {'mec-replica': 'anchor-gnb-1'}}, 'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
-        {'metadata': {'labels': {'mec-replica': 'anchor-gnb-2'}}, 'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
-        {'metadata': {'labels': {'mec-replica': 'anchor-gnb-3'}}, 'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
-        {'metadata': {'labels': {'mec-replica': 'managed'}}, 'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
-        {'metadata': {'labels': {'mec-replica': 'managed'}}, 'status': {'phase': 'Pending', 'conditions': []}},
-        {'metadata': {'labels': {'mec-replica': 'managed'}, 'deletionTimestamp': '2026-11-20T00:00:00Z'}, 'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]}},
-    ]
-    acc = account_edge_pods(pods, spec_replicas=2)
-    assert (acc.ready_anchors, acc.ready_dynamic, acc.starting_dynamic, acc.terminating_dynamic) == (3, 1, 1, 1)
 
 
 def test_verify_vertical_path_helpers():

@@ -2,13 +2,13 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: mec-placement-face-detection-baseline
+  name: mec-placement-pedestrian-detection-baseline
   namespace: services
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: mec-placement-face-detection
+    name: mec-placement-pedestrian-detection
   minReplicas: 1
   maxReplicas: 100
   metrics:
