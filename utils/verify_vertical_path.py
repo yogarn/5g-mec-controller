@@ -6,9 +6,9 @@ Covers:
    readiness, Core fallback readiness, and explicit per-node EDS endpoint pinning.
 2. `verify-session`: verifies UE session IP, serving UPF (SMF /pdu-info), target Envoy
    endpoint, and answering pod node without using core DNN embb.testbed for RAN-1.
-3. `smoke-manual`: performs manual LOCAL -> CORE -> LOCAL switch from Core via offloader
+3. `smoke-manual`: performs manual LOCAL -> SPREAD -> LOCAL switch from Core via offloader
    `/override`, verifying X-MEC-Site, X-MEC-Route, server_node, and constant UE session/DNN.
-4. `smoke-auto`: verifies automatic p90-driven switch and local-probe recovery events.
+4. `smoke-auto`: verifies automatic p90-driven SPREAD entry and overall-p90 recovery events.
 """
 import argparse
 import ipaddress
@@ -149,30 +149,30 @@ def cmd_smoke_manual(args):
     expected_local_node = EXPECTED_LOCAL_UPFS[site]['node']
     target_url = urlsplit(args.ingress_url)
 
-    def probe_step(expected_route: str, expected_node: str):
+    def probe_step(expected_route: str, expected_nodes: tuple[str, ...]):
         rec = attempt(target_url, 'GET', None, {}, args.source_ip, args.timeout)
         ok = (
             rec['success']
             and rec.get('ingress_site') == site
             and rec.get('selected_route') == expected_route
-            and (rec.get('server_node') == expected_node if rec.get('server_node') else True)
+            and (rec.get('server_node') in expected_nodes if rec.get('server_node') else True)
         )
-        return {'ok': ok, 'expected_route': expected_route, 'expected_node': expected_node,
+        return {'ok': ok, 'expected_route': expected_route, 'expected_nodes': list(expected_nodes),
                 'ingress_site': rec.get('ingress_site'), 'selected_route': rec.get('selected_route'),
                 'server_node': rec.get('server_node'), 'server_pod': rec.get('server_pod'),
                 'http_status': rec.get('http_status'), 'duration_ms': round(rec['duration_ms'], 2)}
 
     _http_json(f'{base}/override', method='POST', payload={'site': site, 'route': 'LOCAL'}, token=token)
     time.sleep(args.wait_ack)
-    before = probe_step('local', expected_local_node)
+    before = probe_step('local', (expected_local_node,))
 
-    _http_json(f'{base}/override', method='POST', payload={'site': site, 'route': 'CORE'}, token=token)
+    _http_json(f'{base}/override', method='POST', payload={'site': site, 'route': 'SPREAD'}, token=token)
     time.sleep(args.wait_ack)
-    during = probe_step('core', 'core-5g')
+    during = probe_step('spread', (expected_local_node, 'core-5g'))
 
     _http_json(f'{base}/override', method='POST', payload={'site': site, 'route': 'LOCAL'}, token=token)
     time.sleep(args.wait_ack)
-    after = probe_step('local', expected_local_node)
+    after = probe_step('local', (expected_local_node,))
 
     _http_json(f'{base}/override', method='POST', payload={'site': site, 'route': None}, token=token)
     report = {'site': site, 'before': before, 'during': during, 'after': after,
