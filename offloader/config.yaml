@@ -1,0 +1,51 @@
+# Core-side vertical offloading controller configuration.
+mode: vertical
+listen_host: 0.0.0.0
+listen_port: 8085
+admin_host: 0.0.0.0
+admin_port: 8086
+namespace: services
+edge_app_label: mec-placement-pedestrian-detection
+core_app_label: mec-placement-pedestrian-detection-core
+container_port: 5000
+core_node: core-5g
+site_nodes:
+  gnb-1: gnb1
+  gnb-2: gnb-2
+  gnb-3: gnb-3
+
+# Collector endpoints (Core-side).
+collector_snapshot_url: http://ue-telemetry.placement.svc.cluster.local:8080/offload/snapshot
+collector_observations_url: http://ue-telemetry.placement.svc.cluster.local:8080/observations
+collector_timeout_seconds: 1.0
+
+# 1 Hz polling cadence (never on the per-request data plane).
+poll_interval_seconds: 1.0
+
+# The p90 trigger is above 150 ms and recovery is at or below 125 ms,
+# giving 25 ms of hysteresis.
+offload_p90_threshold_ms: 150.0
+recovery_p90_threshold_ms: 125.0
+min_samples: 15
+min_error_samples: 5
+offload_error_rate_threshold: 0.5
+breach_duration_seconds: 5.0
+min_fresh_updates: 2
+probe_min_samples: 5
+probe_max_error_rate: 0.1
+recovery_stable_seconds: 10.0
+min_dwell_seconds: 15.0
+route_switch_interval_seconds: 5.0
+stale_after_seconds: 5.0
+envoy_ack_timeout_seconds: 5.0
+envoy_route_timeout: 10s
+
+# Recovery probes (sent only while a site is in CORE; forced to local_backend via X-MEC-Probe: local).
+# Measured path: Core offloader -> site Envoy ingress -> local_backend inference pod.
+probe_interval_seconds: 1.0
+probe_timeout_seconds: 2.0
+probe_image_path: /app/apps/pedestrian-detection/images/bus.jpg
+site_probe_urls:
+  gnb-1: http://mec-envoy-gnb-1.services.svc.cluster.local:8080/detect
+  gnb-2: http://mec-envoy-gnb-2.services.svc.cluster.local:8080/detect
+  gnb-3: http://mec-envoy-gnb-3.services.svc.cluster.local:8080/detect

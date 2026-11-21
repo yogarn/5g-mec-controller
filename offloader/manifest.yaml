@@ -1,0 +1,179 @@
+# Core-side vertical offloading controller + Envoy REST-JSON xDS v3 control plane.
+# Build & push from core-5g:
+#   docker build --network=host -f offloader/Dockerfile -t localhost:30500/vertical-offloader:latest .
+#   docker push localhost:30500/vertical-offloader:latest
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vertical-offloader
+  namespace: placement
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vertical-offloader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vertical-offloader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vertical-offloader
+subjects:
+  - kind: ServiceAccount
+    name: vertical-offloader
+    namespace: placement
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vertical-offloader-config
+  namespace: placement
+data:
+  config.yaml: |
+    mode: vertical
+    listen_host: 0.0.0.0
+    listen_port: 8085
+    admin_host: 0.0.0.0
+    admin_port: 8086
+    namespace: services
+    edge_app_label: mec-placement-pedestrian-detection
+    core_app_label: mec-placement-pedestrian-detection-core
+    container_port: 5000
+    core_node: core-5g
+    site_nodes:
+      gnb-1: gnb1
+      gnb-2: gnb-2
+      gnb-3: gnb-3
+    collector_snapshot_url: http://ue-telemetry.placement.svc.cluster.local:8080/offload/snapshot
+    collector_observations_url: http://ue-telemetry.placement.svc.cluster.local:8080/observations
+    collector_timeout_seconds: 1.0
+    poll_interval_seconds: 1.0
+    offload_p90_threshold_ms: 150.0
+    recovery_p90_threshold_ms: 125.0
+    min_samples: 15
+    min_error_samples: 5
+    offload_error_rate_threshold: 0.5
+    breach_duration_seconds: 5.0
+    min_fresh_updates: 2
+    probe_min_samples: 5
+    probe_max_error_rate: 0.1
+    recovery_stable_seconds: 10.0
+    min_dwell_seconds: 15.0
+    route_switch_interval_seconds: 5.0
+    stale_after_seconds: 5.0
+    envoy_ack_timeout_seconds: 5.0
+    envoy_route_timeout: 10s
+    probe_interval_seconds: 1.0
+    probe_timeout_seconds: 2.0
+    probe_image_path: /app/apps/pedestrian-detection/images/bus.jpg
+    site_probe_urls:
+      gnb-1: http://mec-envoy-gnb-1.services.svc.cluster.local:8080/detect
+      gnb-2: http://mec-envoy-gnb-2.services.svc.cluster.local:8080/detect
+      gnb-3: http://mec-envoy-gnb-3.services.svc.cluster.local:8080/detect
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vertical-offloader
+  namespace: placement
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vertical-offloader
+  template:
+    metadata:
+      labels:
+        app: vertical-offloader
+    spec:
+      nodeSelector:
+        site: core
+      serviceAccountName: vertical-offloader
+      containers:
+        - name: offloader
+          image: 10.34.211.140:30500/vertical-offloader:clean-20261121T060130Z
+          imagePullPolicy: Always
+          ports:
+            - name: xds
+              containerPort: 8085
+            - name: admin
+              containerPort: 8086
+          env:
+            - name: UE_TELEMETRY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ue-telemetry-token
+                  key: token
+            - name: OFFLOADER_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ue-telemetry-token
+                  key: token
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vertical-offloader
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: xds
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: xds
+      volumes:
+        - name: config
+          configMap:
+            name: vertical-offloader-config
+---
+# Internal ClusterIP Service for Envoy xDS discovery only (no admin/mutation endpoints).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vertical-offloader
+  namespace: placement
+spec:
+  type: ClusterIP
+  selector:
+    app: vertical-offloader
+  ports:
+    - name: xds
+      port: 8085
+      targetPort: xds
+      protocol: TCP
+---
+# Internal ClusterIP Service for authenticated offloader admin/control (/status, /events, /reset, /mode, /override).
+# Runner access from core-5g host:
+#   - Reachable via ClusterIP or `kubectl -n placement port-forward svc/vertical-offloader-admin 18086:8086`
+#   - Requires `Authorization: Bearer <token>` loaded from `/home/member/.config/5g-mec/ue-telemetry-token`
+#     (matching Secret `placement/ue-telemetry-token`). Never exposed as a public NodePort.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vertical-offloader-admin
+  namespace: placement
+spec:
+  type: ClusterIP
+  selector:
+    app: vertical-offloader
+  ports:
+    - name: admin
+      port: 8086
+      targetPort: admin
+      protocol: TCP

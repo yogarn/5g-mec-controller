@@ -1,0 +1,76 @@
+# Dedicated Core fallback inference backend pinned exclusively to core-5g.
+# Managed by the campaign runner per arm (initial replica count saved and restored on exit/error/Ctrl+C):
+# - local-only arms: scaled to 0 (3 fixed edge anchors + 0..15 managed replicas = 3..18 total).
+# - vertical arms:   scaled to 3 (3 fixed edge anchors + 3 Core fallback + 0..12 dynamic = 6..18 total).
+# - Dynamic pods stay on the three gNBs for local-only and may also land on core-5g for vertical.
+#   Ready dynamic pods on core-5g join these fixed fallback pods in Envoy EDS.
+# - Separate Deployment & app label (`mec-placement-pedestrian-detection-core`) so EDS pins Core
+#   explicitly to core-5g while remaining accounted inside the vertical 6..18 runner budget.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mec-placement-pedestrian-detection-core
+  namespace: services
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mec-placement-pedestrian-detection-core
+  template:
+    metadata:
+      labels:
+        app: mec-placement-pedestrian-detection-core
+        mec-role: core-fallback
+    spec:
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        kubernetes.io/hostname: core-5g
+      containers:
+        - name: pedestrian-detection
+          image: 10.34.211.140:30500/pedestrian-detection@sha256:5245d82fcec53c68db02844135a38eed05e7ee263b987571d38e16d1f4e0d269
+          imagePullPolicy: IfNotPresent
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 35"]
+          ports:
+            - name: http
+              containerPort: 5000
+            - name: health
+              containerPort: 5001
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+          env:
+            - name: HTTP_THREADS
+              value: "5"
+            - name: ORT_THREADS
+              value: "1"
+            - name: HEALTH_PORT
+              value: "5001"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: health
+            periodSeconds: 2
+            failureThreshold: 60

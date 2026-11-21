@@ -1,0 +1,478 @@
+# Per-site Envoy inference ingress (gnb-1 on gnb1, gnb-2 on gnb-2, gnb-3 on gnb-3).
+# - Stable UE destination URL per site:
+#     gnb-1: http://10.34.211.157:31801/detect
+#     gnb-2: http://10.34.211.196:31802/detect
+#     gnb-3: http://10.34.210.3:31803/detect
+# - Dynamic routing via REST-JSON xDS v3 (RDS + EDS) from vertical-offloader in Core.
+# - No Envoy restart on route change; in-flight requests stay on their initial backend;
+#   no cross-backend retries; explicit node-pinned Pod IP endpoints via EDS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mec-envoy-gnb-1-config
+  namespace: services
+data:
+  envoy.yaml: |
+    node:
+      id: envoy-gnb-1
+      cluster: mec-inference-ingress
+    static_resources:
+      listeners:
+        - name: inference_ingress
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8080
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: mec_ingress_gnb1
+                    rds:
+                      route_config_name: route-gnb-1
+                      config_source:
+                        resource_api_version: V3
+                        api_config_source:
+                          api_type: REST
+                          transport_api_version: V3
+                          refresh_delay: 1s
+                          cluster_names:
+                            - offloader_xds
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: offloader_xds
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: offloader_xds
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: vertical-offloader.placement.svc.cluster.local
+                          port_value: 8085
+        - name: local_backend
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: local-gnb-1
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+        - name: core_backend
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: core-5g
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mec-envoy-gnb-1
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mec-envoy-gnb-1
+  template:
+    metadata:
+      labels:
+        app: mec-envoy-gnb-1
+        mec-component: envoy-ingress
+        mec-site: gnb-1
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: gnb1
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.31-latest
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-node", "envoy-gnb-1", "--service-cluster", "mec-inference-ingress"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+      volumes:
+        - name: config
+          configMap:
+            name: mec-envoy-gnb-1-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mec-envoy-gnb-1
+  namespace: services
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: mec-envoy-gnb-1
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 31801
+      protocol: TCP
+    - name: admin
+      port: 9901
+      targetPort: admin
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mec-envoy-gnb-2-config
+  namespace: services
+data:
+  envoy.yaml: |
+    node:
+      id: envoy-gnb-2
+      cluster: mec-inference-ingress
+    static_resources:
+      listeners:
+        - name: inference_ingress
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8080
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: mec_ingress_gnb2
+                    rds:
+                      route_config_name: route-gnb-2
+                      config_source:
+                        resource_api_version: V3
+                        api_config_source:
+                          api_type: REST
+                          transport_api_version: V3
+                          refresh_delay: 1s
+                          cluster_names:
+                            - offloader_xds
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: offloader_xds
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: offloader_xds
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: vertical-offloader.placement.svc.cluster.local
+                          port_value: 8085
+        - name: local_backend
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: local-gnb-2
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+        - name: core_backend
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: core-5g
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mec-envoy-gnb-2
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mec-envoy-gnb-2
+  template:
+    metadata:
+      labels:
+        app: mec-envoy-gnb-2
+        mec-component: envoy-ingress
+        mec-site: gnb-2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: gnb-2
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.31-latest
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-node", "envoy-gnb-2", "--service-cluster", "mec-inference-ingress"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+      volumes:
+        - name: config
+          configMap:
+            name: mec-envoy-gnb-2-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mec-envoy-gnb-2
+  namespace: services
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: mec-envoy-gnb-2
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 31802
+      protocol: TCP
+    - name: admin
+      port: 9901
+      targetPort: admin
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mec-envoy-gnb-3-config
+  namespace: services
+data:
+  envoy.yaml: |
+    node:
+      id: envoy-gnb-3
+      cluster: mec-inference-ingress
+    static_resources:
+      listeners:
+        - name: inference_ingress
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8080
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: mec_ingress_gnb3
+                    rds:
+                      route_config_name: route-gnb-3
+                      config_source:
+                        resource_api_version: V3
+                        api_config_source:
+                          api_type: REST
+                          transport_api_version: V3
+                          refresh_delay: 1s
+                          cluster_names:
+                            - offloader_xds
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: offloader_xds
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: offloader_xds
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: vertical-offloader.placement.svc.cluster.local
+                          port_value: 8085
+        - name: local_backend
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: local-gnb-3
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+        - name: core_backend
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: core-5g
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mec-envoy-gnb-3
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mec-envoy-gnb-3
+  template:
+    metadata:
+      labels:
+        app: mec-envoy-gnb-3
+        mec-component: envoy-ingress
+        mec-site: gnb-3
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: gnb-3
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.31-latest
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-node", "envoy-gnb-3", "--service-cluster", "mec-inference-ingress"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+      volumes:
+        - name: config
+          configMap:
+            name: mec-envoy-gnb-3-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mec-envoy-gnb-3
+  namespace: services
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: mec-envoy-gnb-3
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 31803
+      protocol: TCP
+    - name: admin
+      port: 9901
+      targetPort: admin
+      protocol: TCP
