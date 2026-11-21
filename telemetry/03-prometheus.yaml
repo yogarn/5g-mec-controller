@@ -132,6 +132,13 @@ data:
         static_configs:
           - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
 
+      # Dashboard-only copy of the collector metrics at 1 s so Grafana can refresh every second.
+      # HPA, scheduler and campaign keep reading job="ue-telemetry" (15 s); nothing else uses this job.
+      - job_name: 'ue-telemetry-live'
+        scrape_interval: 1s
+        static_configs:
+          - targets: ['ue-telemetry.placement.svc.cluster.local:8080']
+
       # Scrape dedicated 5s per-gNB placement demand metric every 1s without affecting HPA 15s cadence
       - job_name: 'ue-telemetry-placement'
         scrape_interval: 1s
