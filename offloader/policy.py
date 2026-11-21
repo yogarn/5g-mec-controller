@@ -1,4 +1,4 @@
-"""Per-site vertical offloading state machine (LOCAL / weighted SPREAD) and parameter validation."""
+"""Per-site vertical offloading state machine (LOCAL / weighted SPREAD with gradual retreat)."""
 from dataclasses import dataclass, field, replace
 import math
 
@@ -7,9 +7,14 @@ SITES = ('gnb-1', 'gnb-2', 'gnb-3')
 ROUTES = ('LOCAL', 'SPREAD')
 MODES = ('local-only', 'vertical')
 
+# Gradual SPREAD retreat: halve the Core traffic share at each step to prevent full-jump oscillation.
+SPREAD_RETREAT_FACTOR = 2
+# Below 1% remaining Core share, Core contribution is negligible so the site returns to full LOCAL.
+SPREAD_RETREAT_FLOOR = 0.01
+
 
 class RouteSwitchBusy(RuntimeError):
-    """The offloader cannot start another route change yet."""
+    """The offloader cannot start another route or weight change yet."""
 
 
 DEFAULT_SITE_NODES = {
@@ -19,18 +24,37 @@ DEFAULT_SITE_NODES = {
 }
 
 
-def spread_local_weight(k: int) -> int:
-    """Return integer EDS load_balancing_weight for local pods when k sites are in SPREAD."""
-    return max(1, int(k))
-
-
-def spread_core_ratio(core_ready: int, local_ready: int, k: int) -> float:
-    """Return expected Core traffic share c / (c + k * x_i) for a SPREAD site."""
+def spread_core_ratio(core_ready: int, local_ready: int, k: int, retreat_level: int = 0) -> float:
+    """Return target Core traffic share s_n = s_0 / 2^n where s_0 = c / (c + max(1, k) * x_i)."""
     c = max(0, int(core_ready))
     x_i = max(0, int(local_ready))
-    w = spread_local_weight(k)
-    denom = c + w * x_i
-    return (c / denom) if denom > 0 else 0.0
+    k_eff = max(1, int(k))
+    n = max(0, int(retreat_level))
+    denom = c + k_eff * x_i
+    if denom <= 0 or c == 0:
+        return 0.0
+    s0 = c / denom
+    return s0 / (SPREAD_RETREAT_FACTOR ** n)
+
+
+def spread_local_weight(core_ready: int, local_ready: int, k: int, retreat_level: int = 0) -> int:
+    """Return integer EDS load_balancing_weight (>= 1) per local pod for target Core share s_n.
+
+    Core pods always receive weight 1. Local pods receive:
+        w_l = max(1, round(c * (1 - s_n) / (s_n * x_i)))
+    Edge cases:
+    - c == 0 or x_i == 0: returns 1 (valid >= 1 integer without division by zero).
+    """
+    c = max(0, int(core_ready))
+    x_i = max(0, int(local_ready))
+    if c == 0 or x_i == 0:
+        return 1
+    s_n = spread_core_ratio(c, x_i, k, retreat_level)
+    if s_n <= 0.0:
+        return 1
+    if s_n >= 1.0:
+        return 1
+    return max(1, int(round(c * (1.0 - s_n) / (s_n * x_i))))
 
 
 @dataclass(frozen=True)
@@ -40,16 +64,16 @@ class OffloadConfig:
     Default rationale (for 5 RPS/UE campaign schedule with 15s collector window):
     - poll_interval_seconds=1.0: 1 Hz telemetry read cadence (never on data path).
     - offload_p90_threshold_ms=150.0: matches campaign SLO target (150 ms) for both
-      entering SPREAD (> SLO) and returning to LOCAL (overall p90 <= SLO).
+      entering SPREAD (> SLO) and evaluating gradual retreat steps (overall p90 <= SLO).
     - min_samples=15: 1 UE at 5 RPS produces ~75 req in 15s; 15 successes (~3s of 1 UE)
       gives a statistically meaningful p90 without delaying overload detection.
     - min_error_samples=5 & offload_error_rate_threshold=0.5: repeated failures/timeouts
-      trigger SPREAD even when successes=0 (p90_ms=None).
+      trigger SPREAD or retreat restore even when successes=0 (p90_ms=None).
     - breach_duration_seconds=5.0 with min_fresh_updates=2: requires sustained overload
       across multiple fresh sample arrivals, not repeated reads of the same rolling window.
-    - min_dwell_seconds=15.0: holds a newly applied route at least one collector window
-      to avoid oscillation while the rolling window flushes.
-    - route_switch_interval_seconds=5.0: spaces route changes globally across sites and directions.
+    - min_dwell_seconds=15.0: holds a newly applied route or restored retreat level at least
+      one collector window to avoid oscillation while the rolling window flushes.
+    - route_switch_interval_seconds=5.0: spaces route and weight changes globally across sites.
     - stale_after_seconds=5.0: holds the last applied route when telemetry stops advancing.
     - envoy_ack_timeout_seconds=5.0: flags failed/unacknowledged Envoy xDS updates.
     """
@@ -102,6 +126,11 @@ class SiteState:
     last_transition_time: float | None = None
     local_confirmed_since: float | None = None
     spread_confirmed_since: float | None = None
+    retreat_level: int = 0
+    good_level: int = 0
+    hold_until: float | None = None
+    pending_weight_since: float | None = None
+    pending_weight_level: int | None = None
     breach_started_at: float | None = None
     breach_last_seq: int = 0
     breach_fresh_updates: int = 0
@@ -119,6 +148,7 @@ class SiteState:
     last_core_ready: int = 0
     last_spread_k: int = 0
     last_core_ratio: float = 0.0
+    last_local_weight: int = 1
     pending_update_since: float | None = None
     envoy_update_failed: bool = False
     envoy_last_nack: str | None = None
@@ -130,6 +160,11 @@ class SiteState:
         self.last_transition_time = None
         self.local_confirmed_since = None
         self.spread_confirmed_since = None
+        self.retreat_level = 0
+        self.good_level = 0
+        self.hold_until = None
+        self.pending_weight_since = None
+        self.pending_weight_level = None
         self.breach_started_at = None
         self.breach_last_seq = 0
         self.breach_fresh_updates = 0
@@ -145,6 +180,7 @@ class SiteState:
         self.last_unlabeled_timeouts = 0
         self.last_spread_k = 0
         self.last_core_ratio = 0.0
+        self.last_local_weight = 1
         self.pending_update_since = None
         self.envoy_update_failed = False
         self.envoy_last_nack = None
@@ -158,6 +194,10 @@ class SiteState:
             'last_transition_time': self.last_transition_time,
             'local_confirmed_since': self.local_confirmed_since,
             'spread_confirmed_since': self.spread_confirmed_since,
+            'retreat_level': self.retreat_level,
+            'good_level': self.good_level,
+            'hold_until': self.hold_until,
+            'pending_weight_since': self.pending_weight_since,
             'last_status_note': self.last_status_note,
             'last_decision_reason': self.last_decision_reason,
             'last_p90_ms': self.last_p90_ms,
@@ -169,6 +209,7 @@ class SiteState:
             'core_ready_endpoints': self.last_core_ready,
             'spread_sites': self.last_spread_k,
             'core_ratio': round(self.last_core_ratio, 6),
+            'local_weight': self.last_local_weight,
             'envoy_update_failed': self.envoy_update_failed,
             'envoy_last_nack': self.envoy_last_nack,
         }
@@ -292,7 +333,7 @@ def _overall_user_bucket(user_buckets: dict, stale_after: float) -> dict:
 
 
 class VerticalOffloadPolicy:
-    """Per-site LOCAL/SPREAD offloading decisions with global switch serialization."""
+    """Per-site LOCAL/SPREAD offloading with gradual retreat and global change serialization."""
 
     def __init__(self, config: OffloadConfig | None = None):
         self.config = config or OffloadConfig()
@@ -304,13 +345,28 @@ class VerticalOffloadPolicy:
     def spread_count(self) -> int:
         return sum(1 for st in self.states.values() if st.desired_route == 'SPREAD')
 
-    def _spread_extra(self, local_ready: int, core_ready: int, k: int | None = None) -> dict:
+    def _spread_extra(
+        self,
+        st: SiteState,
+        local_ready: int,
+        core_ready: int,
+        k: int | None = None,
+        *,
+        level: int | None = None,
+    ) -> dict:
         k_val = self.spread_count() if k is None else int(k)
+        n_val = st.retreat_level if level is None else int(level)
+        ratio = spread_core_ratio(core_ready, local_ready, k_val, n_val)
+        w_l = spread_local_weight(core_ready, local_ready, k_val, n_val)
         return {
             'c': core_ready,
             'x_i': local_ready,
             'k': k_val,
-            'core_ratio': round(spread_core_ratio(core_ready, local_ready, k_val), 6),
+            'n': n_val,
+            'good_level': st.good_level,
+            'core_ratio': round(ratio, 6),
+            'local_weight': w_l,
+            'hold_until': st.hold_until,
         }
 
     def _reset_other_spread_post_ack(self, changed_site: str, wall_now: float | None):
@@ -318,7 +374,15 @@ class VerticalOffloadPolicy:
         for other in self.states.values():
             if other.site != changed_site and other.desired_route == 'SPREAD':
                 other.spread_confirmed_since = wall_now
+                self._clear_breach(other)
                 self._clear_recovery(other)
+
+    def _reset_retreat_state(self, st: SiteState):
+        st.retreat_level = 0
+        st.good_level = 0
+        st.hold_until = None
+        st.pending_weight_since = None
+        st.pending_weight_level = None
 
     def set_mode(self, mode: str):
         self.config = replace(self.config, mode=mode)
@@ -327,6 +391,7 @@ class VerticalOffloadPolicy:
                 st.manual_override = None
                 self._clear_breach(st)
                 self._clear_recovery(st)
+                self._reset_retreat_state(st)
                 st.desired_route = 'LOCAL'
                 st.pending_update_since = None
                 st.last_decision_reason = 'mode_local_only'
@@ -336,6 +401,17 @@ class VerticalOffloadPolicy:
         self.last_switched_site = None
         for st in self.states.values():
             st.reset(active_route=active_route)
+
+    def _has_pending_ack(self, now: float) -> bool:
+        timeout = self.config.envoy_ack_timeout_seconds
+        for other in self.states.values():
+            if other.envoy_update_failed:
+                continue
+            if other.pending_update_since is not None and now - other.pending_update_since < timeout:
+                return True
+            if other.pending_weight_since is not None and now - other.pending_weight_since < timeout:
+                return True
+        return False
 
     def _can_start_route_switch(
         self,
@@ -348,17 +424,12 @@ class VerticalOffloadPolicy:
         last_switch = self.last_route_switch_at
         if last_switch is not None and now - last_switch < self.config.route_switch_interval_seconds:
             return False
-        if any(
-            other.pending_update_since is not None
-            and not other.envoy_update_failed
-            and now - other.pending_update_since < self.config.envoy_ack_timeout_seconds
-            for other in self.states.values()
-        ):
+        if self._has_pending_ack(now):
             return False
         if require_prev_post_ack and snapshot is not None and self.last_switched_site is not None:
             prev = self.states[self.last_switched_site]
             if prev is not st and not prev.envoy_update_failed:
-                if prev.active_route != prev.desired_route:
+                if prev.active_route != prev.desired_route or prev.pending_weight_since is not None:
                     return False
                 confirmed_since = (
                     prev.spread_confirmed_since if prev.active_route == 'SPREAD' else prev.local_confirmed_since
@@ -385,6 +456,28 @@ class VerticalOffloadPolicy:
         st.desired_route = route
         st.last_transition_time = now
         st.pending_update_since = now
+        st.pending_weight_since = None
+        st.pending_weight_level = None
+        st.envoy_update_failed = False
+        return True
+
+    def _try_start_weight_change(
+        self,
+        st: SiteState,
+        new_level: int,
+        now: float,
+        *,
+        snapshot: dict | None = None,
+    ) -> bool:
+        if not self._can_start_route_switch(st, now, snapshot=snapshot, require_prev_post_ack=True):
+            return False
+        self.last_route_switch_at = now
+        self.last_switched_site = st.site
+        st.retreat_level = int(new_level)
+        st.last_transition_time = now
+        st.pending_weight_since = now
+        st.pending_weight_level = int(new_level)
+        st.spread_confirmed_since = None
         st.envoy_update_failed = False
         return True
 
@@ -410,6 +503,8 @@ class VerticalOffloadPolicy:
         st.manual_override = route
         self._clear_breach(st)
         self._clear_recovery(st)
+        # Manual override to SPREAD always starts at n=0 and does not use gradual retreat.
+        self._reset_retreat_state(st)
         if route != old:
             st.local_confirmed_since = None
             st.spread_confirmed_since = None
@@ -417,7 +512,7 @@ class VerticalOffloadPolicy:
             st.last_decision_reason = f'manual_override_{route.lower()}'
             k_after = self.spread_count()
             extra = (
-                self._spread_extra(st.last_local_ready, st.last_core_ready, k_after if route == 'SPREAD' else k_before)
+                self._spread_extra(st, st.last_local_ready, st.last_core_ready, k_after if route == 'SPREAD' else k_before)
                 if ('SPREAD' in (old, route))
                 else {}
             )
@@ -464,7 +559,7 @@ class VerticalOffloadPolicy:
             st.last_status_note = 'envoy_acked'
             extra = {'envoy_ack_version': version}
             if route == 'SPREAD' or old_active == 'SPREAD':
-                extra.update(self._spread_extra(st.last_local_ready, st.last_core_ready))
+                extra.update(self._spread_extra(st, st.last_local_ready, st.last_core_ready))
             return DecisionEvent(
                 timestamp=now,
                 event='envoy_ack',
@@ -484,7 +579,46 @@ class VerticalOffloadPolicy:
             )
         return None
 
-    def record_envoy_nack(self, site: str, error_message: str, now: float) -> DecisionEvent:
+    def record_envoy_eds_ack(self, site: str, level: int, version: str, now: float, *,
+                             monotonic_now: float | None = None) -> DecisionEvent | None:
+        """Record Envoy EDS ACK for a spread-gnb-N weight change and start its post-ACK window."""
+        st = self.states[site]
+        if st.desired_route != 'SPREAD':
+            return None
+        if st.pending_weight_since is None or st.pending_weight_level != int(level):
+            return None
+        st.pending_weight_since = None
+        st.pending_weight_level = None
+        st.envoy_update_failed = False
+        st.envoy_last_nack = None
+        if monotonic_now is not None:
+            self.last_route_switch_at = monotonic_now
+        st.spread_confirmed_since = now
+        self._clear_breach(st)
+        self._clear_recovery(st)
+        st.last_status_note = 'envoy_eds_acked'
+        extra = {'envoy_ack_version': version}
+        extra.update(self._spread_extra(st, st.last_local_ready, st.last_core_ready))
+        return DecisionEvent(
+            timestamp=now,
+            event='envoy_ack',
+            site=site,
+            old_route='SPREAD',
+            new_route='SPREAD',
+            desired_route=st.desired_route,
+            active_route=st.active_route,
+            reason='envoy_eds_ack',
+            p90_ms=st.last_p90_ms,
+            samples=st.last_samples,
+            attempts=st.last_attempts,
+            error_rate=st.last_error_rate,
+            local_ready_endpoints=st.last_local_ready,
+            core_ready_endpoints=st.last_core_ready,
+            extra=extra,
+        )
+
+    def record_envoy_nack(self, site: str, error_message: str, now: float, *,
+                          reason: str = 'envoy_rds_nack') -> DecisionEvent:
         st = self.states[site]
         st.envoy_update_failed = True
         st.envoy_last_nack = error_message
@@ -497,7 +631,7 @@ class VerticalOffloadPolicy:
             new_route=st.desired_route,
             desired_route=st.desired_route,
             active_route=st.active_route,
-            reason='envoy_rds_nack',
+            reason=reason,
             p90_ms=st.last_p90_ms,
             samples=st.last_samples,
             attempts=st.last_attempts,
@@ -517,7 +651,7 @@ class VerticalOffloadPolicy:
         if st.last_status_note == note:
             return
         st.last_status_note = note
-        merged = self._spread_extra(local_ready, core_ready)
+        merged = self._spread_extra(st, local_ready, core_ready)
         if extra:
             merged.update(extra)
         events.append(
@@ -569,7 +703,7 @@ class VerticalOffloadPolicy:
         *,
         collector_error: str | None = None,
     ) -> list[DecisionEvent]:
-        """Evaluate all sites from one snapshot and serialize runtime route changes."""
+        """Evaluate all sites from one snapshot and serialize runtime route/weight changes."""
         events: list[DecisionEvent] = []
         cfg = self.config
         self._now = now
@@ -577,7 +711,8 @@ class VerticalOffloadPolicy:
         k_current = self.spread_count()
 
         enter_candidates: list[dict] = []
-        exit_candidates: list[dict] = []
+        restore_candidates: list[dict] = []
+        retreat_candidates: list[dict] = []
 
         for site in SITES:
             st = self.states[site]
@@ -586,23 +721,25 @@ class VerticalOffloadPolicy:
             st.last_local_ready = local_ready
             st.last_core_ready = core_ready
             st.last_spread_k = k_current
-            st.last_core_ratio = (
-                spread_core_ratio(core_ready, local_ready, k_current)
-                if st.desired_route == 'SPREAD'
-                else 0.0
-            )
+            if st.desired_route == 'SPREAD':
+                st.last_core_ratio = spread_core_ratio(core_ready, local_ready, k_current, st.retreat_level)
+                st.last_local_weight = spread_local_weight(core_ready, local_ready, k_current, st.retreat_level)
+            else:
+                st.last_core_ratio = 0.0
+                st.last_local_weight = 1
 
             # Anchor restarted post-ACK window if k changed outside evaluate() (e.g. manual override).
             if (
                 st.desired_route == 'SPREAD'
                 and st.active_route == 'SPREAD'
+                and st.pending_weight_since is None
                 and st.spread_confirmed_since is None
                 and isinstance(wall_now, (int, float))
                 and math.isfinite(wall_now)
             ):
                 st.spread_confirmed_since = wall_now
 
-            # Detect Envoy ACK timeout for an outstanding route change.
+            # Detect Envoy RDS ACK timeout for an outstanding route change.
             if (
                 st.desired_route != st.active_route
                 and st.pending_update_since is not None
@@ -630,7 +767,36 @@ class VerticalOffloadPolicy:
                     )
                 )
 
-            # Manual override bypasses automatic state transitions (except logging).
+            # Detect Envoy EDS ACK timeout for an outstanding weight change.
+            if (
+                st.desired_route == 'SPREAD'
+                and st.pending_weight_since is not None
+                and not st.envoy_update_failed
+                and (now - st.pending_weight_since) >= cfg.envoy_ack_timeout_seconds
+            ):
+                st.envoy_update_failed = True
+                st.last_status_note = 'envoy_eds_ack_timeout'
+                events.append(
+                    DecisionEvent(
+                        timestamp=now,
+                        event='envoy_update_failed',
+                        site=site,
+                        old_route='SPREAD',
+                        new_route='SPREAD',
+                        desired_route=st.desired_route,
+                        active_route=st.active_route,
+                        reason='envoy_eds_ack_timeout',
+                        p90_ms=st.last_p90_ms,
+                        samples=st.last_samples,
+                        attempts=st.last_attempts,
+                        error_rate=st.last_error_rate,
+                        local_ready_endpoints=local_ready,
+                        core_ready_endpoints=core_ready,
+                        extra=self._spread_extra(st, local_ready, core_ready, k_current),
+                    )
+                )
+
+            # Manual override bypasses automatic state transitions (and never uses gradual retreat).
             if st.manual_override is not None:
                 st.desired_route = st.manual_override
                 continue
@@ -643,6 +809,7 @@ class VerticalOffloadPolicy:
                     st.last_transition_time = now
                     st.pending_update_since = now
                     st.envoy_update_failed = False
+                    self._reset_retreat_state(st)
                     st.last_decision_reason = 'local_only_locked'
                     events.append(
                         DecisionEvent(
@@ -677,7 +844,9 @@ class VerticalOffloadPolicy:
                     ):
                         st.last_status_note = 'route_switch_waiting'
                         continue
+                    extra = self._spread_extra(st, local_ready, core_ready, k_current)
                     self._reset_other_spread_post_ack(site, wall_now)
+                    self._reset_retreat_state(st)
                     st.spread_confirmed_since = None
                     st.last_decision_reason = 'core_backend_unready_failback'
                     st.last_status_note = 'core_backend_unready_failback'
@@ -697,7 +866,7 @@ class VerticalOffloadPolicy:
                             error_rate=st.last_error_rate,
                             local_ready_endpoints=local_ready,
                             core_ready_endpoints=core_ready,
-                            extra=self._spread_extra(local_ready, core_ready, k_current),
+                            extra=extra,
                         )
                     )
                 else:
@@ -717,7 +886,7 @@ class VerticalOffloadPolicy:
                     st.last_status_note = 'collector_error'
                     extra = {'collector_error': collector_error or 'missing_snapshot'}
                     if st.desired_route == 'SPREAD':
-                        extra.update(self._spread_extra(local_ready, core_ready, k_current))
+                        extra.update(self._spread_extra(st, local_ready, core_ready, k_current))
                     events.append(
                         DecisionEvent(
                             timestamp=now,
@@ -863,7 +1032,6 @@ class VerticalOffloadPolicy:
                         )
                     continue
 
-                # Track breach duration only when fresh samples continue arriving.
                 if not self._advance_breach(st, now, effective_seq):
                     st.last_status_note = 'breach_waiting_fresh_samples'
                     continue
@@ -895,13 +1063,12 @@ class VerticalOffloadPolicy:
                         'unlabeled_timeouts': unlabeled_timeouts,
                     })
             else:
-                # SPREAD -> LOCAL: exit when overall post-ACK p90 <= SLO with min_samples,
-                # min_fresh_updates, and min_dwell_seconds satisfied (no probe gate).
-                self._clear_breach(st)
+                # SPREAD state: gradual retreat by halving Core share per step, with restore on breach.
                 overall = _overall_user_bucket(user_buckets, cfg.stale_after_seconds)
                 p90_ms = overall.get('p90_ms')
                 successes = int(overall.get('successes') or 0)
                 attempts = int(overall.get('attempts') or 0)
+                errors = int(overall.get('errors') or 0)
                 error_rate = overall.get('error_rate')
                 seq = int(overall.get('newest_sample_seq') or 0)
 
@@ -910,7 +1077,18 @@ class VerticalOffloadPolicy:
                 st.last_attempts = attempts
                 st.last_error_rate = error_rate
 
-                if _post_ack_window(snapshot, st.spread_confirmed_since) is None:
+                if st.pending_weight_since is not None:
+                    self._clear_breach(st)
+                    self._clear_recovery(st)
+                    self._note_hold(
+                        events, st, site, 'spread_waiting_eds_ack',
+                        local_ready=local_ready, core_ready=core_ready,
+                        p90_ms=p90_ms, samples=successes, attempts=attempts, error_rate=error_rate,
+                    )
+                    continue
+
+                if st.active_route != 'SPREAD' or _post_ack_window(snapshot, st.spread_confirmed_since) is None:
+                    self._clear_breach(st)
                     self._clear_recovery(st)
                     self._note_hold(
                         events, st, site, 'spread_waiting_post_ack',
@@ -920,6 +1098,7 @@ class VerticalOffloadPolicy:
                     continue
 
                 if _bucket_stale(overall, cfg.stale_after_seconds):
+                    self._clear_breach(st)
                     self._clear_recovery(st)
                     note = 'spread_telemetry_empty' if overall.get('status') == 'empty' else 'spread_telemetry_stale'
                     self._note_hold(
@@ -930,6 +1109,7 @@ class VerticalOffloadPolicy:
                     continue
 
                 if local_ready == 0:
+                    self._clear_breach(st)
                     self._clear_recovery(st)
                     self._note_hold(
                         events, st, site, 'spread_local_not_ready',
@@ -938,28 +1118,54 @@ class VerticalOffloadPolicy:
                     )
                     continue
 
+                spread_error_breach = (
+                    attempts >= cfg.min_error_samples
+                    and (
+                        (error_rate is not None and error_rate >= cfg.offload_error_rate_threshold)
+                        or (overall.get('status') == 'no_success' and errors >= cfg.min_error_samples)
+                    )
+                )
+                spread_p90_breach = (
+                    successes >= cfg.min_samples
+                    and p90_ms is not None
+                    and p90_ms > cfg.offload_p90_threshold_ms
+                )
+
+                if spread_p90_breach or spread_error_breach:
+                    self._clear_recovery(st)
+                    if st.retreat_level > st.good_level:
+                        if self._advance_breach(st, now, seq) and st.breach_fresh_updates >= cfg.min_fresh_updates:
+                            reason = 'spread_retreat_error_breach' if spread_error_breach and not spread_p90_breach else 'spread_retreat_p90_breach'
+                            restore_candidates.append({
+                                'site': site,
+                                'st': st,
+                                'reason': reason,
+                                'core_ratio': spread_core_ratio(core_ready, local_ready, k_current, st.retreat_level),
+                                'p90_ms': p90_ms,
+                                'samples': successes,
+                                'attempts': attempts,
+                                'error_rate': error_rate,
+                                'local_ready': local_ready,
+                                'core_ready': core_ready,
+                            })
+                        else:
+                            st.last_status_note = 'spread_restore_pending'
+                    else:
+                        self._clear_breach(st)
+                        note = 'spread_error_rate_high' if spread_error_breach and not spread_p90_breach else 'spread_p90_above_slo'
+                        self._note_hold(
+                            events, st, site, note,
+                            local_ready=local_ready, core_ready=core_ready,
+                            p90_ms=p90_ms, samples=successes, attempts=attempts, error_rate=error_rate,
+                        )
+                    continue
+
+                self._clear_breach(st)
+
                 if successes < cfg.min_samples or p90_ms is None:
                     self._clear_recovery(st)
                     self._note_hold(
                         events, st, site, 'spread_insufficient_samples',
-                        local_ready=local_ready, core_ready=core_ready,
-                        p90_ms=p90_ms, samples=successes, attempts=attempts, error_rate=error_rate,
-                    )
-                    continue
-
-                if error_rate is not None and error_rate >= cfg.offload_error_rate_threshold:
-                    self._clear_recovery(st)
-                    self._note_hold(
-                        events, st, site, 'spread_error_rate_high',
-                        local_ready=local_ready, core_ready=core_ready,
-                        p90_ms=p90_ms, samples=successes, attempts=attempts, error_rate=error_rate,
-                    )
-                    continue
-
-                if p90_ms > cfg.offload_p90_threshold_ms:
-                    self._clear_recovery(st)
-                    self._note_hold(
-                        events, st, site, 'spread_p90_above_slo',
                         local_ready=local_ready, core_ready=core_ready,
                         p90_ms=p90_ms, samples=successes, attempts=attempts, error_rate=error_rate,
                     )
@@ -979,14 +1185,32 @@ class VerticalOffloadPolicy:
                     st.last_status_note = 'recovery_waiting_fresh_samples'
                     continue
 
-                if (
-                    st.recovery_fresh_updates >= cfg.min_fresh_updates
-                    and self._dwell_satisfied(st, now)
-                ):
-                    exit_candidates.append({
+                if st.recovery_fresh_updates < cfg.min_fresh_updates:
+                    continue
+
+                # Step proven healthy: promote good_level to current retreat_level.
+                if st.retreat_level > st.good_level:
+                    st.good_level = st.retreat_level
+
+                # Respect post-restore hold window before attempting another retreat step.
+                if st.hold_until is not None and now < st.hold_until:
+                    self._note_hold(
+                        events, st, site, 'spread_retreat_hold',
+                        local_ready=local_ready, core_ready=core_ready,
+                        p90_ms=p90_ms, samples=successes, attempts=attempts, error_rate=error_rate,
+                    )
+                    continue
+
+                if self._dwell_satisfied(st, now):
+                    next_level = st.retreat_level + 1
+                    next_ratio = spread_core_ratio(core_ready, local_ready, k_current, next_level)
+                    action = 'complete' if next_ratio < SPREAD_RETREAT_FLOOR else 'step'
+                    retreat_candidates.append({
                         'site': site,
                         'st': st,
-                        'core_ratio': spread_core_ratio(core_ready, local_ready, k_current),
+                        'action': action,
+                        'next_level': next_level,
+                        'core_ratio': spread_core_ratio(core_ready, local_ready, k_current, st.retreat_level),
                         'p90_ms': p90_ms,
                         'samples': successes,
                         'attempts': attempts,
@@ -995,8 +1219,8 @@ class VerticalOffloadPolicy:
                         'core_ready': core_ready,
                     })
 
-        # Phase 2: execute at most one mode change per evaluation tick.
-        # Priority: entering SPREAD (SLO protection) takes precedence over exiting to LOCAL.
+        # Phase 2: execute at most one mode or weight change per global interval.
+        # Priority: 1) entering SPREAD (SLO protection), 2) restoring a breaching retreat step, 3) retreating.
         switched = False
         if enter_candidates:
             enter_candidates.sort(key=lambda c: c['site'])
@@ -1005,16 +1229,15 @@ class VerticalOffloadPolicy:
             site = chosen['site']
             if self._try_start_route_switch(st, 'SPREAD', now, snapshot=snapshot):
                 switched = True
+                self._reset_retreat_state(st)
                 self._reset_other_spread_post_ack(site, wall_now)
                 k_after = self.spread_count()
                 st.local_confirmed_since = None
                 st.spread_confirmed_since = None
-                st.last_spread_k = k_after
-                st.last_core_ratio = spread_core_ratio(chosen['core_ready'], chosen['local_ready'], k_after)
                 st.last_decision_reason = chosen['reason']
                 st.last_status_note = chosen['reason']
                 self._clear_breach(st)
-                extra = self._spread_extra(chosen['local_ready'], chosen['core_ready'], k_after)
+                extra = self._spread_extra(st, chosen['local_ready'], chosen['core_ready'], k_after, level=0)
                 if chosen['unlabeled_timeouts']:
                     extra['unlabeled_timeouts'] = chosen['unlabeled_timeouts']
                 events.append(
@@ -1040,54 +1263,124 @@ class VerticalOffloadPolicy:
                 if not switched or cand is not chosen:
                     cand['st'].last_status_note = 'route_switch_waiting'
 
-        if not switched and exit_candidates:
-            # Largest Core ratio first; tie-break by site name.
-            exit_candidates.sort(key=lambda c: (-c['core_ratio'], c['site']))
-            chosen = exit_candidates[0]
+        if not switched and restore_candidates:
+            restore_candidates.sort(key=lambda c: (-c['core_ratio'], c['site']))
+            chosen = restore_candidates[0]
             st = chosen['st']
             site = chosen['site']
-            if self._try_start_route_switch(st, 'LOCAL', now, snapshot=snapshot):
+            target_level = st.good_level
+            if self._try_start_weight_change(st, target_level, now, snapshot=snapshot):
                 switched = True
-                self._reset_other_spread_post_ack(site, wall_now)
-                st.spread_confirmed_since = None
-                st.last_decision_reason = 'spread_overall_p90_recovered'
-                st.last_status_note = 'spread_overall_p90_recovered'
+                st.hold_until = now + cfg.min_dwell_seconds
+                st.last_decision_reason = chosen['reason']
+                st.last_status_note = 'spread_retreat_restore'
                 self._clear_breach(st)
                 self._clear_recovery(st)
                 events.append(
                     DecisionEvent(
                         timestamp=now,
-                        event='route_decision',
+                        event='spread_retreat_restore',
                         site=site,
                         old_route='SPREAD',
-                        new_route='LOCAL',
-                        desired_route='LOCAL',
+                        new_route='SPREAD',
+                        desired_route='SPREAD',
                         active_route=st.active_route,
-                        reason='spread_overall_p90_recovered',
+                        reason=chosen['reason'],
                         p90_ms=chosen['p90_ms'],
                         samples=chosen['samples'],
                         attempts=chosen['attempts'],
                         error_rate=chosen['error_rate'],
                         local_ready_endpoints=chosen['local_ready'],
                         core_ready_endpoints=chosen['core_ready'],
-                        extra=self._spread_extra(chosen['local_ready'], chosen['core_ready'], k_current),
+                        extra=self._spread_extra(st, chosen['local_ready'], chosen['core_ready'], k_current, level=target_level),
                     )
                 )
-            for cand in exit_candidates:
+            for cand in restore_candidates:
                 if not switched or cand is not chosen:
                     cand['st'].last_status_note = 'route_switch_waiting'
         elif switched:
-            for cand in exit_candidates:
+            for cand in restore_candidates:
                 cand['st'].last_status_note = 'route_switch_waiting'
 
-        # Refresh k and core_ratio across all sites after any transition in this tick.
+        if not switched and retreat_candidates:
+            # Largest Core ratio first; tie-break by site name.
+            retreat_candidates.sort(key=lambda c: (-c['core_ratio'], c['site']))
+            chosen = retreat_candidates[0]
+            st = chosen['st']
+            site = chosen['site']
+            if chosen['action'] == 'complete':
+                if self._try_start_route_switch(st, 'LOCAL', now, snapshot=snapshot):
+                    switched = True
+                    extra = self._spread_extra(st, chosen['local_ready'], chosen['core_ready'], k_current, level=chosen['next_level'])
+                    self._reset_other_spread_post_ack(site, wall_now)
+                    self._reset_retreat_state(st)
+                    st.spread_confirmed_since = None
+                    st.last_decision_reason = 'spread_retreat_complete'
+                    st.last_status_note = 'spread_retreat_complete'
+                    self._clear_breach(st)
+                    self._clear_recovery(st)
+                    events.append(
+                        DecisionEvent(
+                            timestamp=now,
+                            event='route_decision',
+                            site=site,
+                            old_route='SPREAD',
+                            new_route='LOCAL',
+                            desired_route='LOCAL',
+                            active_route=st.active_route,
+                            reason='spread_retreat_complete',
+                            p90_ms=chosen['p90_ms'],
+                            samples=chosen['samples'],
+                            attempts=chosen['attempts'],
+                            error_rate=chosen['error_rate'],
+                            local_ready_endpoints=chosen['local_ready'],
+                            core_ready_endpoints=chosen['core_ready'],
+                            extra=extra,
+                        )
+                    )
+            else:
+                next_level = chosen['next_level']
+                if self._try_start_weight_change(st, next_level, now, snapshot=snapshot):
+                    switched = True
+                    st.last_decision_reason = 'spread_retreat_step'
+                    st.last_status_note = 'spread_retreat_step'
+                    self._clear_breach(st)
+                    self._clear_recovery(st)
+                    events.append(
+                        DecisionEvent(
+                            timestamp=now,
+                            event='spread_retreat_step',
+                            site=site,
+                            old_route='SPREAD',
+                            new_route='SPREAD',
+                            desired_route='SPREAD',
+                            active_route=st.active_route,
+                            reason='spread_retreat_step',
+                            p90_ms=chosen['p90_ms'],
+                            samples=chosen['samples'],
+                            attempts=chosen['attempts'],
+                            error_rate=chosen['error_rate'],
+                            local_ready_endpoints=chosen['local_ready'],
+                            core_ready_endpoints=chosen['core_ready'],
+                            extra=self._spread_extra(st, chosen['local_ready'], chosen['core_ready'], k_current, level=next_level),
+                        )
+                    )
+            for cand in retreat_candidates:
+                if not switched or cand is not chosen:
+                    cand['st'].last_status_note = 'route_switch_waiting'
+        elif switched:
+            for cand in retreat_candidates:
+                cand['st'].last_status_note = 'route_switch_waiting'
+
+        # Refresh k, core_ratio, and local_weight across all sites after any transition in this tick.
         k_final = self.spread_count()
         for st in self.states.values():
             st.last_spread_k = k_final
-            st.last_core_ratio = (
-                spread_core_ratio(st.last_core_ready, st.last_local_ready, k_final)
-                if st.desired_route == 'SPREAD'
-                else 0.0
-            )
+            if st.desired_route == 'SPREAD':
+                st.last_core_ratio = spread_core_ratio(st.last_core_ready, st.last_local_ready, k_final, st.retreat_level)
+                st.last_local_weight = spread_local_weight(st.last_core_ready, st.last_local_ready, k_final, st.retreat_level)
+            else:
+                st.last_core_ratio = 0.0
+                st.last_local_weight = 1
 
         return events

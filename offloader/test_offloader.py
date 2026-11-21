@@ -18,6 +18,8 @@ from offloader.k8s import filter_pinned_endpoints
 from offloader.policy import (
     OffloadConfig,
     SITES,
+    SPREAD_RETREAT_FACTOR,
+    SPREAD_RETREAT_FLOOR,
     VerticalOffloadPolicy,
     spread_core_ratio,
     spread_local_weight,
@@ -93,8 +95,20 @@ def _make_snapshot(site_overrides=None):
     }
 
 
-@pytest.mark.parametrize('hot_site', SITES)
-def test_single_site_enter_spread_and_exit_on_overall_p90_without_probe_gate(hot_site):
+def test_gradual_retreat_sequence_c4_x1_k1_halves_core_share_to_local():
+    assert SPREAD_RETREAT_FACTOR == 2
+    assert SPREAD_RETREAT_FLOOR == 0.01
+
+    # Verify exact core-share halving sequence and integer weights >= 1 for c=4, x=1, k=1.
+    expected_shares = [0.80, 0.40, 0.20, 0.10, 0.05, 0.025, 0.0125, 0.00625]
+    expected_weights = [1, 6, 16, 36, 76, 156, 316, 636]
+    for n, (exp_s, exp_w) in enumerate(zip(expected_shares, expected_weights)):
+        s_n = spread_core_ratio(4, 1, 1, n)
+        w_l = spread_local_weight(4, 1, 1, n)
+        assert s_n == pytest.approx(exp_s, abs=1e-6)
+        assert isinstance(w_l, int) and w_l >= 1 and w_l == exp_w
+
+    # Full state-machine walkthrough: c=4, x=1, k=1 -> 6 EDS retreat steps, 7th step completes to LOCAL (no pod growth!).
     cfg = OffloadConfig(
         mode='vertical',
         offload_p90_threshold_ms=150.0,
@@ -102,72 +116,155 @@ def test_single_site_enter_spread_and_exit_on_overall_p90_without_probe_gate(hot
         breach_duration_seconds=5.0,
         min_fresh_updates=2,
         min_dwell_seconds=15.0,
+        route_switch_interval_seconds=5.0,
     )
     policy = VerticalOffloadPolicy(cfg)
     local_ready = {s: 1 for s in SITES}
-    core_ready = 3
+    core_ready = 4
     wall_start = 1700000000.0
-    policy.record_envoy_ack(hot_site, 'LOCAL', '1', wall_start)
+    policy.record_envoy_ack('gnb-1', 'LOCAL', '1', wall_start)
 
-    # Local p90 breaches SLO (>150ms) across breach_duration with fresh updates.
-    enter_events = []
+    # Enter SPREAD on gnb-1 at t=21.
     for sec in range(16, 22):
-        snap = _make_snapshot({
-            hot_site: {'user_local': _make_bucket(p90_ms=210.0, attempts=20, successes=20, seq=10 + sec)},
-        })
+        snap = _make_snapshot({'gnb-1': {'user_local': _make_bucket(p90_ms=220.0, seq=sec)}})
         snap['generated_at'] = wall_start + sec
-        enter_events.extend(policy.evaluate(float(sec), snap, local_ready, core_ready))
+        policy.evaluate(float(sec), snap, local_ready, core_ready)
+    st = policy.states['gnb-1']
+    assert st.desired_route == 'SPREAD' and st.retreat_level == 0 and st.good_level == 0
+    policy.record_envoy_ack('gnb-1', 'SPREAD', '2', wall_start + 22, monotonic_now=22.0)
 
-    for s in SITES:
-        if s == hot_site:
-            assert policy.states[s].desired_route == 'SPREAD'
-            assert policy.states[s].last_decision_reason == 'local_p90_breach'
-        else:
-            assert policy.states[s].desired_route == 'LOCAL'
+    # Walk steps n=1..6 (each requires EDS ACK + 15s post-ACK window + 2 fresh healthy updates).
+    t = 22
+    seq = 100
+    for target_n in range(1, 7):
+        t += 15  # post-ACK window + dwell elapsed
+        step_evs = []
+        for _ in range(2):
+            t += 1
+            seq += 1
+            snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=100.0, seq=seq)}})
+            snap['generated_at'] = wall_start + t
+            step_evs.extend(policy.evaluate(float(t), snap, local_ready, core_ready))
+        steps = [e for e in step_evs if e.event == 'spread_retreat_step']
+        assert len(steps) == 1
+        rec = steps[0].to_dict()
+        assert st.desired_route == 'SPREAD' and st.retreat_level == target_n
+        assert rec['c'] == 4 and rec['x_i'] == 1 and rec['k'] == 1 and rec['n'] == target_n
+        assert rec['good_level'] == target_n - 1
+        assert rec['core_ratio'] == pytest.approx(expected_shares[target_n], abs=1e-6)
+        assert rec['local_weight'] == expected_weights[target_n]
+        assert rec['p90_ms'] == 100.0 and rec['samples'] == 20 and 'hold_until' in rec
 
-    rd = [e for e in enter_events if e.event == 'route_decision' and e.site == hot_site]
-    assert len(rd) == 1
-    assert rd[0].old_route == 'LOCAL' and rd[0].new_route == 'SPREAD'
-    assert rd[0].extra['c'] == 3 and rd[0].extra['x_i'] == 1 and rd[0].extra['k'] == 1
-    assert rd[0].extra['core_ratio'] == pytest.approx(0.75, abs=1e-6)
+        # Before EDS ACK arrives, site MUST wait and cannot retreat further.
+        t += 1
+        seq += 1
+        snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=90.0, seq=seq)}})
+        snap['generated_at'] = wall_start + t
+        policy.evaluate(float(t), snap, local_ready, core_ready)
+        assert st.last_status_note == 'spread_waiting_eds_ack'
 
-    # Simulate Envoy ACK for hot_site entering SPREAD.
-    ack_ev = policy.record_envoy_ack(hot_site, 'SPREAD', '2', wall_start + 22, monotonic_now=22.0)
-    assert ack_ev is not None and ack_ev.event == 'envoy_ack'
-    assert ack_ev.extra['k'] == 1 and ack_ev.extra['c'] == 3 and ack_ev.extra['x_i'] == 1
-    assert policy.states[hot_site].active_route == 'SPREAD'
+        # Deliver EDS ACK -> starts post-ACK window.
+        eds_ack = policy.record_envoy_eds_ack('gnb-1', target_n, f'eds-{target_n}', wall_start + t, monotonic_now=float(t))
+        assert eds_ack is not None and eds_ack.reason == 'envoy_eds_ack'
 
-    def tick(sec, overall_p90, *, probe_p90=None):
-        ov = {
-            'user_overall': _make_bucket(p90_ms=overall_p90, attempts=25, successes=25, seq=100 + sec),
-        }
-        if probe_p90 is not None:
-            ov['probe_local'] = _make_bucket(p90_ms=probe_p90, seq=200 + sec)
-        snap = _make_snapshot({hot_site: ov})
-        snap['generated_at'] = wall_start + sec
-        return policy.evaluate(float(sec), snap, local_ready, core_ready)
+    # 7th step (n=7 -> 0.625% < 1% floor): completes to full LOCAL via RDS!
+    t += 15
+    done_evs = []
+    for _ in range(2):
+        t += 1
+        seq += 1
+        snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=95.0, seq=seq)}})
+        snap['generated_at'] = wall_start + t
+        done_evs.extend(policy.evaluate(float(t), snap, local_ready, core_ready))
+    rds = [e for e in done_evs if e.event == 'route_decision' and e.reason == 'spread_retreat_complete']
+    assert len(rds) == 1
+    assert st.desired_route == 'LOCAL' and st.retreat_level == 0 and st.good_level == 0
+    assert rds[0].extra['n'] == 7 and rds[0].extra['core_ratio'] == pytest.approx(0.00625, abs=1e-6)
 
-    # Before post-ACK window completes (22 + 15 = 37): must hold SPREAD even if overall p90 <= SLO.
-    evs = tick(35, 110.0)
-    assert policy.states[hot_site].desired_route == 'SPREAD'
-    assert policy.states[hot_site].last_status_note == 'spread_waiting_post_ack'
-    assert any(e.event == 'hold_route' and e.reason == 'spread_waiting_post_ack' and e.extra['k'] == 1 for e in evs)
+    # Re-entering SPREAD later always starts fresh at n=0.
+    policy.record_envoy_ack('gnb-1', 'LOCAL', '3', wall_start + t + 1, monotonic_now=float(t + 1))
+    t += 20
+    for _ in range(7):
+        t += 1
+        seq += 1
+        snap = _make_snapshot({'gnb-1': {'user_local': _make_bucket(p90_ms=240.0, seq=seq)}})
+        snap['generated_at'] = wall_start + t
+        policy.evaluate(float(t), snap, local_ready, core_ready)
+    assert st.desired_route == 'SPREAD' and st.retreat_level == 0 and st.good_level == 0
 
-    # After post-ACK window, overall p90 > SLO (160ms): must NOT exit SPREAD.
-    for sec in range(37, 42):
-        tick(sec, 160.0)
-    assert policy.states[hot_site].desired_route == 'SPREAD'
-    assert policy.states[hot_site].last_status_note == 'spread_p90_above_slo'
 
-    # Overall p90 <= SLO (150ms) with NO probe at all (and unhealthy probe on next tick): exits to LOCAL!
-    tick(42, 150.0, probe_p90=None)
-    assert policy.states[hot_site].desired_route == 'SPREAD'  # 1 fresh update < min_fresh_updates(2)
-    exit_evs = tick(43, 145.0, probe_p90=999.0)
-    assert policy.states[hot_site].desired_route == 'LOCAL'
-    assert policy.states[hot_site].last_decision_reason == 'spread_overall_p90_recovered'
-    exit_rd = [e for e in exit_evs if e.event == 'route_decision' and e.site == hot_site]
-    assert len(exit_rd) == 1
-    assert exit_rd[0].extra['c'] == 3 and exit_rd[0].extra['x_i'] == 1 and exit_rd[0].extra['k'] == 1
+def test_gradual_retreat_restore_on_step3_breach_hold_15s_then_resume_from_good_level_plus_1():
+    cfg = OffloadConfig(
+        offload_p90_threshold_ms=150.0,
+        min_samples=15,
+        min_fresh_updates=2,
+        min_dwell_seconds=15.0,
+        route_switch_interval_seconds=5.0,
+    )
+    policy = VerticalOffloadPolicy(cfg)
+    local_ready = {s: 1 for s in SITES}
+    core_ready = 4
+    wall_start = 1700000000.0
+    st = policy.states['gnb-1']
+    st.desired_route = st.active_route = 'SPREAD'
+    st.last_transition_time = 0.0
+    st.spread_confirmed_since = wall_start
+
+    t = 0
+    seq = 1
+    # Step 1 (n=0->1), Step 2 (n=1->2), Step 3 (n=2->3) all initiated while healthy.
+    for target_n in (1, 2, 3):
+        t += 16
+        for _ in range(2):
+            t += 1
+            seq += 1
+            snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=110.0, seq=seq)}})
+            snap['generated_at'] = wall_start + t
+            policy.evaluate(float(t), snap, local_ready, core_ready)
+        assert st.retreat_level == target_n
+        assert st.good_level == target_n - 1
+        policy.record_envoy_eds_ack('gnb-1', target_n, f'eds-{target_n}', wall_start + t, monotonic_now=float(t))
+
+    # At n=3 (good_level=2), post-ACK overall p90 breaches SLO (>150ms) -> RESTORE to good_level=2 + hold 15s!
+    t += 16
+    restore_evs = []
+    for _ in range(2):
+        t += 1
+        seq += 1
+        snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=210.0, seq=seq)}})
+        snap['generated_at'] = wall_start + t
+        restore_evs.extend(policy.evaluate(float(t), snap, local_ready, core_ready))
+    restores = [e for e in restore_evs if e.event == 'spread_retreat_restore']
+    assert len(restores) == 1
+    assert st.retreat_level == 2 and st.good_level == 2
+    assert st.hold_until == pytest.approx(float(t) + 15.0)
+    assert restores[0].extra['n'] == 2 and restores[0].extra['good_level'] == 2
+    assert restores[0].extra['local_weight'] == spread_local_weight(4, 1, 1, 2)
+    assert restores[0].extra['hold_until'] == pytest.approx(float(t) + 15.0)
+
+    # ACK restore EDS immediately; during hold_until (even if post-ACK were satisfied early), no retreat step occurs.
+    restore_t = t
+    policy.record_envoy_eds_ack('gnb-1', 2, 'eds-restore', wall_start + t, monotonic_now=float(t))
+    # Simulate shorter window (5s) to verify hold_until (15s) independently blocks retreat before restore_t + 15.
+    for dt in range(6, 15):
+        seq += 1
+        snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=100.0, seq=seq)}})
+        snap['window_seconds'] = 5.0
+        snap['generated_at'] = wall_start + restore_t + dt
+        policy.evaluate(float(restore_t + dt), snap, local_ready, core_ready)
+    assert st.retreat_level == 2 and st.last_status_note == 'spread_retreat_hold'
+
+    # Once hold_until (restore_t + 15) and post-ACK (15s) elapse and p90 <= SLO, retreat resumes at good_level + 1 = 3!
+    t = restore_t + 15
+    resume_evs = []
+    for _ in range(2):
+        t += 1
+        seq += 1
+        snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=100.0, seq=seq)}})
+        snap['generated_at'] = wall_start + t
+        resume_evs.extend(policy.evaluate(float(t), snap, local_ready, core_ready))
+    assert any(e.event == 'spread_retreat_step' and e.extra['n'] == 3 for e in resume_evs)
+    assert st.retreat_level == 3
 
 
 def test_spread_weights_and_core_ratios_match_specification_examples():
@@ -177,15 +274,21 @@ def test_spread_weights_and_core_ratios_match_specification_examples():
     assert spread_core_ratio(3, 3, 3) == pytest.approx(0.25, abs=1e-4)
 
     # Example 2: c=3, x=(gnb-1:1, gnb-2:3, gnb-3:2)
-    # k=3 -> 50%, 25%, 33.3%
     assert spread_core_ratio(3, 1, 3) == pytest.approx(0.5, abs=1e-4)
     assert spread_core_ratio(3, 3, 3) == pytest.approx(0.25, abs=1e-4)
     assert spread_core_ratio(3, 2, 3) == pytest.approx(1 / 3, abs=1e-4)
-    # Only gnb-2 and gnb-3 SPREAD (k=2) -> 33.3% and 42.9%
     assert spread_core_ratio(3, 3, 2) == pytest.approx(1 / 3, abs=1e-4)
     assert spread_core_ratio(3, 2, 2) == pytest.approx(3 / 7, abs=1e-4)
 
-    # Verify EDS ClusterLoadAssignment weights dynamically recompute as k changes.
+    # Edge cases: x_i=0 and c=0 return valid integer weights >= 1 without ZeroDivisionError.
+    assert spread_core_ratio(3, 0, 1, 0) == 1.0
+    assert spread_local_weight(3, 0, 1, 0) == 1
+    assert spread_local_weight(3, 0, 2, 3) == 1
+    assert spread_core_ratio(0, 2, 1, 0) == 0.0
+    assert spread_local_weight(0, 2, 1, 0) == 1
+    assert spread_local_weight(0, 0, 1, 0) == 1
+
+    # Verify EDS ClusterLoadAssignment weights dynamically recompute as k and n change.
     xds = XdsState(epoch='ep1')
     local_eps = {
         'gnb-1': [('10.1.0.1', 5000)],
@@ -210,18 +313,21 @@ def test_spread_weights_and_core_ratios_match_specification_examples():
     assert all(v >= 1 for v in w2.values())
     assert w2['10.2.0.1'] == 1 and w2['10.9.0.1'] == 1
 
-    # k=2 (gnb-3 enters SPREAD): local weight=2, core weight=1 -> gnb-2: 3/9=33.3%, gnb-3: 3/7=42.9%
+    # Retreat gnb-2 to n=1 (s_1=25% -> w_l = round(3*0.75/(0.25*3)) = 3).
+    xds.set_site_retreat_level('gnb-2', 1)
+    assert _eds_weights('gnb-2')['10.2.0.1'] == 3
+
+    # k=2 (gnb-3 enters SPREAD): gnb-2 (n=1) recomputes with k=2 -> s_1=(3/9)/2=1/6 -> w_l=round(3*(5/6)/((1/6)*3))=5.
     eds_v_before = xds.status_snapshot()['eds_version']
     xds.set_site_route('gnb-3', 'SPREAD')
     assert xds.status_snapshot()['eds_version'] != eds_v_before
     w2 = _eds_weights('gnb-2')
     w3 = _eds_weights('gnb-3')
-    assert w2['10.2.0.1'] == 2 and w2['10.9.0.1'] == 1
+    assert w2['10.2.0.1'] == 5 and w2['10.9.0.1'] == 1
     assert w3['10.3.0.1'] == 2 and w3['10.9.0.1'] == 1
-    assert sum(w2[ip] for ip, _ in core_eps) / sum(w2.values()) == pytest.approx(1 / 3, abs=1e-4)
-    assert sum(w3[ip] for ip, _ in core_eps) / sum(w3.values()) == pytest.approx(3 / 7, abs=1e-4)
 
-    # k=3 (gnb-1 enters SPREAD): local weight=3, core weight=1 -> 50%, 25%, 33.3%
+    # Reset gnb-2 retreat level to 0 and test k=3 (gnb-1 enters SPREAD).
+    xds.set_site_retreat_level('gnb-2', 0)
     xds.set_site_route('gnb-1', 'SPREAD')
     for site, expected_ratio in (('gnb-1', 0.5), ('gnb-2', 0.25), ('gnb-3', 1 / 3)):
         ws = _eds_weights(site)
@@ -243,13 +349,11 @@ def test_k_change_restarts_post_ack_window_for_other_spread_sites():
     wall_start = 1700000000.0
     local_ready = {'gnb-1': 1, 'gnb-2': 3, 'gnb-3': 2}
 
-    # gnb-1 is already in SPREAD and its post-ACK window has elapsed (confirmed at t=0, now t=20).
     st1 = policy.states['gnb-1']
     st1.desired_route = st1.active_route = 'SPREAD'
     st1.last_transition_time = 0.0
     st1.spread_confirmed_since = wall_start
 
-    # gnb-2 breaches local SLO and enters SPREAD at t=21 (k: 1 -> 2).
     for sec in (20, 21):
         snap = _make_snapshot({
             'gnb-1': {'user_overall': _make_bucket(p90_ms=160.0, seq=sec)},
@@ -259,13 +363,10 @@ def test_k_change_restarts_post_ack_window_for_other_spread_sites():
         policy.evaluate(float(sec), snap, local_ready, 3)
 
     assert policy.states['gnb-2'].desired_route == 'SPREAD'
-    # gnb-1's post-ACK window MUST have been restarted to wall_start + 21!
     assert st1.spread_confirmed_since == wall_start + 21
 
-    # ACK gnb-2 at t=22.
     policy.record_envoy_ack('gnb-2', 'SPREAD', '2', wall_start + 22, monotonic_now=22.0)
 
-    # Even when gnb-1 overall p90 drops to 90ms at t=30 (< 21+15=36), gnb-1 MUST wait for its restarted post-ACK window.
     for sec in range(28, 35):
         snap = _make_snapshot({
             'gnb-1': {'user_overall': _make_bucket(p90_ms=90.0, seq=100 + sec)},
@@ -273,10 +374,9 @@ def test_k_change_restarts_post_ack_window_for_other_spread_sites():
         })
         snap['generated_at'] = wall_start + sec
         policy.evaluate(float(sec), snap, local_ready, 3)
-    assert st1.desired_route == 'SPREAD'
+    assert st1.desired_route == 'SPREAD' and st1.retreat_level == 0
     assert st1.last_status_note == 'spread_waiting_post_ack'
 
-    # Once both gnb-1 restarted post-ACK (36) and gnb-2 post-ACK (37) complete, gnb-1 can exit to LOCAL.
     for sec in (37, 38):
         snap = _make_snapshot({
             'gnb-1': {'user_overall': _make_bucket(p90_ms=90.0, seq=200 + sec)},
@@ -284,14 +384,14 @@ def test_k_change_restarts_post_ack_window_for_other_spread_sites():
         })
         snap['generated_at'] = wall_start + sec
         policy.evaluate(float(sec), snap, local_ready, 3)
-    assert st1.desired_route == 'LOCAL'
+    assert st1.desired_route == 'SPREAD' and st1.retreat_level == 1
 
 
-def test_two_sites_eligible_to_exit_picks_largest_core_ratio_then_site_name_and_serializes():
+def test_two_sites_eligible_to_retreat_picks_largest_core_ratio_then_site_name_and_serializes():
     cfg = OffloadConfig(breach_duration_seconds=1.0, min_fresh_updates=2, min_dwell_seconds=5.0, route_switch_interval_seconds=5.0)
     policy = VerticalOffloadPolicy(cfg)
     wall_start = 1700000000.0
-    # gnb-2 has x=3 (core_ratio=3/9=33.3%), gnb-3 has x=2 (core_ratio=3/7=42.9%) -> gnb-3 MUST exit first!
+    # gnb-2 has x=3 (core_ratio=3/9=33.3%), gnb-3 has x=2 (core_ratio=3/7=42.9%) -> gnb-3 retreats first!
     local_ready = {'gnb-1': 1, 'gnb-2': 3, 'gnb-3': 2}
     for s in ('gnb-2', 'gnb-3'):
         st = policy.states[s]
@@ -305,21 +405,21 @@ def test_two_sites_eligible_to_exit_picks_largest_core_ratio_then_site_name_and_
             'gnb-3': {'user_overall': _make_bucket(p90_ms=100.0, seq=sec)},
         })
         snap['generated_at'] = wall_start + sec
-        return [e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision']
+        return [e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event in ('spread_retreat_step', 'route_decision')]
 
     assert tick(20) == []  # 1st fresh update
-    evs = tick(21)         # 2nd fresh update: both eligible, only gnb-3 (higher core_ratio) exits!
-    assert [(e.site, e.new_route) for e in evs] == [('gnb-3', 'LOCAL')]
-    assert policy.states['gnb-2'].desired_route == 'SPREAD'
+    evs = tick(21)         # 2nd fresh update: both eligible, only gnb-3 (higher core_ratio) retreats!
+    assert [(e.site, e.event, e.extra['n']) for e in evs] == [('gnb-3', 'spread_retreat_step', 1)]
+    assert policy.states['gnb-2'].retreat_level == 0
 
-    # gnb-2 cannot exit before gnb-3 ACK + post-ACK window (15s).
+    # gnb-2 cannot retreat before gnb-3 EDS ACK + post-ACK window (15s).
     assert tick(22) == []
-    policy.record_envoy_ack('gnb-3', 'LOCAL', '2', wall_start + 23, monotonic_now=23.0)
+    policy.record_envoy_eds_ack('gnb-3', 1, 'eds-2', wall_start + 23, monotonic_now=23.0)
     for sec in range(24, 38):
         assert tick(sec) == []
-    # At t=38 (gnb-3 post-ACK 23+15=38 finishes, and gnb-2 already collected >=2 fresh updates since its restarted post-ACK 21+15=36), gnb-2 exits.
+    # At t=38 (gnb-3 post-ACK 23+15=38 finishes), gnb-2 now has higher core_ratio (33.3% > 21.4%) -> gnb-2 retreats!
     evs2 = tick(38)
-    assert [(e.site, e.new_route) for e in evs2] == [('gnb-2', 'LOCAL')]
+    assert [(e.site, e.event, e.extra['n']) for e in evs2] == [('gnb-2', 'spread_retreat_step', 1)]
 
     # Tie-breaker test: identical core_ratio -> lexicographical site name order (gnb-1 before gnb-2).
     policy2 = VerticalOffloadPolicy(cfg)
@@ -335,8 +435,8 @@ def test_two_sites_eligible_to_exit_picks_largest_core_ratio_then_site_name_and_
             'gnb-2': {'user_overall': _make_bucket(p90_ms=110.0, seq=sec)},
         })
         snap['generated_at'] = wall_start + sec
-        out = [e for e in policy2.evaluate(float(sec), snap, equal_ready, 3) if e.event == 'route_decision']
-    assert [(e.site, e.new_route) for e in out] == [('gnb-1', 'LOCAL')]
+        out = [e for e in policy2.evaluate(float(sec), snap, equal_ready, 3) if e.event == 'spread_retreat_step']
+    assert [(e.site, e.extra['n']) for e in out] == [('gnb-1', 1)]
 
 
 def test_no_flip_flop_when_p90_oscillates_around_slo():
@@ -349,35 +449,32 @@ def test_no_flip_flop_when_p90_oscillates_around_slo():
     )
     policy = VerticalOffloadPolicy(cfg)
     wall_start = 1700000000.0
-    local_ready = {s: 2 for s in SITES}
+    local_ready = {s: 1 for s in SITES}
     policy.record_envoy_ack('gnb-1', 'LOCAL', '1', wall_start)
 
-    transitions = []
-    # Oscillate p90 around 150ms every second (145, 155, 145, 155, ...) for 60 seconds while LOCAL.
-    for sec in range(1, 61):
+    route_changes = []
+    # Oscillate p90 around 150ms every second (145, 155, ...) for 120s while LOCAL -> 0 route changes.
+    for sec in range(1, 121):
         p90 = 155.0 if sec % 2 == 1 else 145.0
-        snap = _make_snapshot({
-            'gnb-1': {'user_local': _make_bucket(p90_ms=p90, seq=sec)},
-        })
+        snap = _make_snapshot({'gnb-1': {'user_local': _make_bucket(p90_ms=p90, seq=sec)}})
         snap['generated_at'] = wall_start + sec
-        transitions.extend(e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision')
-    assert transitions == []
-    assert policy.states['gnb-1'].desired_route == 'LOCAL'
+        route_changes.extend(e for e in policy.evaluate(float(sec), snap, local_ready, 4) if e.event == 'route_decision')
+    assert len(route_changes) == 0
 
-    # Now oscillate while in SPREAD (145, 155, 145, 155, ...) after post-ACK: must NOT exit or flip-flop!
+    # Oscillate in SPREAD around 150ms for 180s (3 minutes): route changes per minute must be << old pattern (4 per 53s = 4.53/min).
     st = policy.states['gnb-1']
     st.desired_route = st.active_route = 'SPREAD'
-    st.last_transition_time = 60.0
-    st.spread_confirmed_since = wall_start + 60.0
-    for sec in range(76, 136):
+    st.last_transition_time = 120.0
+    st.spread_confirmed_since = wall_start + 120.0
+    spread_route_changes = []
+    for sec in range(136, 316):
         p90 = 145.0 if sec % 2 == 0 else 155.0
-        snap = _make_snapshot({
-            'gnb-1': {'user_overall': _make_bucket(p90_ms=p90, seq=100 + sec)},
-        })
+        snap = _make_snapshot({'gnb-1': {'user_overall': _make_bucket(p90_ms=p90, seq=200 + sec)}})
         snap['generated_at'] = wall_start + sec
-        transitions.extend(e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision')
-    assert transitions == []
-    assert policy.states['gnb-1'].desired_route == 'SPREAD'
+        spread_route_changes.extend(e for e in policy.evaluate(float(sec), snap, local_ready, 4) if e.event == 'route_decision')
+    changes_per_min = len(spread_route_changes) / 3.0
+    assert changes_per_min < 0.5  # old direct-exit pattern was 4 per 53s (~4.53/min); gradual retreat produces 0/min
+    assert st.desired_route == 'SPREAD'
 
 
 def test_runtime_switches_serialize_across_ack_and_post_ack_window():

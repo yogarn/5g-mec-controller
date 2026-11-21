@@ -164,6 +164,12 @@ class XdsState:
         self._site_last_nack: dict[str, str | None] = {site: None for site in SITES}
         self._invalid_rds_version: dict[str, str | None] = {site: None for site in SITES}
         self._eds_seq: int = 1
+        self._site_retreat_level: dict[str, int] = {site: 0 for site in SITES}
+        self._spread_eds_version_levels: dict[str, dict[str, int]] = {
+            site: {self._ver(1): 0} for site in SITES
+        }
+        self._spread_eds_acked_version: dict[str, str | None] = {site: None for site in SITES}
+        self._spread_eds_last_nack: dict[str, str | None] = {site: None for site in SITES}
         self._local_endpoints: dict[str, list[tuple[str, int]]] = {site: [] for site in SITES}
         self._core_endpoints: list[tuple[str, int]] = []
         self._eds_endpoints: dict[str, list[tuple]] = self._build_eds_map_locked()
@@ -175,13 +181,15 @@ class XdsState:
         return sum(1 for r in self._site_routes.values() if r == 'SPREAD')
 
     def _build_eds_map_locked(self) -> dict[str, list[tuple]]:
-        local_weight = spread_local_weight(self._spread_count_locked())
+        k = self._spread_count_locked()
         eds_map: dict[str, list[tuple]] = {}
         core_sorted = sorted(set(self._core_endpoints))
+        c = len(core_sorted)
         eds_map[CORE_EDS_SERVICE_NAME] = core_sorted
         for site in SITES:
             local_sorted = sorted(set(self._local_endpoints.get(site, [])))
             eds_map[local_eds_service_name(site)] = local_sorted
+            local_weight = spread_local_weight(c, len(local_sorted), k, self._site_retreat_level[site])
             local_set = set(local_sorted)
             spread_eps: list[tuple[str, int, int]] = [
                 (ip, port, local_weight) for ip, port in local_sorted
@@ -197,6 +205,9 @@ class XdsState:
         if new_map != self._eds_endpoints:
             self._eds_endpoints = new_map
             self._eds_seq += 1
+            ver = self._ver(self._eds_seq)
+            for site in SITES:
+                self._spread_eds_version_levels[site][ver] = self._site_retreat_level[site]
 
     def set_site_route(self, site: str, route: str) -> str:
         route = route.upper()
@@ -206,12 +217,24 @@ class XdsState:
             if self._site_routes[site] != route:
                 self._site_seq[site] += 1
                 self._site_routes[site] = route
+                if route == 'LOCAL':
+                    self._site_retreat_level[site] = 0
                 version = self._ver(self._site_seq[site])
                 self._site_version_routes[site][version] = route
                 # Recompute weighted spread-gnb-N endpoints when k changes.
                 self._refresh_eds_locked()
                 return version
             return self._ver(self._site_seq[site])
+
+    def set_site_retreat_level(self, site: str, level: int) -> str:
+        if site not in self._site_retreat_level:
+            raise ValueError(f'unknown site: {site}')
+        level_int = max(0, int(level))
+        with self.lock:
+            if self._site_retreat_level[site] != level_int:
+                self._site_retreat_level[site] = level_int
+                self._refresh_eds_locked()
+            return self._ver(self._eds_seq)
 
     def inject_invalid_rds_for_test(self, site: str, desired_route: str = 'SPREAD') -> str:
         """Test-only helper: bump site version and serve an invalid RouteConfiguration so Envoy NACKs."""
@@ -232,9 +255,11 @@ class XdsState:
             for site in SITES:
                 self._site_seq[site] += 1
                 self._site_routes[site] = 'LOCAL'
+                self._site_retreat_level[site] = 0
                 version = self._ver(self._site_seq[site])
                 self._site_version_routes[site][version] = 'LOCAL'
                 self._site_last_nack[site] = None
+                self._spread_eds_last_nack[site] = None
                 self._invalid_rds_version[site] = None
                 versions[site] = version
             self._refresh_eds_locked()
@@ -332,28 +357,65 @@ class XdsState:
             on_ack(site, acked_route, client_version, now)
         return status, body
 
-    def handle_eds(self, req: dict) -> tuple[int, dict | None]:
+    def _sites_from_eds_request(self, req: dict, requested: list[str]) -> list[str]:
+        matched = [site for site in SITES if spread_eds_service_name(site) in requested]
+        if matched:
+            return matched
+        node_id = ((req.get('node') or {}).get('id') or '').strip()
+        for site in SITES:
+            if node_id.endswith(site):
+                return [site]
+        return []
+
+    def handle_eds(self, req: dict, *, on_ack=None, on_nack=None) -> tuple[int, dict | None]:
         client_version = str(req.get('version_info') or '')
         names = req.get('resource_names') or []
+        error_detail = req.get('error_detail')
+        now = self.clock()
+        if error_detail:
+            msg = error_detail.get('message') if isinstance(error_detail, dict) else str(error_detail)
+            nack_sites = self._sites_from_eds_request(req, names)
+            with self.lock:
+                for site in nack_sites:
+                    self._spread_eds_last_nack[site] = msg or 'envoy_eds_nack'
+            if on_nack is not None:
+                for site in nack_sites:
+                    on_nack(site, msg or 'envoy_eds_nack', now)
+            return 304, None
+
+        acked: list[tuple[str, int, str]] = []
         with self.lock:
             current_version = self._ver(self._eds_seq)
-            if client_version == current_version:
-                return 304, None
             requested = names if names else list(self._eds_endpoints.keys())
-            resources = [
-                build_cluster_load_assignment(name, self._eds_endpoints.get(name, []))
-                for name in requested
-            ]
-        return 200, {
-            'version_info': current_version,
-            'type_url': EDS_TYPE_URL,
-            'nonce': f'eds-{current_version}',
-            'resources': resources,
-        }
+            for site in SITES:
+                if spread_eds_service_name(site) in requested:
+                    if client_version and client_version in self._spread_eds_version_levels[site]:
+                        if self._spread_eds_acked_version[site] != client_version:
+                            self._spread_eds_acked_version[site] = client_version
+                            self._spread_eds_last_nack[site] = None
+                            acked.append((site, self._spread_eds_version_levels[site][client_version], client_version))
+            if client_version == current_version:
+                status, body = 304, None
+            else:
+                resources = [
+                    build_cluster_load_assignment(name, self._eds_endpoints.get(name, []))
+                    for name in requested
+                ]
+                status, body = 200, {
+                    'version_info': current_version,
+                    'type_url': EDS_TYPE_URL,
+                    'nonce': f'eds-{current_version}',
+                    'resources': resources,
+                }
+        if acked and on_ack is not None:
+            for site, level, ver in acked:
+                on_ack(site, level, ver, now)
+        return status, body
 
     def status_snapshot(self) -> dict:
         with self.lock:
             k = self._spread_count_locked()
+            c = len(self._core_endpoints)
             return {
                 'epoch': self.epoch,
                 'sites': {
@@ -364,12 +426,15 @@ class XdsState:
                         'acked_route': self._site_acked_route[site],
                         'acked_at': self._site_acked_at[site],
                         'last_nack': self._site_last_nack[site],
+                        'retreat_level': self._site_retreat_level[site],
+                        'spread_local_weight': spread_local_weight(c, len(self._local_endpoints[site]), k, self._site_retreat_level[site]),
+                        'spread_eds_acked_version': self._spread_eds_acked_version[site],
+                        'spread_eds_last_nack': self._spread_eds_last_nack[site],
                     }
                     for site in SITES
                 },
                 'eds_version': self._ver(self._eds_seq),
                 'spread_sites': k,
-                'spread_local_weight': spread_local_weight(k),
                 'endpoints': {k_name: [f'{e[0]}:{e[1]}' for e in v] for k_name, v in self._eds_endpoints.items()},
             }
 

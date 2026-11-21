@@ -89,13 +89,28 @@ class VerticalOffloadController:
         return self.xds.handle_rds(req, on_ack=on_ack, on_nack=on_nack)
 
     def handle_eds(self, req: dict) -> tuple[int, dict | None]:
-        return self.xds.handle_eds(req)
+        def on_ack(site, level, version, now_wall):
+            with self.lock:
+                ev = self.policy.record_envoy_eds_ack(
+                    site, level, version, now_wall, monotonic_now=self.clock(),
+                )
+            if ev is not None:
+                self._emit_events([ev])
+
+        def on_nack(site, msg, now_wall):
+            with self.lock:
+                ev = self.policy.record_envoy_nack(site, msg, now_wall, reason='envoy_eds_nack')
+            self._emit_events([ev])
+
+        return self.xds.handle_eds(req, on_ack=on_ack, on_nack=on_nack)
 
     def manual_override(self, site: str, route: str | None) -> dict:
         with self.lock:
             ev = self.policy.set_manual_override(site, route, self.clock())
-            desired = self.policy.states[site].desired_route
+            state = self.policy.states[site]
+            desired = state.desired_route
             version = self.xds.set_site_route(site, desired)
+            self.xds.set_site_retreat_level(site, state.retreat_level)
         if ev is not None:
             self._emit_events([ev])
         return {'site': site, 'desired_route': desired, 'desired_version': version}
@@ -106,6 +121,7 @@ class VerticalOffloadController:
             routes = {site: self.policy.states[site].desired_route for site in SITES}
             for site, route in routes.items():
                 self.xds.set_site_route(site, route)
+                self.xds.set_site_retreat_level(site, self.policy.states[site].retreat_level)
         return {'mode': mode, 'desired_routes': routes}
 
     def reset(self, *, mode: str | None = None) -> dict:
@@ -170,6 +186,7 @@ class VerticalOffloadController:
             )
             for site, state in self.policy.states.items():
                 self.xds.set_site_route(site, state.desired_route)
+                self.xds.set_site_retreat_level(site, state.retreat_level)
 
         self._emit_events(events)
         return [ev.to_dict() for ev in events]
