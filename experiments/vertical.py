@@ -24,8 +24,11 @@ from experiments.profiles import (
 
 
 def _camp():
-    """Return the experiments.campaign module so test monkeypatches are respected."""
-    return sys.modules['experiments.campaign']
+    """Return the running campaign module (test monkeypatches are respected).
+
+    Under `python -m experiments.campaign` the module is registered as `__main__`, not by its dotted name.
+    """
+    return sys.modules.get('experiments.campaign') or sys.modules['__main__']
 
 
 def _load_offloader_token(settings):

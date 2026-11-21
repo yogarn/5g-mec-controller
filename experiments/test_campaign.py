@@ -1526,3 +1526,13 @@ def test_vertical_arm_manifest_preserves_shared_service_routing(tmp_path):
         campaign.check_service_routing(service, prefer_close=True)
         assert deployment['spec']['replicas'] == 0
         assert hpa is None
+
+
+def test_vertical_helpers_find_campaign_when_run_as_main(monkeypatch):
+    """`python -m experiments.campaign` registers the module as __main__; vertical helpers must still resolve it."""
+    import sys, types
+    from experiments import vertical
+    fake_main = types.SimpleNamespace(marker='main-module')
+    monkeypatch.delitem(sys.modules, 'experiments.campaign', raising=False)
+    monkeypatch.setitem(sys.modules, '__main__', fake_main)
+    assert vertical._camp().marker == 'main-module'
