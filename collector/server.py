@@ -381,6 +381,12 @@ class Collector:
                     if s == site and r == route
                 ]
                 user_buckets[route] = self._summarize_bucket(recs, now)
+            overall_recs = [
+                (ts, wall_ts, duration, success, timed_out, seq)
+                for ts, wall_ts, duration, success, s, _r, timed_out, seq in user_samples
+                if s == site
+            ]
+            user_buckets['overall'] = self._summarize_bucket(overall_recs, now)
             probe_recs = [
                 (ts, wall_ts, duration, success, timed_out, seq)
                 for ts, wall_ts, duration, success, s, r, timed_out, seq in probe_samples

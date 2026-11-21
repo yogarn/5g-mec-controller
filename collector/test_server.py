@@ -541,3 +541,29 @@ def test_config_and_manifest_upf_nodes_validation():
         bad['upf_nodes'] = bad_upf_nodes
         with pytest.raises(ValueError):
             validate_settings(bad)
+
+
+def test_offload_snapshot_overall_includes_unknown_failures_without_changing_local_core():
+    settings = load_settings('collector/config.yaml')
+    now = [100.0]
+    collector = Collector(settings, lambda: now[0], wall_clock=lambda: 1700000000.0 + now[0])
+
+    # Local success, core success, and unknown-route 503 failure + timeout (no server_node, no route).
+    assert collector.ingest({'ue_ip': '172.16.50.251', 'site': 'gnb-1', 'server_node': 'gnb1', 'duration_ms': 60.0, 'http_status': 200, 'success': True})
+    assert collector.ingest({'ue_ip': '172.16.50.251', 'site': 'gnb-1', 'server_node': 'core-5g', 'duration_ms': 90.0, 'http_status': 200, 'success': True})
+    assert collector.ingest({'ue_ip': '172.16.50.251', 'site': 'gnb-1', 'duration_ms': 5000.0, 'http_status': 503, 'success': False})
+    assert collector.ingest({'ue_ip': '172.16.50.251', 'site': 'gnb-1', 'duration_ms': 10000.0, 'http_status': None, 'success': False, 'timed_out': True})
+    # Also an unknown-route success (no server_node) with high latency affects overall p90 without changing local/core.
+    assert collector.ingest({'ue_ip': '172.16.50.251', 'site': 'gnb-1', 'duration_ms': 350.0, 'http_status': 200, 'success': True})
+
+    snap = collector.offload_snapshot()
+    u = snap['sites']['gnb-1']['user']
+    assert u['local']['attempts'] == 1 and u['local']['successes'] == 1 and u['local']['errors'] == 0 and u['local']['p90_ms'] == 60.0
+    assert u['core']['attempts'] == 1 and u['core']['successes'] == 1 and u['core']['errors'] == 0 and u['core']['p90_ms'] == 90.0
+    assert u['unknown']['attempts'] == 3 and u['unknown']['successes'] == 1 and u['unknown']['errors'] == 2
+    assert u['overall']['attempts'] == 5
+    assert u['overall']['successes'] == 3
+    assert u['overall']['errors'] == 2
+    assert u['overall']['timeouts'] == 1
+    assert u['overall']['error_rate'] == round(2 / 5, 6)
+    assert u['overall']['p90_ms'] == 350.0
