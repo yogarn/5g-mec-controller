@@ -188,10 +188,9 @@ type DescheduleCandidate struct {
 }
 
 // SelectDescheduleCandidate predicts the replacement's placement before selecting an eviction.
-// PreferClose uses the remaining pod shares and keeps the draining pod's resource allocation.
-func SelectDescheduleCandidate(nodes []Node, requests map[string]float64, counts map[string]int, saturation, localityWeight float64, weights map[string]float64, allowed map[string]bool, preferClose ...bool) (*DescheduleCandidate, error) {
+// Pod-share scoring uses the remaining pod shares and keeps the draining pod's resource allocation.
+func SelectDescheduleCandidate(nodes []Node, requests map[string]float64, counts map[string]int, saturation, localityWeight float64, weights map[string]float64, allowed map[string]bool, podShareScoring bool) (*DescheduleCandidate, error) {
 	const minDescheduleScoreImprovement = 0.05
-	usePreferClose := len(preferClose) > 0 && preferClose[0]
 	ranked, err := RankNodes(nodes, requests, saturation, localityWeight, weights)
 	if err != nil {
 		return nil, err
@@ -211,7 +210,7 @@ func SelectDescheduleCandidate(nodes []Node, requests map[string]float64, counts
 		placementNodes := nodes
 		var postPodShares []map[string]float64
 		sourceScore := math.Inf(-1)
-		if usePreferClose {
+		if podShareScoring {
 			shares := make(map[string]float64, len(counts))
 			for name, count := range counts {
 				if name == source {

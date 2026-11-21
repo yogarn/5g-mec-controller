@@ -23,7 +23,7 @@ type Settings struct {
 	MobilityQuery             string             `yaml:"mobility_query"`
 	CPUSaturation             float64            `yaml:"cpu_saturation"`
 	LocalityWeight            float64            `yaml:"locality_weight"`
-	PreferClose               bool               `yaml:"prefer_close"`
+	PodShareScoring           bool               `yaml:"pod_share_scoring"`
 	MaxMetricAgeSeconds       float64            `yaml:"max_metric_age_seconds"`
 	ResourceWeights           map[string]float64 `yaml:"resource_weights"`
 	ZeroLocalityNodes         []string           `yaml:"zero_locality_nodes"`
@@ -86,9 +86,10 @@ func LoadSettings(path string) (*Settings, error) {
 	allowed := map[string]bool{
 		"manifest": true, "namespace": true, "prometheus_url": true,
 		"mode": true, "mutate": true, "eligible_nodes": true, "cpu_utilization_query": true,
-		"mobility_query": true, "cpu_saturation": true, "locality_weight": true, "prefer_close": true,
+		"mobility_query": true, "cpu_saturation": true, "locality_weight": true, "pod_share_scoring": true,
 		"max_metric_age_seconds": true, "resource_weights": true, "zero_locality_nodes": true,
 		"deschedule_interval_seconds": true, "scheduler_name": true, "scheduler_interval_seconds": true,
+		"prefer_close": true, // Legacy name for pod_share_scoring.
 		// Legacy keys accepted and ignored for backward compatibility with older ConfigMaps:
 		"latency_query": true, "slo_seconds": true, "min_replicas": true, "max_replicas": true,
 		"interval_seconds": true, "cooldown_seconds": true, "scale_down_seconds": true,
@@ -109,8 +110,15 @@ func LoadSettings(path string) (*Settings, error) {
 		SchedulerIntervalSeconds:  1.0,
 		ResourceWeights:           DefaultResourceWeights(),
 	}
-	if err := yaml.Unmarshal(raw, s); err != nil {
+	decoded := struct {
+		*Settings      `yaml:",inline"`
+		LegacyPodShare bool `yaml:"prefer_close"`
+	}{Settings: s}
+	if err := yaml.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
+	}
+	if _, configured := rawMap["pod_share_scoring"]; !configured {
+		s.PodShareScoring = decoded.LegacyPodShare
 	}
 	if strings.TrimSpace(s.Manifest) == "" {
 		return nil, fmt.Errorf("manifest must be a nonempty string")

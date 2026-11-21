@@ -343,7 +343,7 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 	var bound []BoundPodResult
 	var podShares map[string]float64
 	var podSharePerBinding float64
-	if c.Settings.PreferClose {
+	if c.Settings.PodShareScoring {
 		podShares = make(map[string]float64)
 		active := 0.0
 		for _, existing := range pods {
@@ -547,7 +547,7 @@ func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval b
 	}
 	policyStarted := time.Now()
 	candidate, err := policy.SelectDescheduleCandidate(
-		nodes, reqs, counts, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, allowed, c.Settings.PreferClose,
+		nodes, reqs, counts, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, allowed, c.Settings.PodShareScoring,
 	)
 	c.logDecisionTiming("descheduler_score", policyStarted, "")
 	if err != nil {

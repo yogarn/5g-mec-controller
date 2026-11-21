@@ -106,7 +106,7 @@ func TestSelectDescheduleCandidatePicksHighestPositiveDelta(t *testing.T) {
 	}
 	counts := map[string]int{"a": 1, "b": 2, "c": 0}
 	req := map[string]float64{"cpu": 1, "memory": 1}
-	cand, err := SelectDescheduleCandidate(nodes, req, counts, 0.8, 0.4, weights, nil)
+	cand, err := SelectDescheduleCandidate(nodes, req, counts, 0.8, 0.4, weights, nil, false)
 	if err != nil {
 		t.Fatalf("SelectDescheduleCandidate failed: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSelectDescheduleCandidateRejectsBounceBackToSource(t *testing.T) {
 	}
 
 	counts := map[string]int{"a": 1, "b": 0}
-	cand, err := SelectDescheduleCandidate(nodes, req, counts, 0.8, 0.4, weights, nil)
+	cand, err := SelectDescheduleCandidate(nodes, req, counts, 0.8, 0.4, weights, nil, false)
 	if err != nil {
 		t.Fatalf("SelectDescheduleCandidate failed: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestPodFitsNodeConstraints(t *testing.T) {
 	}
 }
 
-func TestPreferCloseDemandMinusPodShare(t *testing.T) {
+func TestPodShareScoringDemandMinusPodShare(t *testing.T) {
 	nodes := []Node{
 		{Name: "a", Capacity: map[string]float64{"cpu": 10, "memory": 10}, Allocated: map[string]float64{}, CPUUtilization: .1, ArrivalRate: 9, Ready: true},
 		{Name: "b", Capacity: map[string]float64{"cpu": 10, "memory": 10}, Allocated: map[string]float64{}, CPUUtilization: .1, ArrivalRate: 1, Ready: true},
@@ -356,10 +356,10 @@ func TestSelectDescheduleCandidateRequiresMinimumImprovement(t *testing.T) {
 	}
 }
 
-func TestSelectDescheduleCandidatePreferCloseSkipsBounceBack(t *testing.T) {
+func TestSelectDescheduleCandidatePodShareScoringSkipsBounceBack(t *testing.T) {
 	weights := config.DefaultResourceWeights()
 	// Mirrors the smoke-run state at 10:21:17: gnb-2 has 4 pods and 70% stale traffic,
-	// gnb-3 has 1 pod and 22% rising traffic. Without PreferClose pod shares, gnb-2
+	// gnb-3 has 1 pod and 22% rising traffic. Without pod-share scoring, gnb-2
 	// looks better than gnb-3, but after removing gnb-3's pod the scheduler sees
 	// podShares={gnb-2: 0.8, gnb-3: 0.0} and puts the replacement right back on gnb-3.
 	nodes := []Node{
@@ -375,10 +375,10 @@ func TestSelectDescheduleCandidatePreferCloseSkipsBounceBack(t *testing.T) {
 		t.Fatalf("SelectDescheduleCandidate failed: %v", err)
 	}
 	if cand != nil {
-		t.Fatalf("expected nil candidate when PreferClose scheduler would re-place on source, got %+v", cand)
+		t.Fatalf("expected nil candidate when pod-share scheduler would re-place on source, got %+v", cand)
 	}
 
-	// Once traffic catches up to gnb-3 (83% vs 8%), PreferClose descheduler moves a pod from gnb-2 to gnb-3.
+	// Once traffic catches up to gnb-3 (83% vs 8%), pod-share descheduler moves a pod from gnb-2 to gnb-3.
 	nodes[0].ArrivalRate = 2
 	nodes[1].ArrivalRate = 2
 	nodes[2].ArrivalRate = 20

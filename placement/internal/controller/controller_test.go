@@ -216,7 +216,7 @@ func TestSchedulerBindingInFlightDeduplicationAndCapacity(t *testing.T) {
 	}
 }
 
-func TestPreferCloseSchedulerPlacementIsIndependentOfCreationBatch(t *testing.T) {
+func TestPodShareScoringSchedulerPlacementIsIndependentOfCreationBatch(t *testing.T) {
 	for _, batchSizes := range [][]int{{13}, {2, 11}} {
 		t.Run(fmt.Sprint(batchSizes), func(t *testing.T) {
 			ctx := context.Background()
@@ -234,7 +234,7 @@ func TestPreferCloseSchedulerPlacementIsIndependentOfCreationBatch(t *testing.T)
 			})
 			settings := testSettings()
 			settings.EligibleNodes = []string{"a", "b", "c"}
-			settings.PreferClose = true
+			settings.PodShareScoring = true
 			prom := &fakeTelemetry{
 				cpu:     map[string]float64{"a": 0.2, "b": 0.2, "c": 0.2},
 				traffic: map[string]float64{"a": 1, "b": 1, "c": 1},
@@ -825,12 +825,12 @@ func TestDeschedulerNeverEvictsTerminatingPod(t *testing.T) {
 	})
 }
 
-func TestDeschedulerPreferCloseSmokeRunOfflineReplay(t *testing.T) {
+func TestDeschedulerPodShareScoringSmokeRunOfflineReplay(t *testing.T) {
 	// Replay the exported demand samples from steep_drain_smoke_01 with
 	// representative node capacities and the recorded managed pod layout.
 	// - 10:21:17 (+6s into Phase 3): 5 active managed pods (gnb-2:4, gnb-3:1) + 1 draining pod on gnb-3,
 	//   the +5s traffic sample still favors gnb-2 (1496 vs 150 gnb-3 and 150 gnb1).
-	//   Descheduler must skip evicting gnb-3's pod because PreferClose scheduler would put the replacement back on gnb-3.
+	//   Descheduler must skip evicting gnb-3's pod because pod-share scheduler would put the replacement back on gnb-3.
 	// - 10:21:47 (+36s into Phase 3): the +35s sample favors gnb-3 (503 vs 150 at each other site).
 	//   Descheduler must evict a pod from gnb-2, and ReconcileScheduler must bind its replacement to gnb-3.
 	now := time.Date(2026, 11, 19, 10, 21, 17, 0, time.UTC)
@@ -838,7 +838,7 @@ func TestDeschedulerPreferCloseSmokeRunOfflineReplay(t *testing.T) {
 	settings.EligibleNodes = []string{"gnb1", "gnb-2", "gnb-3"}
 	settings.DescheduleIntervalSeconds = 30
 	settings.LocalityWeight = 0.4
-	settings.PreferClose = true
+	settings.PodShareScoring = true
 
 	dep := makeTestDeployment(5)
 	dep.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
@@ -965,7 +965,7 @@ func TestDeschedulerSteepScoreSmoke5sPlacementWindowReplay(t *testing.T) {
 	settings.EligibleNodes = []string{"gnb1", "gnb-2", "gnb-3"}
 	settings.DescheduleIntervalSeconds = 30
 	settings.LocalityWeight = 0.4
-	settings.PreferClose = true
+	settings.PodShareScoring = true
 
 	dep := makeTestDeployment(5)
 	dep.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{

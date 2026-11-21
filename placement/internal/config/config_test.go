@@ -86,12 +86,40 @@ func TestDeployConfigMapLoadsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSettings from deploy ConfigMap failed: %v", err)
 	}
-	if !s.Mutate || s.Mode != "mobility-aware" || s.SchedulerName != "mec-placement-scheduler" {
+	if !s.Mutate || s.Mode != "mobility-aware" || s.SchedulerName != "mec-placement-scheduler" || !s.PodShareScoring {
 		t.Fatalf("unexpected deploy settings: %+v", s)
 	}
 	ns, name, err := WorkloadIdentity(s.Manifest, s.Namespace)
 	if err != nil || ns != "services" || name != "mec-placement-pedestrian-detection" {
 		t.Fatalf("unexpected identity (%q, %q) err=%v", ns, name, err)
+	}
+}
+
+func TestPodShareScoringConfig(t *testing.T) {
+	base := "manifest: workload.yaml\nprometheus_url: http://prom:9090\nmode: scaling-only\n"
+	for _, tc := range []struct {
+		name    string
+		options string
+		enabled bool
+	}{
+		{name: "default"},
+		{name: "explicit", options: "pod_share_scoring: true\n", enabled: true},
+		{name: "legacy", options: "prefer_close: true\n", enabled: true},
+		{name: "explicit overrides legacy", options: "prefer_close: true\npod_share_scoring: false\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(base+tc.options), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			settings, err := LoadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.PodShareScoring != tc.enabled {
+				t.Fatalf("PodShareScoring = %t, want %t", settings.PodShareScoring, tc.enabled)
+			}
+		})
 	}
 }
 
