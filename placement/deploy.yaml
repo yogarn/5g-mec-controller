@@ -57,10 +57,8 @@ data:
     mutate: true
     scheduler_name: mec-placement-scheduler
     deschedule_interval_seconds: 30
-    prefer_close: true
+    pod_share_scoring: true
     eligible_nodes: [gnb1, gnb-2, gnb-3]
-    # Kept until placement-controller image is rebuilt (legacy binary requires gpu_nodes).
-    gpu_nodes: [gnb-2, gnb-3]
     cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}[1m]))'
     mobility_query: 'ue_request_upf_placement_window_attempts{job="ue-telemetry-placement",node=~"gnb1|gnb-2|gnb-3"} / 5'
   manifest.yaml: |

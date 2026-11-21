@@ -20,7 +20,7 @@ def test_prefer_close_plan_matches_arms_and_controller(tmp_path):
         if method == 'baseline':
             assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
         config = yaml.safe_load((out / f'{method}-controller.yaml').read_text())
-        assert config['prefer_close'] == (method == 'proposed')
+        assert config['pod_share_scoring'] == (method == 'proposed')
 
 
 def test_prefer_close_node_labels_restore_previous_state(monkeypatch):

@@ -325,7 +325,7 @@ def test_debug_cli_uses_60_second_phases(monkeypatch):
 
 def test_custom_weights_are_saved_without_changing_source_config(tmp_path):
     before = (campaign.ROOT / 'config.yaml').read_bytes()
-    weights = {'cpu': 1., 'memory': 0., 'gpu': 0., 'vram': 0.}
+    weights = {'cpu': 1., 'memory': 0.}
     config, path, _ = campaign._method_configs(tmp_path, 'proposed', 500, 30,
                                               resource_weights=weights, locality_weight=0.)
     saved = yaml.safe_load(path.read_text())
@@ -336,10 +336,10 @@ def test_custom_weights_are_saved_without_changing_source_config(tmp_path):
 
 
 @pytest.mark.parametrize('options', [
-    ['--resource-weights', '0', '0', '0', '0'],
-    ['--resource-weights', '1', '1', '0', '0'],
-    ['--resource-weights', 'nan', '0', '0', '0'],
-    ['--resource-weights', '-1', '2', '0', '0'],
+    ['--resource-weights', '0', '0'],
+    ['--resource-weights', '1', '1'],
+    ['--resource-weights', 'nan', '0'],
+    ['--resource-weights', '-1', '2'],
     ['--locality-weight', '1.1'], ['--locality-weight', 'nan'],
 ])
 def test_invalid_weights_fail_before_preflight(monkeypatch, options):
@@ -428,7 +428,7 @@ def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
         assert hpa['spec']['scaleTargetRef']['name'] == workload['metadata']['name']
         assert (hpa['spec']['minReplicas'], hpa['spec']['maxReplicas']) == (1, 13)
         config = yaml.safe_load((plan / f'{method}-controller.yaml').read_text())
-        assert config['prefer_close'] is True
+        assert config['pod_share_scoring'] is True
         assert config['locality_weight'] == 0.4
     baseline = yaml.safe_load((plan / 'baseline-hpa.yaml').read_text())
     assert baseline['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
@@ -535,7 +535,7 @@ def test_radio_only_gnb1_routes_to_core_and_excludes_radio_from_placement(tmp_pa
         assert set(controller['eligible_nodes']) == {'core-5g', 'gnb-2', 'gnb-3'}
         assert controller['zero_locality_nodes'] == []
         assert controller['mobility_query'] == campaign.UPF_PLACEMENT_QUERY
-        assert controller['prefer_close'] is (method == 'proposed')
+        assert controller['pod_share_scoring'] is (method == 'proposed')
 
 
 @pytest.mark.parametrize(('flags', 'error'), [
@@ -910,38 +910,12 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     cm = campaign._render_incluster_placement_configmap(cfg, cfg['manifest'])
     cm_cfg = yaml.safe_load(cm['data']['config.yaml'])
     assert cm_cfg['deschedule_interval_seconds'] == 30
+    assert cm_cfg['pod_share_scoring'] is cfg['pod_share_scoring']
+    assert 'prefer_close' not in cm_cfg
     for dead_key in campaign._GO_PLACEMENT_OMIT_KEYS:
         assert dead_key not in cm_cfg
-    assert 'gpu_nodes' in cm_cfg
-    assert cm_cfg['resource_weights'] == {'cpu': 0.5, 'memory': 0.5, 'gpu': 0.0, 'vram': 0.0}
-
-
-def test_two_dim_resource_weights_match_legacy_four_dim_with_zero_gpu_vram():
-    """Verify 2D (cpu, memory) placement score equals legacy 4D score when gpu=vram=0."""
-    nodes = [
-        {'name': 'gnb1', 'cap': {'cpu': 8.0, 'memory': 16.0}, 'alloc': {'cpu': 3.0, 'memory': 6.0},
-         'arrival': 10.0, 'gpu_free': 0.0, 'vram_free': 0.0},
-        {'name': 'gnb-2', 'cap': {'cpu': 20.0, 'memory': 64.0}, 'alloc': {'cpu': 4.0, 'memory': 12.0},
-         'arrival': 25.0, 'gpu_free': 0.75, 'vram_free': 0.6},
-        {'name': 'gnb-3', 'cap': {'cpu': 20.0, 'memory': 64.0}, 'alloc': {'cpu': 2.0, 'memory': 8.0},
-         'arrival': 5.0, 'gpu_free': 0.9, 'vram_free': 0.85},
-    ]
-    locality_weight = 0.4
-    total_arrival = sum(n['arrival'] for n in nodes)
-    w_old = {'cpu': 0.5, 'memory': 0.5, 'gpu': 0.0, 'vram': 0.0}
-    w_new = {'cpu': 0.5, 'memory': 0.5}
-    for n in nodes:
-        h_cpu = max(0.0, (n['cap']['cpu'] - n['alloc']['cpu']) / n['cap']['cpu'])
-        h_mem = max(0.0, (n['cap']['memory'] - n['alloc']['memory']) / n['cap']['memory'])
-        loc = n['arrival'] / total_arrival
-        score_old = (1.0 - locality_weight) * (
-            w_old['cpu'] * h_cpu + w_old['memory'] * h_mem
-            + w_old['gpu'] * n['gpu_free'] + w_old['vram'] * n['vram_free']
-        ) + locality_weight * loc
-        score_new = (1.0 - locality_weight) * (
-            w_new['cpu'] * h_cpu + w_new['memory'] * h_mem
-        ) + locality_weight * loc
-        assert score_new == score_old
+    assert 'gpu_nodes' not in cm_cfg
+    assert cm_cfg['resource_weights'] == {'cpu': 0.5, 'memory': 0.5}
 
 
 def test_mobility9_reverse_direction_reverses_schedule_and_records_metadata(tmp_path):
@@ -1526,7 +1500,7 @@ def test_fixed_mobility_plan_uses_pod_share_without_hpa(tmp_path, routing, prefe
     assert plan['hpa_targets'] is None
     assert plan['active_total_replica_bounds'] == {'min': 6, 'max': 6}
     assert plan['prefer_close'] is prefer_close
-    assert controller['prefer_close'] is True
+    assert controller['pod_share_scoring'] is True
     assert controller['deschedule_interval_seconds'] == 5
     assert not list(out.glob('*-hpa.yaml'))
     for method in ('baseline', 'proposed'):

@@ -8,7 +8,6 @@ import json
 from contextlib import ExitStack
 import math
 from pathlib import Path
-import sys
 
 from utils import defaults
 

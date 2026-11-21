@@ -1,22 +1,38 @@
+# UE telemetry collector runtime configuration (single source of truth; mirrored in collector/manifest.yaml).
+
+# Sliding window for overall p90 latency and attempt rate metrics (seconds).
 window_seconds: 15
+# Sliding window for per-UPF traffic-share placement metrics (seconds).
 placement_window_seconds: 5
+# Sliding window for per-site vertical offloading snapshots (seconds).
 offload_window_seconds: 15
+# Maximum age before a site's offloading telemetry is treated as stale (seconds).
 offload_stale_seconds: 5
+# Upper bound on in-memory retained request observations.
 max_observations: 100000
+# Poll interval for refreshing Open5GS SMF/AMF UE-to-node mappings (seconds).
 mapping_refresh_seconds: 1
+# Maximum age of a cached SMF/AMF mapping before it is considered stale (seconds).
 mapping_max_age_seconds: 5
+# Target end-to-end p90 latency SLO (seconds).
 slo_seconds: 0.15
+# Open5GS SMF PDU session inspection endpoint.
 smf_url: http://10.34.211.140:9090/pdu-info
+# Open5GS AMF UE attachment inspection endpoint.
 amf_url: http://10.34.211.140:9005/ue-info
+# Kubernetes node name hosting the 5G core and central fallback replicas.
 core_node: core-5g
+# Logical gNB site ID to Kubernetes edge node name mapping.
 site_nodes:
   gnb-1: gnb1
   gnb-2: gnb-2
   gnb-3: gnb-3
+# Numeric gNB ID (from AMF) to Kubernetes node name mapping.
 gnb_nodes:
   0: gnb1
   2: gnb-2
   3: gnb-3
+# UPF N3 IP address (from SMF) to Kubernetes node name mapping.
 upf_nodes:
   "10.34.211.140": core-5g
   "172.16.30.11": gnb1

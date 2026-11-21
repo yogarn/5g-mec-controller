@@ -812,9 +812,16 @@ pair has 104 minutes of traffic, plus setup, transfer, plotting and cleanup.
 `topology.kubernetes.io/zone=<node name>`, sets the shared Service's
 `trafficDistribution: PreferClose` for baseline and proposed, and restores the
 original node labels during cleanup. The campaign records the setting and
-original zones. Proposed Go scheduling uses `traffic_share - pod_share` as its
-locality term; ordinary runs keep the previous traffic-share score. The
-Service is deleted during teardown. Both arms retain the same routing setting.
+original zones. The Service is deleted during teardown. Both arms use the same
+routing setting.
+
+For Go placement and full comparisons, the campaign independently enables
+`pod_share_scoring` for the proposed controller. The scheduler and descheduler
+use `traffic_share - pod_share` as the locality term with either Service routing
+mode. Standalone Go controller configs can set `pod_share_scoring` explicitly.
+The pinned controller image still receives the legacy key `prefer_close`
+in its ConfigMap. Current Go builds accept that key as an alias when the new
+key is absent.
 
 Use `--site-anchors` to enable PreferClose and add one fixed serving replica on
 each eligible application ingress node in both arms. Full topology runs have

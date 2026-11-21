@@ -15,11 +15,21 @@ from urllib.request import urlopen
 import yaml
 
 
+# Allowed characters in Kubernetes node names reported by telemetry.
 _NODE_NAME_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'
+# Fixed observation schema vocabularies (not runtime tuning knobs).
 _VALID_SITES = ('gnb-1', 'gnb-2', 'gnb-3')
 _VALID_ROUTES = ('local', 'core', 'unknown')
 _VALID_TRAFFIC_CLASSES = ('user', 'probe')
 _DEFAULT_SITE_NODES = {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
+
+# Fallback defaults applied when optional keys are omitted from collector/config.yaml.
+DEFAULT_SETTINGS = {
+    'placement_window_seconds': 5,
+    'offload_stale_seconds': 5.0,
+    'core_node': 'core-5g',
+    'site_nodes': _DEFAULT_SITE_NODES,
+}
 
 
 def _is_valid_node_name(value):
@@ -29,11 +39,11 @@ def _is_valid_node_name(value):
 def validate_settings(settings):
     if not isinstance(settings, dict):
         raise ValueError('settings must be a mapping')
-    settings.setdefault('placement_window_seconds', 5)
+    settings.setdefault('placement_window_seconds', DEFAULT_SETTINGS['placement_window_seconds'])
     settings.setdefault('offload_window_seconds', settings['window_seconds'])
-    settings.setdefault('offload_stale_seconds', 5.0)
-    settings.setdefault('core_node', 'core-5g')
-    settings.setdefault('site_nodes', dict(_DEFAULT_SITE_NODES))
+    settings.setdefault('offload_stale_seconds', DEFAULT_SETTINGS['offload_stale_seconds'])
+    settings.setdefault('core_node', DEFAULT_SETTINGS['core_node'])
+    settings.setdefault('site_nodes', dict(DEFAULT_SETTINGS['site_nodes']))
     for key in ('window_seconds', 'placement_window_seconds', 'offload_window_seconds',
                 'offload_stale_seconds', 'mapping_refresh_seconds', 'mapping_max_age_seconds', 'slo_seconds'):
         value = settings[key]

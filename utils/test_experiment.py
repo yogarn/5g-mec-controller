@@ -690,7 +690,7 @@ def test_fixed_rate_slow_emit_does_not_bypass_worker_deadline():
 
 
 def test_fixed_rate_delayed_slot_039_skipped_without_compressed_follow_up():
-    # Reproduce Codex's delay scenario: 0.00, then wakeup delayed to 0.39, then 0.40, 0.60, 0.80.
+    # Reproduce delayed-wakeup scenario: 0.00, then wakeup delayed to 0.39, then 0.40, 0.60, 0.80.
     clock = [0.0]
     starts = []
     emitted = []

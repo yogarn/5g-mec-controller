@@ -6,9 +6,6 @@ import fcntl
 import hashlib
 import json
 import math
-import os
-import shlex
-import signal
 import subprocess
 import sys
 import time
@@ -22,7 +19,6 @@ from experiments.campaign import (
     _local_git_provenance,
     _workload_image_ref,
     check_service_routing,
-    command,
     kube,
     remote,
     stop_process,

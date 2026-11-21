@@ -12,7 +12,6 @@ import math
 import re
 import socket
 import ssl
-import sys
 import threading
 import time
 import uuid

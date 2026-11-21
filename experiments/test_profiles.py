@@ -8,7 +8,7 @@ _SHARED = [
     '--scenario', 'mobility9', '--phase-transition', 'continuous', '--rps-per-ue', '5',
     '--max-in-flight-per-ue', '8', '--slo-ms', '150', '--tc-ms', '10', '--autoscaler', 'hpa',
     '--placement-engine', 'go', '--pod-share-scoring', '--deschedule-interval', '30',
-    '--locality-weight', '0.4', '--resource-weights', '0.5', '0.5', '0', '0',
+    '--locality-weight', '0.4', '--resource-weights', '0.5', '0.5',
     '--prefer-close', '--site-anchors',
 ]
 _FULL = [

@@ -1,0 +1,38 @@
+# Autoscaler (Kubernetes HPA + prometheus-adapter) policy defaults.
+# Experiment profiles in experiments/campaign.py select or override these values.
+
+# Target end-to-end p90 latency SLO (milliseconds).
+slo_ms: 150
+
+# Target average CPU utilization percentage for the baseline CPU HPA.
+cpu_hpa_target: 80
+
+# Reference latency floor fraction (L0 / SLO); replicas double at 1.2 * SLO when L0 = 0.8 * SLO.
+latency_floor_fraction: 0.8
+
+# Multiplier applied to SLO for the internal latency scaling target (1.0 = exact SLO).
+rt_target_factor: 1.0
+
+# Default minimum replica count across edge sites.
+min_replicas: 3
+
+# Default maximum replica count for general scaling scenarios.
+max_replicas: 24
+
+# Maximum replica count for the scaling-staircase scenario.
+staircase_max_replicas: 18
+
+# Scale-up stabilization window in seconds (0 = immediate scale-up).
+scale_up_stabilization_seconds: 0
+
+# Default scale-down stabilization window in seconds for staircase and vertical HPA runs.
+scale_down_stabilization_seconds: 60
+
+# Default pods removed per scale-down step when scale-down rate limiting is enabled.
+scale_down_pods: 1
+
+# Default scale-down policy period in seconds when rate limiting is enabled.
+scale_down_period_seconds: 30
+
+# Scale-down policy period in seconds for the proposed vertical HPA arm.
+proposed_scale_down_period_seconds: 15

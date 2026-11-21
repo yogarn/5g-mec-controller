@@ -22,6 +22,4 @@ locality_weight: 0.4
 # Periodic highest-positive-delta check; one removal-first replacement at a time.
 deschedule_interval_seconds: 30
 # CPU-only application: effective total weights are 30% CPU and 30% RAM.
-# Legacy gpu/vram keys and gpu_nodes remain for compatibility with the currently deployed Go binary and utils/config.py.
-resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
-gpu_nodes: [gnb-2, gnb-3]
+resource_weights: {cpu: 0.5, memory: 0.5}

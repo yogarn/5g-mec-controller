@@ -1,4 +1,9 @@
-"""Run the matched gNB3-hotspot campaign from core, including remote UEs and plots."""
+"""Run the matched gNB3-hotspot campaign from core, including remote UEs and plots.
+
+Orchestrates campaign execution (preflight, workload/HPA/placement setup, remote
+UE traffic runner, artifact collection, and plotting) while re-exporting profile,
+manifest, CLI, and vertical helpers from their dedicated submodules.
+"""
 import argparse
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -25,174 +30,106 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import yaml
+from autoscaler.config import load_autoscaler_config
 from benchmark.client import parse_schedule
 from offloader.budget import VerticalBudget
 from utils.traffic_control import POOL_NAME, TrafficDelay
 from utils.config import validate_resource_weights
 from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
 
-ROOT = Path(__file__).resolve().parent.parent
-NAMESPACE = 'services'
-APP = 'mec-placement-pedestrian-detection'
-WORKLOADS = ('pedestrian-detection',)
-SITE_NODES = {'gnb-1': 'core-5g', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
-LOCAL_SITE_NODES = {**SITE_NODES, "gnb-1": "gnb1"}
-CORE_GNB1_SESSION = ('embb.testbed', '172.16.45.0/24')
-LOCAL_GNB1_SESSION = ('mec.icn-2.testbed', '172.16.50.0/24')
-LOCAL_GNB2_SESSION = ('embb.gnb2.testbed', '10.63.1.0/24')
-LOCAL_GNB3_SESSION = ('embb.gnb3.testbed', '10.64.1.0/24')
-VERTICAL_MODES = ('off', 'local-only', 'vertical', 'four-arm')
-FOUR_ARM_SPECS = (
-    ('baseline-local', 'baseline', 'local-only'),
-    ('proposed-local', 'proposed', 'local-only'),
-    ('baseline-vertical', 'baseline', 'vertical'),
-    ('proposed-vertical', 'proposed', 'vertical'),
+from experiments.profiles import (
+    APP,
+    ARM_SELECTIONS,
+    AUTOSCALER_CONFIG,
+    AUTOSCALERS,
+    COMPARISONS,
+    COMPARISON_NOTES,
+    CORE_GNB1_SESSION,
+    DEFAULT_CPU_HPA_TARGET,
+    DEFAULT_DESCHEDULE_INTERVAL_S,
+    DEFAULT_LATENCY_FLOOR_FRACTION,
+    DEFAULT_LATENCY_FLOOR_MS,
+    DEFAULT_MIN_REPLICAS,
+    DEFAULT_PHASE_SECONDS,
+    DEFAULT_SLO_MS,
+    DEFAULT_TC_MS,
+    FINAL_HOLD_SECONDS,
+    FOUR_ARM_SPECS,
+    LOCAL_GNB1_SESSION,
+    LOCAL_GNB2_SESSION,
+    LOCAL_GNB3_SESSION,
+    LOCAL_SITE_NODES,
+    MOBILITY9_SCHEDULE,
+    MOBILITY_PHASE_SECONDS,
+    NAMESPACE,
+    PLACEMENT_ENGINES,
+    PLACEMENT_NAMESPACE,
+    PLACEMENT_PROMETHEUS_URL,
+    PROFILES,
+    ROOT,
+    SCALER_BALANCED_SCHEDULE,
+    SCALER_DEFAULT_MAX_REPLICAS,
+    SCALER_MIN_REPLICAS,
+    SCALER_NODE,
+    SCALER_PHASE_SECONDS,
+    SCALER_SCENARIOS,
+    SCALER_STAIRCASE_MAX_REPLICAS,
+    SCALER_STAIRCASE_SCHEDULE,
+    SITE_NODES,
+    SPILL_READINESS_PROBE,
+    UPF_PLACEMENT_QUERY,
+    VERTICAL_JOINT_SCHEDULE,
+    VERTICAL_MOBILITY_SCHEDULE,
+    VERTICAL_MODES,
+    VERTICAL_SMOKE_SCHEDULE,
+    WORKLOADS,
+    _GO_PLACEMENT_OMIT_KEYS,
+    _VERTICAL_COMMON,
+    _VERTICAL_FULL,
 )
-# 'vertical' runs only the two offloading arms; used by the smoke profile because the local-only arms are
-# unaffected by offloader changes. Full runs always use 'all'.
-ARM_SELECTIONS = {
-    'all': FOUR_ARM_SPECS,
-    'vertical': tuple(spec for spec in FOUR_ARM_SPECS if spec[2] == 'vertical'),
-}
-UPF_PLACEMENT_QUERY = (
-    'ue_request_upf_placement_window_attempts{job="ue-telemetry-placement",node=~"core-5g|gnb-2|gnb-3"} / 5'
+from experiments.manifests import (
+    _campaign_manifest,
+    _container_requests,
+    _decimal_to_number,
+    _floor_adapter_config,
+    _format_hpa_target,
+    _latency_metric_name,
+    _managed_replica_bounds,
+    _method_configs,
+    _metric_unit_for_target,
+    _parse_cpu_millicores,
+    _parse_memory_bytes,
+    _placement_query,
+    _pod_effective_requests,
+    _render_hpa,
+    _render_incluster_placement_configmap,
+    _restrict_workload_nodes,
+    _site_anchor_nodes,
+    _site_nodes,
+    _supports_latency_floor,
+    _workload_http_threads,
+    check_service_routing,
+    selected_workload,
+    workload_identity,
+    workload_manifest,
 )
-MOBILITY9_SCHEDULE = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
-SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
-SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
-SCALER_SCENARIOS = ('scaler-balanced', 'scaler-staircase')
-SCALER_NODE = 'core-5g'
-SCALER_MIN_REPLICAS = 3
-SCALER_DEFAULT_MAX_REPLICAS = 24
-SCALER_STAIRCASE_MAX_REPLICAS = 18
-DEFAULT_CPU_HPA_TARGET = 80
-DEFAULT_SLO_MS = 150
-# Reference latency L0 = 0.8 x SLO: replicas double when p90 reaches 1.2 x SLO, ((RT-L0)/(SLO-L0) = 2).
-DEFAULT_LATENCY_FLOOR_FRACTION = 0.8
-DEFAULT_LATENCY_FLOOR_MS = round(DEFAULT_LATENCY_FLOOR_FRACTION * DEFAULT_SLO_MS)
-DEFAULT_TC_MS = 10
-DEFAULT_MIN_REPLICAS = 3
-DEFAULT_DESCHEDULE_INTERVAL_S = 30
-DEFAULT_PHASE_SECONDS = 120
-MOBILITY_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
-SCALER_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
-
-# Named experiment profiles. The run scripts only select a profile; every experiment constant lives here.
-# Smoke and the full joint run share all settings except the schedule and phase length.
-VERTICAL_JOINT_SCHEDULE = '3:1:1:1,6:3:2:1,9:6:2:1,12:6:4:2,15:6:6:3,18:5:8:5,24:4:12:8,24:2:16:6,18:2:8:8,15:1:5:9,3:1:1:1'
-VERTICAL_SMOKE_SCHEDULE = '3:1:1:1,6:4:1:1,3:1:1:1'
-# 24 UEs (the reserved subscribers); hotspot is at most 18 UEs because nine fixed replicas leave at most seven
-# pods at one site once the other two sites keep one anchor each.
-VERTICAL_MOBILITY_SCHEDULE = '24:10:7:7,24:2:18:4,24:2:15:7,24:2:11:11,24:2:7:15,24:2:4:18'
-_VERTICAL_COMMON = {
-    'config': 'experiments/campaign-vertical.yaml',
-    'vertical_mode': 'four-arm',
-    'scenario': 'mobility9',
-    'phase_duration': 120.0,
-    'rps_per_ue': 5.0,
-    'max_in_flight_per_ue': 8,
-    'slo_ms': 150.0,
-    'tc_ms': 10.0,
-    'pod_share_scoring': True,
-    'deschedule_interval': 30.0,
-    'locality_weight': 0.4,
-    'resource_weights': [0.5, 0.5, 0.0, 0.0],
-    'prefer_close': True,
-    'site_anchors': True,
-}
-_VERTICAL_FULL = {
-    'comparison': 'full',
-    'cpu_hpa_target': 80,
-    'scale_down_stabilization_seconds': 60,
-    'asymmetric_latency': True,
-    'proposed_scale_down_period_seconds': 15,
-}
-PROFILES = {
-    'vertical-joint': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE},
-    'vertical-smoke': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_SMOKE_SCHEDULE,
-                       'phase_duration': 60.0, 'arms': 'vertical'},
-    'vertical-mobility': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,
-                          'phase_schedule': VERTICAL_MOBILITY_SCHEDULE},
-    'scaling-staircase': {
-        'config': 'experiments/campaign-mobility-core.yaml',
-        'workload': 'pedestrian-detection',
-        'comparison': 'scaling',
-        'scenario': 'scaler-staircase',
-        'cpu_hpa_target': 80,
-        'slo_ms': 150.0,
-        'asymmetric_latency': True,
-        'min_replicas': 3,
-        'max_replicas': 18,
-        'scale_down_stabilization_seconds': 60,
-        'phase_duration': 120.0,
-        'rps_per_ue': 5.0,
-        'max_in_flight_per_ue': 8,
-        'tc_ms': 10.0,
-    },
-}
-FINAL_HOLD_SECONDS = 360
-COMPARISONS = ('full', 'placement', 'scaling')
-AUTOSCALERS = ('controller', 'hpa')
-PLACEMENT_ENGINES = ('python', 'go')
-PLACEMENT_NAMESPACE = 'placement'
-PLACEMENT_PROMETHEUS_URL = 'http://placement-prometheus.placement.svc:9090'
-COMPARISON_NOTES = {
-    'placement': 'Comparison A (placement): same latency-ratio autoscaler for both methods; isolates scheduler/descheduler placement.',
-    'full': 'Comparison B (full system): default-scheduler + CPU HPA vs full proposed system (autoscaler + scheduler + descheduler); do not attribute results solely to placement.',
-    'scaling': 'Comparison C (scaling): default-scheduler + core-5g-only required affinity for both methods; native CPU HPA vs native latency HPA (targets recorded in hpa_targets).',
-}
-
-
-def workload_identity(workload='pedestrian-detection'):
-    if workload not in WORKLOADS:
-        raise ValueError('unknown workload')
-    return 'mec-placement-' + workload
-
-
-def workload_manifest(workload='pedestrian-detection'):
-    workload_identity(workload)
-    return ROOT / 'apps' / workload / 'manifest.yaml'
-
-
-def _workload_http_threads(workload='pedestrian-detection'):
-    """Return configured HTTP_THREADS from the workload Deployment env, if set."""
-    for doc in yaml.safe_load_all(workload_manifest(workload).read_text()):
-        if doc and doc.get('kind') == 'Deployment':
-            for container in doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', []):
-                for entry in container.get('env') or []:
-                    if entry.get('name') == 'HTTP_THREADS' and entry.get('value') is not None:
-                        return int(entry['value'])
-    return None
-
-
-def selected_workload(settings):
-    return settings.get('workload', 'pedestrian-detection')
-
-
-def _site_nodes(settings):
-    return LOCAL_SITE_NODES if settings.get('radio_only_gnb1') is False else SITE_NODES
-
-
-def _site_anchor_nodes(edge_only, site_nodes=SITE_NODES):
-    return {site: node for site, node in site_nodes.items() if not edge_only or node != 'core-5g'}
-
-
-def _placement_query(nodes):
-    return UPF_PLACEMENT_QUERY.replace('core-5g|gnb-2|gnb-3', '|'.join(nodes))
-
-
-def check_service_routing(service, prefer_close=False):
-    """Require cluster-wide endpoints without locality hints or client affinity."""
-    spec = service['spec']
-    annotations = service.get('metadata', {}).get('annotations') or {}
-    if (spec.get('trafficDistribution') != ('PreferClose' if prefer_close else None) or
-            spec.get('externalTrafficPolicy', 'Cluster') != 'Cluster' or
-            spec.get('internalTrafficPolicy', 'Cluster') != 'Cluster' or
-            spec.get('sessionAffinity', 'None') != 'None' or
-            any(annotations.get(key, 'Disabled').lower() not in ('disabled', '')
-                for key in ('service.kubernetes.io/topology-mode',
-                            'service.kubernetes.io/topology-aware-hints'))):
-        raise RuntimeError('Workload Service routing does not match requested mode or has session affinity')
+from experiments.cli import _build_parser, _parse_args
+from experiments.vertical import (
+    _default_envoy_preflight_probe,
+    _load_offloader_token,
+    _offloader_request,
+    cleanup_vertical_state,
+    fetch_offloader_artifacts,
+    get_core_pool_replicas,
+    prepare_vertical_arm,
+    reset_offloader,
+    scale_core_pool,
+    set_offloader_mode,
+    verify_vertical_arm_readiness,
+    vertical_budget_from_settings,
+    wait_core_pool_scaled,
+    wait_offloader_core_endpoints,
+)
 
 
 class RunnerProgress:
@@ -518,125 +455,6 @@ def transfer(settings, campaign, method, output):
         raise RuntimeError('request checksum mismatch after transfer')
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
-SPILL_READINESS_PROBE = {
-    'periodSeconds': 2, 'failureThreshold': 1, 'successThreshold': 2, 'timeoutSeconds': 1,
-}
-
-
-def _restrict_workload_nodes(deployment, nodes):
-    pod_spec = deployment['spec']['template']['spec']
-    node_affinity = pod_spec.setdefault('affinity', {}).setdefault('nodeAffinity', {})
-    node_affinity['requiredDuringSchedulingIgnoredDuringExecution'] = {
-        # Kubernetes combines terms with OR and accepts one value per node field match.
-        'nodeSelectorTerms': [{
-            'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [node]}],
-        } for node in nodes],
-    }
-
-
-def _campaign_manifest(root, use_tc, workload='pedestrian-detection', scheduler_name=None, filename='workload.yaml',
-                       prefer_close=False, site_anchors=False, spill_high=None, spill_low=None, edge_only=False, site_nodes=SITE_NODES):
-    """Write one shared workload manifest for both methods."""
-    documents = list(yaml.safe_load_all(workload_manifest(workload).read_text()))
-    deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
-    if len(deployments) != 1:
-        raise ValueError('application manifest requires exactly one Deployment')
-    _restrict_workload_nodes(deployments[0], tuple(_site_anchor_nodes(edge_only, site_nodes).values()))
-    if scheduler_name is not None:
-        deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
-    if use_tc:
-        metadata = deployments[0]['spec']['template'].setdefault('metadata', {})
-        metadata.setdefault('annotations', {})['cni.projectcalico.org/ipv4pools'] = json.dumps([POOL_NAME])
-    if prefer_close:
-        service = next((doc for doc in documents if doc and doc.get('kind') == 'Service'), None)
-        if service is None:
-            raise ValueError('PreferClose requires a workload Service')
-        service['spec']['trafficDistribution'] = 'PreferClose'
-    if spill_high is not None:
-        container = deployments[0]['spec']['template']['spec']['containers'][0]
-        container.setdefault('env', []).extend([
-            {'name': 'SPILL_HIGH', 'value': str(spill_high)},
-            {'name': 'SPILL_LOW', 'value': str(spill_low)},
-        ])
-        container['readinessProbe'].update(SPILL_READINESS_PROBE)
-        # Startup probe failures can restart the container, just like liveness.
-        container['startupProbe']['httpGet']['path'] = '/health'
-    if site_anchors:
-        deployment = deployments[0]
-        app = deployment['metadata']['name']
-        anchors = []
-        for site, node in _site_anchor_nodes(edge_only, site_nodes).items():
-            anchor = deepcopy(deployment)
-            anchor['metadata']['name'] = f'{app}-anchor-{site}'
-            anchor['spec']['replicas'] = 1
-            template = anchor['spec']['template']
-            selector = {'mec-replica': f'anchor-{site}'}
-            anchor['spec']['selector']['matchLabels'].update(selector)
-            template['metadata']['labels'].update(selector)
-            template['spec']['schedulerName'] = 'default-scheduler'
-            template['spec'].setdefault('nodeSelector', {})['kubernetes.io/hostname'] = node
-            anchors.append(anchor)
-        managed = {'mec-replica': 'managed'}
-        deployment['spec']['replicas'] = 0
-        deployment['spec']['selector']['matchLabels'].update(managed)
-        deployment['spec']['template']['metadata']['labels'].update(managed)
-        with (root / 'site-anchors.yaml').open('x') as stream:
-            yaml.safe_dump_all(anchors, stream, sort_keys=False)
-    path = root / filename
-    with path.open('x') as stream:
-        yaml.safe_dump_all(documents, stream, sort_keys=False)
-    return path
-
-
-
-def _latency_metric_name(floor_ms=0, unit='seconds', asymmetric_target_ms=None):
-    if unit not in ('seconds', 'milliseconds'):
-        raise ValueError(f'unsupported latency metric unit: {unit}')
-    if asymmetric_target_ms is not None:
-        target = _format_hpa_target(asymmetric_target_ms, unit='milliseconds').replace('.', '_')
-        return f'ue_p90_asymmetric_{floor_ms}ms_target_{target}ms_{unit}'
-    if floor_ms:
-        return f'ue_p90_excess_latency_{floor_ms}ms_{unit}'
-    return f'ue_p90_latency_{unit}'
-
-
-def _floor_adapter_config(floor_ms, configmap=None, unit='seconds', asymmetric_target_ms=None):
-    """Append a latency-scaling rule, preserving the raw metric and unrelated rules."""
-    if unit not in ('seconds', 'milliseconds'):
-        raise ValueError(f'unsupported latency metric unit: {unit}')
-    if type(floor_ms) is not int or floor_ms < 0 or (floor_ms == 0 and unit != 'milliseconds'):
-        raise ValueError('adapter floor must be a positive whole number of milliseconds')
-    if configmap is None:
-        docs = yaml.safe_load_all((ROOT / 'telemetry/05-prometheus-adapter.yaml').read_text())
-        configmap = next(d for d in docs if d and d.get('kind') == 'ConfigMap'
-                         and d['metadata']['name'] == 'prometheus-adapter-config')
-    # Persist only declarative fields, not live resource versions or managed fields.
-    result = {'apiVersion': 'v1', 'kind': 'ConfigMap',
-              'metadata': {'name': 'prometheus-adapter-config', 'namespace': PLACEMENT_NAMESPACE},
-              'data': dict(configmap['data'])}
-    config = yaml.safe_load(result['data']['config.yaml'])
-    name = _latency_metric_name(floor_ms, unit=unit, asymmetric_target_ms=asymmetric_target_ms)
-    rules = config.setdefault('externalRules', [])
-    rules[:] = [r for r in rules if r.get('name', {}).get('as') != name]
-    base_expr = 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
-    expr = f'clamp_min({base_expr} - {floor_ms / 1000:g}, 0)' if floor_ms else base_expr
-    if asymmetric_target_ms is not None:
-        target = Decimal(str(asymmetric_target_ms))
-        if not 0 < floor_ms < target:
-            raise ValueError('asymmetric latency scaling requires 0 < floor < target')
-        # Keep the expression continuous at the target and preserve the above-target ratio.
-        expr = f'{base_expr} + ({floor_ms} / {target - floor_ms:f}) * clamp_min({base_expr} - {target / 1000:f}, 0)'
-    if unit == 'milliseconds':
-        expr = f'({expr}) * 1000'
-    rules.append({
-        'seriesQuery': base_expr,
-        'resources': {'namespaced': False},
-        'name': {'matches': '^ue_request_attempt_duration_p90_seconds$', 'as': name},
-        'metricsQuery': expr,
-    })
-    result['data']['config.yaml'] = yaml.safe_dump(config, sort_keys=False)
-    return result
-
 
 def _prepare_floor_adapter(root, floor_ms, unit='seconds', asymmetric_target_ms=None):
     """Install the selected rule before either method; no workload or traffic here."""
@@ -741,110 +559,6 @@ def _collect_live_provenance(settings):
     }
 
 
-def _decimal_to_number(value):
-    return int(value) if value == value.to_integral_value() else float(value)
-
-
-def _metric_unit_for_target(target_dec):
-    # Kubernetes HPA reads external metric targets via Quantity.MilliValue(), which
-    # rounds fractional milli-quantities (e.g. 142.5m -> 143m). Use a millisecond-unit
-    # metric whenever the target has sub-millisecond precision so Quantity.MilliValue()
-    # preserves 0.001 ms resolution.
-    return 'seconds' if target_dec == target_dec.to_integral_value() else 'milliseconds'
-
-
-def _format_hpa_target(value_ms, unit='seconds'):
-    dec = Decimal(str(value_ms)).normalize()
-    text = format(dec, 'f')
-    if '.' in text:
-        text = text.rstrip('0').rstrip('.')
-    return f'{text}m' if unit == 'seconds' else text
-
-
-def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds,
-                slo_ms=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0,
-                scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, asymmetric_latency=False):
-    hpa = yaml.safe_load((ROOT / template_name).read_text())
-    hpa['metadata']['name'] = hpa_name
-    hpa['spec']['scaleTargetRef']['name'] = app_name
-    hpa['spec'].update(minReplicas=min_replicas, maxReplicas=max_replicas)
-    for metric in hpa['spec']['metrics']:
-        if metric.get('resource', {}).get('name') == 'cpu':
-            metric['resource']['target']['averageUtilization'] = cpu_hpa_target
-    if staircase:
-        # Matched damping for both metrics, independent of latency signal choice. Only the scale-down
-        # stabilization window is set; scale-up and the scale-down rate keep the Kubernetes defaults
-        # unless a rate limit is requested explicitly.
-        stab = 60 if scale_down_stabilization_seconds is None else int(scale_down_stabilization_seconds)
-        scale_down = {'stabilizationWindowSeconds': stab}
-        if scale_down_pods is not None or scale_down_period_seconds is not None:
-            pods = 1 if scale_down_pods is None else int(scale_down_pods)
-            period = 30 if scale_down_period_seconds is None else int(scale_down_period_seconds)
-            scale_down['policies'] = [{'type': 'Pods', 'value': pods, 'periodSeconds': period}]
-        hpa['spec']['behavior'] = {
-            'scaleUp': {'stabilizationWindowSeconds': 0},
-            'scaleDown': scale_down,
-        }
-    else:
-        stab = int(scale_down_seconds) if scale_down_stabilization_seconds is None else int(scale_down_stabilization_seconds)
-        hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] = stab
-        if scale_down_pods is not None or scale_down_period_seconds is not None:
-            pods = 1 if scale_down_pods is None else int(scale_down_pods)
-            period = 30 if scale_down_period_seconds is None else int(scale_down_period_seconds)
-            hpa['spec']['behavior']['scaleDown']['policies'] = [
-                {'type': 'Pods', 'value': pods, 'periodSeconds': period}
-            ]
-    if slo_ms is not None:
-        metric = hpa['spec']['metrics'][0]['external']
-        internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(rt_target_factor))
-        target_dec = internal_target_dec - latency_floor_ms if latency_floor_ms and not asymmetric_latency else internal_target_dec
-        unit = _metric_unit_for_target(target_dec)
-        metric['metric']['name'] = _latency_metric_name(
-            latency_floor_ms, unit=unit, asymmetric_target_ms=internal_target_dec if asymmetric_latency else None)
-        metric['target']['value'] = _format_hpa_target(target_dec, unit=unit)
-    with output_path.open('x') as stream:
-        yaml.safe_dump(hpa, stream, sort_keys=False)
-    return output_path
-
-
-_GO_PLACEMENT_OMIT_KEYS = (
-    'interval_seconds',
-    'cooldown_seconds',
-    'scale_down_seconds',
-    'slo_seconds',
-    'latency_query',
-    'min_replicas',
-    'max_replicas',
-    'gpu_utilization_query',
-    'vram_utilization_query',
-)
-
-
-def _render_incluster_placement_configmap(config, manifest_path):
-    """Build the placement-controller-config ConfigMap for the in-cluster Go scheduler/descheduler."""
-    # Omit dead Python-controller keys and unused GPU/VRAM queries.
-    # Keep gpu_nodes and 4-key resource_weights for backward compatibility with the
-    # currently deployed Go binary (which requires gpu_nodes and 4-key weights).
-    incluster_cfg = {k: v for k, v in config.items() if k not in _GO_PLACEMENT_OMIT_KEYS}
-    incluster_cfg['manifest'] = '/etc/placement/manifest.yaml'
-    incluster_cfg['namespace'] = NAMESPACE
-    incluster_cfg['prometheus_url'] = PLACEMENT_PROMETHEUS_URL
-    incluster_cfg['mode'] = 'mobility-aware'
-    incluster_cfg['mutate'] = True
-    return {
-        'apiVersion': 'v1',
-        'kind': 'ConfigMap',
-        'metadata': {
-            'name': 'placement-controller-config',
-            'namespace': PLACEMENT_NAMESPACE,
-        },
-        'data': {
-            'config.yaml': yaml.safe_dump(incluster_cfg, sort_keys=False),
-            'manifest.yaml': Path(manifest_path).read_text(),
-        },
-    }
-
-
 def _query_external_latency_metric(allow_not_found=False, metric_name='ue_p90_latency_seconds'):
     """Query the selected raw or floor-adjusted latency metric via prometheus-adapter."""
     path = f'/apis/external.metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/{metric_name}?labelSelector=job%3Due-telemetry'
@@ -860,114 +574,6 @@ def _query_external_latency_metric(allow_not_found=False, metric_name='ue_p90_la
     if not items:
         return [] if allow_not_found else None
     return items
-
-
-def _parse_cpu_millicores(raw):
-    text = str(raw).strip()
-    if not text:
-        raise ValueError('empty CPU quantity')
-    if text.endswith('n'):
-        val = float(text[:-1]) / 1e6
-    elif text.endswith('u'):
-        val = float(text[:-1]) / 1e3
-    elif text.endswith('m'):
-        val = float(text[:-1])
-    else:
-        val = float(text) * 1000.0
-    if not math.isfinite(val) or val < 0:
-        raise ValueError(f'invalid CPU quantity: {raw!r}')
-    return val
-
-
-def _parse_memory_bytes(raw):
-    text = str(raw).strip()
-    if not text:
-        raise ValueError('empty memory quantity')
-    units = {
-        'Ki': 1024, 'Mi': 1024 ** 2, 'Gi': 1024 ** 3, 'Ti': 1024 ** 4,
-        'Pi': 1024 ** 5, 'Ei': 1024 ** 6,
-        'K': 1000, 'M': 1000 ** 2, 'G': 1000 ** 3, 'T': 1000 ** 4,
-        'P': 1000 ** 5, 'E': 1000 ** 6,
-    }
-    val = None
-    for suffix in sorted(units, key=len, reverse=True):
-        if text.endswith(suffix):
-            val = float(text[:-len(suffix)]) * units[suffix]
-            break
-    if val is None:
-        val = float(text)
-    if not math.isfinite(val) or val < 0:
-        raise ValueError(f'invalid memory quantity: {raw!r}')
-    return val
-
-
-def _container_requests(container):
-    resources = container.get('resources') or {}
-    if resources.get('claims'):
-        raise ValueError(f"unsupported container resource claims in {container.get('name', '<container>')}")
-    req = resources.get('requests') or {}
-    lim = resources.get('limits') or {}
-    cpu_raw = req.get('cpu', lim.get('cpu', 0))
-    mem_raw = req.get('memory', lim.get('memory', 0))
-    return _parse_cpu_millicores(cpu_raw), _parse_memory_bytes(mem_raw)
-
-
-def _pod_effective_requests(spec):
-    """Compute Kubernetes-effective Pod CPU (millicores) and memory (bytes) requests."""
-    if spec.get('resourceClaims'):
-        raise ValueError('unsupported Pod resourceClaims in capacity check')
-    regular_cpu = 0.0
-    regular_mem = 0.0
-    for container in spec.get('containers') or []:
-        c_cpu, c_mem = _container_requests(container)
-        regular_cpu += c_cpu
-        regular_mem += c_mem
-
-    restartable_cpu = 0.0
-    restartable_mem = 0.0
-    max_init_cpu = 0.0
-    max_init_mem = 0.0
-    for init_c in spec.get('initContainers') or []:
-        i_cpu, i_mem = _container_requests(init_c)
-        restart_policy = init_c.get('restartPolicy')
-        if restart_policy == 'Always':
-            restartable_cpu += i_cpu
-            restartable_mem += i_mem
-            max_init_cpu = max(max_init_cpu, restartable_cpu)
-            max_init_mem = max(max_init_mem, restartable_mem)
-        elif restart_policy is None:
-            max_init_cpu = max(max_init_cpu, restartable_cpu + i_cpu)
-            max_init_mem = max(max_init_mem, restartable_mem + i_mem)
-        else:
-            raise ValueError(f'unsupported initContainer restartPolicy: {restart_policy!r}')
-
-    effective_cpu = max(regular_cpu + restartable_cpu, max_init_cpu)
-    effective_mem = max(regular_mem + restartable_mem, max_init_mem)
-
-    pod_resources = spec.get('resources') or {}
-    if pod_resources:
-        if pod_resources.get('claims'):
-            raise ValueError('unsupported Pod-level resource claims in capacity check')
-        unsupported_keys = set(pod_resources) - {'requests', 'limits'}
-        if unsupported_keys:
-            raise ValueError(f'unsupported Pod-level resources keys: {sorted(unsupported_keys)}')
-        pod_req = pod_resources.get('requests') or {}
-        pod_lim = pod_resources.get('limits') or {}
-        if 'cpu' in pod_req or 'cpu' in pod_lim:
-            effective_cpu = max(effective_cpu, _parse_cpu_millicores(pod_req.get('cpu', pod_lim.get('cpu'))))
-        if 'memory' in pod_req or 'memory' in pod_lim:
-            effective_mem = max(effective_mem, _parse_memory_bytes(pod_req.get('memory', pod_lim.get('memory'))))
-
-    overhead = spec.get('overhead') or {}
-    unsupported_overhead = set(overhead) - {'cpu', 'memory'}
-    if unsupported_overhead:
-        raise ValueError(f'unsupported Pod overhead resources: {sorted(unsupported_overhead)}')
-    if 'cpu' in overhead:
-        effective_cpu += _parse_cpu_millicores(overhead['cpu'])
-    if 'memory' in overhead:
-        effective_mem += _parse_memory_bytes(overhead['memory'])
-
-    return effective_cpu, effective_mem
 
 
 def check_node_capacity(node_name, manifest_path, max_replicas, workload_app=None):
@@ -1045,173 +651,6 @@ def verify_incluster_components(autoscaler, placement_engine, comparison='full')
             raise RuntimeError('placement/placement-controller must have exactly one ready replica')
 
 
-def _managed_replica_bounds(min_replicas, max_replicas, *, edge_only=False, site_nodes=SITE_NODES):
-    anchors = len(_site_anchor_nodes(edge_only, site_nodes))
-    minimum = max(1, min_replicas - anchors)
-    maximum = max_replicas - anchors
-    if maximum < minimum:
-        raise ValueError('--max-replicas must fit all site anchors and at least one managed replica')
-    return minimum, maximum
-
-
-def _supports_latency_floor(comparison, staircase, site_anchors):
-    return (comparison == 'full' or (comparison == 'scaling' and staircase)
-            or (comparison == 'placement' and site_anchors))
-
-
-def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_weights=None, locality_weight=None, workload='pedestrian-detection', comparison='full', autoscaler='controller', deschedule_interval=None, fixed_replicas=None, staircase=False, latency_floor_ms=0, rt_target_factor=1.0, min_replicas=None, scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, prefer_close=False, site_anchors=False, edge_only=False, no_hpa=False, asymmetric_latency=False, site_nodes=SITE_NODES, *, base_manifest=None, vertical_budget=None, proposed_scale_down_period_seconds=None):
-    """Persist the exact matched replica budget and manifests used by a method."""
-    if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
-        raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
-    if comparison not in COMPARISONS:
-        raise ValueError(f'comparison must be one of {COMPARISONS}')
-    if autoscaler not in AUTOSCALERS:
-        raise ValueError(f'autoscaler must be one of {AUTOSCALERS}')
-    if (isinstance(rt_target_factor, bool) or not isinstance(rt_target_factor, (int, float))
-            or not math.isfinite(rt_target_factor) or not 0 < rt_target_factor <= 1):
-        raise ValueError('rt_target_factor must be finite and in (0, 1]')
-    if rt_target_factor != 1.0 and autoscaler != 'hpa':
-        raise ValueError('rt_target_factor != 1.0 requires native HPA (--autoscaler hpa)')
-    if rt_target_factor != 1.0 and comparison == 'placement':
-        raise ValueError('rt_target_factor != 1.0 is not supported with --comparison placement (baseline and proposed must share the same latency autoscaler)')
-    internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(rt_target_factor))
-    if latency_floor_ms and (not _supports_latency_floor(comparison, staircase, site_anchors)
-                            or autoscaler != 'hpa'
-                            or type(latency_floor_ms) is not int or latency_floor_ms <= 0
-                            or internal_target_dec <= Decimal(str(latency_floor_ms))):
-        raise ValueError('latency floor requires full, placement with site anchors, or staircase scaling with native HPA and 0 < floor < internal RT target')
-    config = yaml.safe_load((ROOT / 'config.yaml').read_text())
-    eligible = tuple(_site_anchor_nodes(edge_only, site_nodes).values())
-    if vertical_budget is not None and vertical_budget.core_fallback_replicas:
-        eligible += ('core-5g',)
-    config['eligible_nodes'] = list(eligible)
-    for key in ('zero_locality_nodes', 'gpu_nodes'):
-        config[key] = [node for node in config.get(key, []) if node in eligible]
-    # Keep queries scoped to the same topology as the workload and Go config.
-    node_filter = (
-        f'node_cpu_seconds_total{{job="node-exporter",mode="idle",node=~"{"|".join(eligible)}"}}'
-    )
-    if site_nodes == LOCAL_SITE_NODES:
-        config['cpu_utilization_query'] = f'1 - avg by (node) (rate({node_filter}[1m]))'
-    else:
-        cpu_query = config['cpu_utilization_query'].replace(
-            '|'.join(LOCAL_SITE_NODES.values()), '|'.join(SITE_NODES.values())
-        )
-        if edge_only:
-            cpu_query = f'({cpu_query}) and on(node) {node_filter}'
-        config['cpu_utilization_query'] = cpu_query
-    config['mobility_query'] = _placement_query(eligible)
-    if vertical_budget is not None:
-        effective_min_replicas = vertical_budget.dynamic_min if no_hpa else max(1, vertical_budget.dynamic_min)
-        max_replicas = vertical_budget.dynamic_max
-        if max_replicas < effective_min_replicas:
-            raise ValueError('vertical HPA requires room for at least one managed replica')
-    else:
-        if min_replicas is not None:
-            if type(min_replicas) is not int or min_replicas < 1:
-                raise ValueError('min replicas must be a positive integer')
-            if fixed_replicas is not None:
-                raise ValueError('use min_replicas without fixed_replicas')
-        if fixed_replicas is not None:
-            if type(fixed_replicas) is not int or fixed_replicas < 1:
-                raise ValueError('fixed replicas must be a positive integer')
-            effective_min_replicas = max_replicas = fixed_replicas
-        elif min_replicas is not None:
-            effective_min_replicas = min_replicas
-        elif comparison == 'scaling':
-            effective_min_replicas = SCALER_MIN_REPLICAS
-        else:
-            effective_min_replicas = config['min_replicas']
-        if type(max_replicas) is not int or max_replicas < effective_min_replicas:
-            raise ValueError('max replicas must be an integer at least min_replicas')
-    config['prefer_close'] = bool(prefer_close and (method == 'proposed' or site_anchors))
-    if site_anchors and vertical_budget is None:
-        effective_min_replicas, max_replicas = _managed_replica_bounds(
-            effective_min_replicas, max_replicas, edge_only=edge_only, site_nodes=site_nodes)
-    config['min_replicas'] = effective_min_replicas
-    if resource_weights is not None:
-        config['resource_weights'] = validate_resource_weights(resource_weights)
-    if locality_weight is not None:
-        if not math.isfinite(locality_weight) or not 0 <= locality_weight <= 1:
-            raise ValueError('locality weight must be between 0 and 1')
-        config['locality_weight'] = locality_weight
-    if base_manifest is None:
-        base_manifest = root / 'workload.yaml'
-    source_text = base_manifest.read_text() if base_manifest.exists() else workload_manifest(workload).read_text()
-    documents = list(yaml.safe_load_all(source_text))
-    deployments = [item for item in documents if item and item.get('kind') == 'Deployment']
-    if len(deployments) != 1:
-        raise ValueError('application manifest requires exactly one Deployment')
-    scheduler_name = ('default-scheduler' if (method == 'baseline' or comparison == 'scaling')
-                      else config.get('scheduler_name', 'mec-placement-scheduler'))
-    deployments[0]['spec']['template']['spec']['schedulerName'] = scheduler_name
-    if comparison == 'scaling':
-        deployments[0]['spec']['replicas'] = effective_min_replicas
-        _restrict_workload_nodes(deployments[0], [SCALER_NODE])
-    else:
-        _restrict_workload_nodes(deployments[0], eligible)
-    if vertical_budget is not None:
-        deployments[0]['spec']['replicas'] = vertical_budget.dynamic_min
-    elif site_anchors and fixed_replicas is None:
-        deployments[0]['spec']['replicas'] = 0
-    elif fixed_replicas is not None or min_replicas is not None:
-        deployments[0]['spec']['replicas'] = effective_min_replicas
-    method_manifest = root / f'{method}-workload.yaml'
-    with method_manifest.open('x') as stream:
-        yaml.safe_dump_all(documents, stream, sort_keys=False)
-    if method == 'proposed':
-        mode = 'mobility-aware'
-        mutate = True
-    elif comparison == 'placement' and autoscaler == 'controller':
-        mode = 'scaling-only'
-        mutate = True
-    else:
-        mode = 'mobility-aware'
-        mutate = False
-    config.update(manifest=str(method_manifest), mode=mode, mutate=mutate,
-                  slo_seconds=slo_ms / 1000, max_replicas=max_replicas)
-    if debug:
-        config.update(interval_seconds=15, cooldown_seconds=15,
-                      scale_down_seconds=30, deschedule_interval_seconds=30)
-        config['cpu_utilization_query'] = config['cpu_utilization_query'].replace('[2m]', '[1m]')
-    if deschedule_interval is not None:
-        if not math.isfinite(deschedule_interval) or deschedule_interval <= 0:
-            raise ValueError('descheduler interval must be finite and positive')
-        config['deschedule_interval_seconds'] = deschedule_interval
-    config_path = root / f'{method}-controller.yaml'
-    with config_path.open('x') as stream:
-        yaml.safe_dump(config, stream, sort_keys=False)
-    app_name = workload_identity(workload)
-    hpa_path = None
-    if no_hpa:
-        return config, config_path, hpa_path
-    if method == 'baseline' and comparison in ('full', 'scaling'):
-        hpa_path = _render_hpa(
-            'autoscaler/hpa-baseline.yaml', root / 'baseline-hpa.yaml',
-            app_name + '-baseline', app_name,
-            config['min_replicas'], max_replicas, config['scale_down_seconds'], staircase=staircase,
-            scale_down_stabilization_seconds=scale_down_stabilization_seconds,
-            scale_down_pods=scale_down_pods,
-            scale_down_period_seconds=scale_down_period_seconds,
-            cpu_hpa_target=cpu_hpa_target,
-        )
-    elif autoscaler == 'hpa' and (method == 'proposed' or comparison == 'placement'):
-        effective_factor = rt_target_factor if method == 'proposed' else 1.0
-        # Joint suite design: rate-limit proposed only. Shared scale-down flags
-        # can set identical limits when the proposed-only override is omitted.
-        proposed_period = proposed_scale_down_period_seconds if method == 'proposed' else None
-        hpa_path = _render_hpa(
-            'autoscaler/hpa-proposed.yaml', root / f'{method}-hpa.yaml',
-            f'{app_name}-{method}', app_name,
-            config['min_replicas'], max_replicas, config['scale_down_seconds'], slo_ms=slo_ms, staircase=staircase,
-            latency_floor_ms=latency_floor_ms, rt_target_factor=effective_factor, asymmetric_latency=asymmetric_latency,
-            scale_down_stabilization_seconds=scale_down_stabilization_seconds,
-            scale_down_pods=1 if proposed_period is not None else scale_down_pods,
-            scale_down_period_seconds=proposed_period if proposed_period is not None else scale_down_period_seconds,
-        )
-    return config, config_path, hpa_path
-
-
 def _wait_initial_replicas_ready(app, expected_replicas, method=None, timeout=180):
     """Wait for deployment rollout and verify at least expected_replicas are ready."""
     prefix = f'{method}: ' if method else ''
@@ -1258,441 +697,6 @@ def _wait_site_anchor_endpoints(app, timeout=60, *, edge_only=False, site_nodes=
         time.sleep(2)
 
 
-def _load_offloader_token(settings):
-    """Load offloader admin bearer token from file or environment without printing/storing it."""
-    token = (
-        os.environ.get('OFFLOADER_ADMIN_TOKEN', '').strip()
-        or os.environ.get('UE_TELEMETRY_TOKEN', '').strip()
-    )
-    if token:
-        return token
-    token_file = settings.get('offloader_token_file') or settings.get('token')
-    if token_file and Path(token_file).is_file():
-        token = Path(token_file).read_text(encoding='utf-8').strip()
-    if not token or '\n' in token or '\r' in token:
-        raise RuntimeError(
-            'offloader admin token is required (set OFFLOADER_ADMIN_TOKEN or configure offloader_token_file)'
-        )
-    return token
-
-
-def _offloader_request(url, *, token, method='GET', payload=None, timeout=5.0):
-    headers = {'Authorization': f'Bearer {token}'}
-    data = None
-    if payload is not None:
-        data = json.dumps(payload).encode('utf-8')
-        headers['Content-Type'] = 'application/json'
-    req = Request(url, data=data, method=method, headers=headers)
-    with urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
-
-
-def reset_offloader(offloader_url, mode, *, token, wait_ack_seconds=10.0):
-    """Reset all site routes to LOCAL, clear offloader state, and wait for Envoy epoch-matched ACK."""
-    base = offloader_url.rstrip('/')
-    result = _offloader_request(f'{base}/reset', token=token, method='POST', payload={'mode': mode})
-    desired_versions = result.get('desired_versions') or {}
-    deadline = time.monotonic() + wait_ack_seconds
-    while time.monotonic() < deadline:
-        status = _offloader_request(f'{base}/status', token=token)
-        xds_sites = (status.get('xds') or {}).get('sites') or {}
-        policy_sites = status.get('sites') or {}
-        if all(
-            xds_sites.get(site, {}).get('acked_route') == 'LOCAL'
-            and policy_sites.get(site, {}).get('active_route') == 'LOCAL'
-            and desired_versions.get(site)
-            and xds_sites.get(site, {}).get('acked_version') == desired_versions[site]
-            for site in ('gnb-1', 'gnb-2', 'gnb-3')
-        ):
-            return status
-        time.sleep(0.5)
-    raise RuntimeError('Envoy ingress did not ACK LOCAL route reset within timeout')
-
-
-def _default_envoy_preflight_probe(url, headers=None, timeout=5.0):
-    req = Request(url, method='GET', headers=headers or {})
-    # The offloader's EDS state can be ready before Envoy polls and applies it.
-    deadline = time.monotonic() + 20.0
-    while True:
-        try:
-            with urlopen(req, timeout=min(timeout, max(0.1, deadline - time.monotonic()))) as resp:
-                raw = resp.read().decode('utf-8', errors='replace')
-                return resp.status, {k.lower(): v for k, v in resp.headers.items()}, raw
-        except HTTPError as exc:
-            remaining = deadline - time.monotonic()
-            with exc:
-                if exc.code != 503 or remaining <= 0:
-                    raw = exc.read().decode('utf-8', errors='replace')
-                    return exc.code, {k.lower(): v for k, v in exc.headers.items()}, raw
-            time.sleep(min(0.5, remaining))
-
-
-def vertical_budget_from_settings(settings, *, min_replicas=None, max_replicas=None, arm_mode='vertical',
-                                  fixed_total=False):
-    """Use the same total ceiling, with three Core fallback slots reserved only for vertical."""
-    core_reps = settings.get('core_backend_replicas', 3)
-    eff_min = min_replicas if min_replicas is not None else settings.get('min_replicas', 6)
-    eff_max = max_replicas if max_replicas is not None else settings.get('max_replicas', 18)
-    counts_toward_budget = settings.get('core_counts_toward_budget', True)
-    base_budget = VerticalBudget(
-        min_replicas=int(eff_min),
-        max_replicas=int(eff_max),
-        edge_anchors=3,
-        core_fallback_replicas=int(core_reps),
-        core_counts_toward_budget=bool(counts_toward_budget),
-    )
-    return base_budget.for_arm_mode(arm_mode, fixed_total=fixed_total)
-
-
-def get_core_pool_replicas(app, *, arm_name=None):
-    """Read current spec.replicas of the experiment Core fallback Deployment."""
-    core_dep = f'{app}-core'
-    prefix = f'{arm_name}: ' if arm_name else ''
-    try:
-        dep = get('deployment', core_dep)
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        detail = getattr(exc, 'stderr', None) or str(exc)
-        raise RuntimeError(
-            f'{prefix}Core fallback Deployment {NAMESPACE}/{core_dep} is missing or unreadable: {detail}'
-        ) from exc
-    replicas = (dep.get('spec') or {}).get('replicas')
-    return 0 if replicas is None else int(replicas)
-
-
-def scale_core_pool(app, replicas, *, arm_name=None):
-    """Scale only the experiment Core fallback Deployment."""
-    core_dep = f'{app}-core'
-    prefix = f'{arm_name}: ' if arm_name else ''
-    try:
-        kube('-n', NAMESPACE, 'scale', f'deployment/{core_dep}', f'--replicas={int(replicas)}')
-    except (OSError, subprocess.SubprocessError) as exc:
-        detail = getattr(exc, 'stderr', None) or str(exc)
-        raise RuntimeError(
-            f'{prefix}failed to scale Core fallback Deployment {NAMESPACE}/{core_dep} to {replicas}: {detail}'
-        ) from exc
-
-
-def wait_core_pool_scaled(app, expected_replicas, *, arm_name=None, core_node='core-5g', timeout=180, poll_interval=1.0):
-    """Wait until the Core fallback Deployment reaches exact requested capacity (0 pods or N Ready on core-5g)."""
-    core_dep = f'{app}-core'
-    prefix = f'{arm_name}: ' if arm_name else ''
-    expected = int(expected_replicas)
-    deadline = time.monotonic() + timeout
-
-    if expected == 0:
-        while True:
-            try:
-                dep = get('deployment', core_dep)
-                pods = json.loads(
-                    kube('-n', NAMESPACE, 'get', 'pods', '-l', f'app={core_dep}', '-o', 'json',
-                         capture_output=True, text=True).stdout
-                ).get('items') or []
-            except (OSError, subprocess.SubprocessError, ValueError) as exc:
-                raise RuntimeError(
-                    f'{prefix}failed inspecting Core fallback pool {NAMESPACE}/{core_dep} while scaling to 0: {exc}'
-                ) from exc
-            spec_reps = int((dep.get('spec') or {}).get('replicas') or 0)
-            status_reps = int((dep.get('status') or {}).get('replicas') or 0)
-            if spec_reps == 0 and status_reps == 0 and len(pods) == 0:
-                return {'deployment': core_dep, 'expected_replicas': 0, 'remaining_pods': 0, 'ready_pods_on_core': 0}
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f'{prefix}Core fallback pool {NAMESPACE}/{core_dep} did not drain to 0 pods within {timeout}s '
-                    f'(spec={spec_reps}, status={status_reps}, remaining_pods={len(pods)})'
-                )
-            time.sleep(poll_interval)
-
-    try:
-        kube('-n', NAMESPACE, 'rollout', 'status', f'deployment/{core_dep}', f'--timeout={timeout}s')
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(
-            f'{prefix}Core fallback pool {NAMESPACE}/{core_dep} rollout did not reach {expected} Ready pods within {timeout}s'
-        ) from exc
-
-    while True:
-        try:
-            pods = json.loads(
-                kube('-n', NAMESPACE, 'get', 'pods', '-l', f'app={core_dep}', '-o', 'json',
-                     capture_output=True, text=True).stdout
-            ).get('items') or []
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            raise RuntimeError(
-                f'{prefix}failed inspecting Core fallback pods for {NAMESPACE}/{core_dep}: {exc}'
-            ) from exc
-        ready_on_core = 0
-        wrong_node = []
-        for pod in pods:
-            meta = pod.get('metadata') or {}
-            if meta.get('deletionTimestamp'):
-                continue
-            status = pod.get('status') or {}
-            phase = status.get('phase')
-            is_ready = any(c.get('type') == 'Ready' and c.get('status') == 'True'
-                           for c in (status.get('conditions') or []))
-            node = (pod.get('spec') or {}).get('nodeName')
-            if phase == 'Running' and is_ready:
-                if node == core_node:
-                    ready_on_core += 1
-                else:
-                    wrong_node.append(f'{meta.get("name")}@{node}')
-        if wrong_node:
-            raise RuntimeError(
-                f'{prefix}Core fallback pool {NAMESPACE}/{core_dep} has Ready pod(s) off {core_node}: {", ".join(wrong_node)}'
-            )
-        if ready_on_core == expected:
-            return {'deployment': core_dep, 'expected_replicas': expected, 'ready_pods_on_core': ready_on_core}
-        if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f'{prefix}Core fallback pool {NAMESPACE}/{core_dep} reached {ready_on_core}/{expected} '
-                f'Ready pods on {core_node} within {timeout}s'
-            )
-        time.sleep(poll_interval)
-
-
-def set_offloader_mode(offloader_url, mode, *, token, arm_name=None):
-    """Switch offloader policy mode (e.g. local-only -> vertical) and verify /status."""
-    base = offloader_url.rstrip('/')
-    prefix = f'{arm_name}: ' if arm_name else ''
-    _offloader_request(f'{base}/mode', token=token, method='POST', payload={'mode': mode})
-    status = _offloader_request(f'{base}/status', token=token)
-    if status.get('mode') != mode:
-        raise RuntimeError(
-            f'{prefix}failed to switch offloader mode to {mode!r} (status reported {status.get("mode")!r})'
-        )
-    return status
-
-
-def wait_offloader_core_endpoints(offloader_url, expected_count, *, token, arm_name=None,
-                                  timeout=20.0, poll_interval=0.5, max_count=None):
-    """Wait until offloader EDS reflects the expected Core pool and optional managed pods."""
-    base = offloader_url.rstrip('/')
-    prefix = f'{arm_name}: ' if arm_name else ''
-    expected = int(expected_count)
-    maximum = expected if max_count is None else max_count
-    deadline = time.monotonic() + timeout
-    actual = None
-    while True:
-        status = _offloader_request(f'{base}/status', token=token)
-        core_eps = ((status.get('xds') or {}).get('endpoints') or {}).get('core-5g') or []
-        actual = len(core_eps)
-        if expected <= actual <= maximum:
-            return core_eps
-        if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f'{prefix}offloader EDS core-5g endpoint count is {actual} '
-                f'(expected {expected}{".." + str(maximum) if maximum != expected else ""}) after {timeout:g}s'
-            )
-        time.sleep(poll_interval)
-
-
-def verify_vertical_arm_readiness(settings, vertical_mode, *, token, probe_fn=None, budget=None,
-                                  arm_name=None, expected_offloader_mode=None):
-    """Gate every arm before UE traffic: verify LOCAL ACK, 3 edge backends, and arm-specific Core EDS state."""
-    prefix = f'{arm_name}: ' if arm_name else ''
-    if probe_fn is None:
-        probe_fn = _default_envoy_preflight_probe
-    if budget is None:
-        budget = vertical_budget_from_settings(settings, arm_mode=vertical_mode)
-    base = settings['offloader_url'].rstrip('/')
-    status = _offloader_request(f'{base}/status', token=token)
-    want_mode = expected_offloader_mode if expected_offloader_mode is not None else vertical_mode
-    if status.get('mode') != want_mode:
-        raise RuntimeError(f"{prefix}offloader mode mismatch: expected {want_mode!r}, got {status.get('mode')!r}")
-
-    xds = status.get('xds') or {}
-    xds_sites = xds.get('sites') or {}
-    policy_sites = status.get('sites') or {}
-    endpoints = xds.get('endpoints') or {}
-    envoy_ports = settings['envoy_site_ports']
-    site_ips = settings['site_node_ips']
-
-    local_summary = {}
-    for site in ('gnb-1', 'gnb-2', 'gnb-3'):
-        xs = xds_sites.get(site) or {}
-        ps = policy_sites.get(site) or {}
-        if (
-            xs.get('desired_route') != 'LOCAL'
-            or xs.get('acked_route') != 'LOCAL'
-            or not xs.get('desired_version')
-            or xs.get('acked_version') != xs.get('desired_version')
-            or ps.get('active_route') != 'LOCAL'
-        ):
-            raise RuntimeError(
-                f'{prefix}readiness gate failed for {site}: LOCAL route is not confirmed active '
-                f'(desired={xs.get("desired_route")}, acked={xs.get("acked_route")}, '
-                f'desired_ver={xs.get("desired_version")}, acked_ver={xs.get("acked_version")})'
-            )
-        local_eps = endpoints.get(f'local-{site}') or []
-        if not local_eps:
-            raise RuntimeError(f'{prefix}readiness gate failed for {site}: no ready local backend endpoints in EDS')
-
-        ready_url = f'http://{site_ips[site]}:{envoy_ports[site]}/ready'
-        code, hdrs, _ = probe_fn(ready_url, headers={})
-        if code != 200 or hdrs.get('x-mec-site') != site or hdrs.get('x-mec-route') != 'local':
-            raise RuntimeError(
-                f'{prefix}readiness gate failed for {site}: Envoy local preflight {ready_url} returned '
-                f'status={code} x-mec-site={hdrs.get("x-mec-site")!r} x-mec-route={hdrs.get("x-mec-route")!r}'
-            )
-        local_summary[site] = {
-            'acked_version': xs.get('acked_version'),
-            'ready_endpoints': len(local_eps),
-            'preflight_url': ready_url,
-            'preflight_status': code,
-        }
-
-    core_eps = endpoints.get('core-5g') or []
-    expected_core = budget.core_fallback_replicas
-    core_preflight_checked = False
-    if vertical_mode == 'local-only':
-        if expected_core != 0:
-            raise RuntimeError(
-                f'{prefix}readiness gate failed: local-only budget must have core_backend_replicas=0 (got {expected_core})'
-            )
-        if len(core_eps) != 0:
-            raise RuntimeError(
-                f'{prefix}readiness gate failed: local-only arm still has {len(core_eps)} Core endpoint(s) in EDS (expected 0)'
-            )
-    else:
-        if expected_core < 1:
-            raise RuntimeError(
-                f'{prefix}readiness gate failed: vertical arm requires core_backend_replicas >= 1 (got {expected_core})'
-            )
-        max_core = expected_core + budget.dynamic_min
-        if not expected_core <= len(core_eps) <= max_core:
-            raise RuntimeError(
-                f'{prefix}readiness gate failed: Core backend ready replicas ({len(core_eps)}) '
-                f'does not match configured core_backend_replicas '
-                f'({expected_core}{" plus up to " + str(budget.dynamic_min) + " managed pods" if budget.dynamic_min else ""})'
-            )
-        for site in ('gnb-1', 'gnb-2', 'gnb-3'):
-            ready_url = f'http://{site_ips[site]}:{envoy_ports[site]}/ready'
-            code, hdrs, _ = probe_fn(ready_url, headers={'X-MEC-Preflight': 'core'})
-            if code != 200 or hdrs.get('x-mec-route') != 'core':
-                raise RuntimeError(
-                    f'{prefix}readiness gate failed for {site}: Core backend unreachable through Envoy '
-                    f'(status={code}, x-mec-route={hdrs.get("x-mec-route")!r})'
-                )
-        core_preflight_checked = True
-
-    return {
-        'mode': status.get('mode'),
-        'arm_mode': vertical_mode,
-        'epoch': xds.get('epoch'),
-        'budget': budget.to_metadata(),
-        'local_sites': local_summary,
-        'core_backend_expected_replicas': expected_core,
-        'core_backend_actual_ready': len(core_eps),
-        'core_counts_toward_budget': budget.core_counts_toward_budget,
-        'core_preflight_checked': core_preflight_checked,
-    }
-
-
-def prepare_vertical_arm(settings, app, vertical_mode, vertical_budget, *, token, arm_name,
-                         probe_fn=None, core_wait_timeout=180, eds_wait_timeout=20.0):
-    """Manage Core fallback pool lifecycle and readiness gate before starting arm traffic."""
-    offloader_url = settings['offloader_url']
-    # Fail clearly if the experiment Core fallback Deployment is missing before mutating routes.
-    get_core_pool_replicas(app, arm_name=arm_name)
-
-    if vertical_mode == 'local-only':
-        # 1. Reset offloader to LOCAL and wait for all 3 Envoy ACKs.
-        reset_offloader(offloader_url, 'local-only', token=token)
-        # 2. Scale Core fallback Deployment to 0 and verify 0 pods remain.
-        scale_core_pool(app, 0, arm_name=arm_name)
-        pool_state = wait_core_pool_scaled(app, 0, arm_name=arm_name, timeout=core_wait_timeout)
-        # 3. Verify Core EDS is empty, then run full local-only readiness gate (checks 3 edge backends).
-        wait_offloader_core_endpoints(offloader_url, 0, token=token, arm_name=arm_name, timeout=eds_wait_timeout)
-        readiness = verify_vertical_arm_readiness(
-            settings, 'local-only', token=token, probe_fn=probe_fn,
-            budget=vertical_budget, arm_name=arm_name, expected_offloader_mode='local-only',
-        )
-        readiness['core_pool_state'] = pool_state
-        return readiness
-
-    if vertical_mode == 'vertical':
-        # 1. Start with all routes LOCAL (local-only mode while bringing up Core pool).
-        reset_offloader(offloader_url, 'local-only', token=token)
-        # 2. Scale Core pool to target (3) and wait for Ready pods on core-5g.
-        scale_core_pool(app, vertical_budget.core_fallback_replicas, arm_name=arm_name)
-        pool_state = wait_core_pool_scaled(
-            app, vertical_budget.core_fallback_replicas, arm_name=arm_name, timeout=core_wait_timeout,
-        )
-        # 3. Wait for all Core endpoints in EDS and verify reachability from all 3 Envoys while still LOCAL.
-        wait_offloader_core_endpoints(
-            offloader_url, vertical_budget.core_fallback_replicas,
-            token=token, arm_name=arm_name, timeout=eds_wait_timeout,
-            **({'max_count': vertical_budget.core_fallback_replicas + vertical_budget.dynamic_min}
-               if vertical_budget.dynamic_min else {}),
-        )
-        readiness = verify_vertical_arm_readiness(
-            settings, 'vertical', token=token, probe_fn=probe_fn,
-            budget=vertical_budget, arm_name=arm_name, expected_offloader_mode='local-only',
-        )
-        # 4. Activate vertical mode only after the full readiness gate passes.
-        set_offloader_mode(offloader_url, 'vertical', token=token, arm_name=arm_name)
-        readiness['mode'] = 'vertical'
-        readiness['core_pool_state'] = pool_state
-        return readiness
-
-    raise ValueError(f'{arm_name}: unsupported vertical_mode {vertical_mode!r}')
-
-
-def cleanup_vertical_state(settings, app, *, token, initial_core_replicas=None, output_dir=None,
-                           arm_name=None, restore_core_pool=False, raise_on_error=True, core_wait_timeout=180):
-    """Reset offloader routes to LOCAL first, then restore Core fallback pool to initial_core_replicas."""
-    errors = []
-    if settings.get('offloader_url'):
-        if token is None:
-            try:
-                token = _load_offloader_token(settings)
-            except RuntimeError as exc:
-                msg = f'Failed to load offloader token during cleanup: {exc}'
-                errors.append(msg)
-                if output_dir is not None:
-                    (Path(output_dir) / 'offload-reset-error.txt').write_text(msg + '\n')
-                print(f'ERROR: {msg}', file=sys.stderr, flush=True)
-        if token is not None:
-            try:
-                reset_offloader(settings['offloader_url'], 'local-only', token=token)
-            except (OSError, ValueError, RuntimeError) as exc:
-                msg = f'Failed to reset offloader routes to LOCAL during cleanup: {type(exc).__name__}: {exc}'
-                errors.append(msg)
-                if output_dir is not None:
-                    (Path(output_dir) / 'offload-reset-error.txt').write_text(msg + '\n')
-                print(f'ERROR: {msg}', file=sys.stderr, flush=True)
-
-    if restore_core_pool and initial_core_replicas is not None:
-        try:
-            if errors and initial_core_replicas < get_core_pool_replicas(app, arm_name=arm_name):
-                raise RuntimeError('LOCAL routes must be acknowledged before reducing Core capacity')
-            scale_core_pool(app, initial_core_replicas, arm_name=arm_name)
-            wait_core_pool_scaled(app, initial_core_replicas, arm_name=arm_name, timeout=core_wait_timeout)
-        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
-            msg = (
-                f'Failed to restore Core fallback pool {NAMESPACE}/{app}-core '
-                f'to initial replicas ({initial_core_replicas}) during cleanup: {type(exc).__name__}: {exc}'
-            )
-            errors.append(msg)
-            if output_dir is not None:
-                (Path(output_dir) / 'core-pool-restore-error.txt').write_text(msg + '\n')
-            print(f'ERROR: {msg}', file=sys.stderr, flush=True)
-
-    if errors and raise_on_error:
-        raise RuntimeError('; '.join(errors))
-    return errors
-
-
-def fetch_offloader_artifacts(offloader_url, output_dir, *, token):
-    """Save offloader decision/ACK events and final status for an experiment arm."""
-    base = offloader_url.rstrip('/')
-    events = _offloader_request(f'{base}/events', token=token).get('events') or []
-    with (output_dir / 'offload-events.jsonl').open('w', encoding='utf-8') as f:
-        for ev in events:
-            f.write(json.dumps(ev, sort_keys=True) + '\n')
-    status = _offloader_request(f'{base}/status', token=token)
-    (output_dir / 'offload-status-final.json').write_text(json.dumps(status, indent=2) + '\n')
-
-
 def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, debug=False,
                resource_weights=None, locality_weight=None, comparison='full',
                autoscaler='controller', placement_engine='python', deschedule_interval=None, fixed_replicas=None, min_replicas=None,
@@ -1723,9 +727,8 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                                                   scale_down_pods=settings.get('scale_down_pods'),
                                                   scale_down_period_seconds=settings.get('scale_down_period_seconds'),
                                                   cpu_hpa_target=settings.get('cpu_hpa_target', DEFAULT_CPU_HPA_TARGET),
-                                                  prefer_close=settings.get('pod_share_scoring', (
-                                                      settings.get('prefer_close', False)
-                                                      and not settings.get('prefer_close_routing_only', False))),
+                                                  pod_share_scoring=settings.get(
+                                                      'pod_share_scoring', comparison != 'scaling' and placement_engine == 'go'),
                                                   no_hpa=settings.get('no_hpa', False),
                                                   asymmetric_latency=settings.get('asymmetric_latency', False),
                                                   site_anchors=settings.get('site_anchors', False),
@@ -2012,114 +1015,6 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     command([sys.executable, '-m', 'utils.telemetry_history', output / 'requests.jsonl', output, '--prometheus-url', config['prometheus_url']])
 
 
-def _build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', choices=sorted(PROFILES),
-                        help='named experiment profile with all of its constants; the run scripts select one')
-    parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
-    parser.add_argument('--workload', choices=WORKLOADS, default=None,
-                        help='workload to deploy and monitor (default: campaign config or pedestrian-detection)')
-    parser.add_argument('--scenario', choices=['mobility9', *SCALER_SCENARIOS],
-                        help='mobility9: 9 UEs shifting across gNBs (7 phases); scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on core-5g')
-    parser.add_argument('--mobility-direction', choices=('forward', 'reverse'), default=None,
-                        help='mobility9 only: UE hotspot trajectory direction (forward or reverse; default: forward)')
-    parser.add_argument('--phase-transition', choices=('continuous', 'restart'), default='continuous',
-                        help='continuous preserves unaffected UE traffic at phase boundaries; restart reproduces legacy runs')
-    parser.add_argument('--phase-schedule',
-                        help='override the scenario with explicit total:gnb1:gnb2:gnb3 phases (recorded in metadata)')
-    parser.add_argument('--final-hold', action='store_true',
-                        help='extend final scaling phase: +360s for legacy balanced, or to at least 600s for staircase')
-    parser.add_argument('--deschedule-interval', type=float,
-                        help='seconds between proposed descheduler checks (default: 30; disabled for scaling)')
-    parser.add_argument('--comparison', choices=COMPARISONS, default=None,
-                        help='placement: same latency autoscaler; full: CPU HPA vs full proposed; scaling: CPU HPA vs latency HPA on core-5g')
-    parser.add_argument('--autoscaler', choices=AUTOSCALERS, default='hpa',
-                        help='proposed latency autoscaler engine: hpa (Kubernetes HPA + prometheus-adapter) or controller (Python fallback)')
-    parser.add_argument('--placement-engine', choices=PLACEMENT_ENGINES, default='go',
-                        help='scheduler/descheduler runtime for proposed method: go (in-cluster Deployment) or python (host fallback)')
-    parser.add_argument('--plan-only', type=Path, metavar='DIRECTORY',
-                        help='write workload/controller/HPA manifests locally without any probes or cluster access')
-    parser.add_argument('--config', default=str(ROOT / 'experiments/campaign.yaml'))
-    parser.add_argument('--check', action='store_true', help='dependency checks plus temporary workload and UE connectivity probes')
-    parser.add_argument('--tc-ms', type=float, default=DEFAULT_TC_MS,
-                        help='workload link shaping one-way delay in milliseconds (default: 10)')
-    parser.add_argument('--slo-ms', type=float,
-                        help='reporting p90 SLO threshold in milliseconds (also base RT target before --rt-target-factor; default: 150)')
-    parser.add_argument('--cpu-hpa-target', type=int, metavar='PERCENT',
-                        help='baseline CPU HPA target as a positive integer percent of CPU requests (default: 80; full/scaling comparisons only)')
-    parser.add_argument('--rt-target-factor', type=float, default=1.0,
-                        help='experimental headroom multiplier in (0, 1] applied only to proposed RT autoscaler internal target (default: 1.0)')
-    parser.add_argument('--latency-floor-ms', type=int,
-                        help='reference latency in ms (default: 0.8 x --slo-ms, i.e. 120 for the 150 ms SLO, for native HPA full and staircase comparisons; 0 uses raw RT/SLO)')
-    parser.add_argument('--asymmetric-latency', action='store_true',
-                        help='use raw p90 below target and floor-adjusted scaling above target')
-    parser.add_argument('--fixed-replicas', type=int,
-                        help='fixed replica count for both mobility9 methods; clamps HPA min/max and initial Deployment replicas')
-    parser.add_argument('--no-hpa', action='store_true',
-                        help='run a fixed-replica Go placement comparison without an HPA')
-    parser.add_argument('--bounded-hpa-behavior', action='store_true',
-                        help='apply the staircase HPA rate limits and stabilization to both full-comparison arms')
-    parser.add_argument('--pod-share-scoring', action='store_true',
-                        help='use managed pod share for Go placement (already the default)')
-    parser.add_argument('--min-replicas', type=int,
-                        help='shared minimum replica count (default: 3; under --vertical-mode, vertical-arm total budget including core_backend_replicas, e.g. 6 -> 3 edge + 3 Core)')
-    parser.add_argument('--max-replicas', type=int,
-                        help='shared replica ceiling (default: 18 for staircase, 24 for balanced, config.yaml for other non-vertical runs; under --vertical-mode, vertical-arm total budget including core_backend_replicas, e.g. 18 -> 15 edge + 3 Core)')
-    parser.add_argument('--scale-down-stabilization-seconds', type=int,
-                        help='shared HPA scale-down stabilization window in seconds (default: 60 for staircase, config.yaml otherwise)')
-    parser.add_argument('--proposed-scale-down-period-seconds', type=int,
-                        help='rate-limit the proposed HPA to one pod removal per configured interval')
-    parser.add_argument('--scale-down-pods', type=int,
-                        help='shared HPA scale-down pods per period (default: none, i.e. the Kubernetes default rate)')
-    parser.add_argument('--scale-down-period-seconds', type=int,
-                        help='shared HPA scale-down period in seconds (default: none, i.e. the Kubernetes default rate)')
-    parser.add_argument('--method-order', choices=('baseline-first', 'proposed-first', 'random'),
-                        default='baseline-first',
-                        help='order in which baseline and proposed run (default: baseline-first)')
-    parser.add_argument('--arms', choices=sorted(ARM_SELECTIONS), default='all',
-                        help='four-arm only: run all arms, or only the vertical arms (smoke profile)')
-    parser.add_argument('--vertical-mode', choices=VERTICAL_MODES, default='off',
-                        help='vertical offloading mode: off (default), local-only (0 Core), vertical (Core fallback), or four-arm (both modes and methods, same total ceiling)')
-    parser.add_argument('--debug', action='store_true',
-                        help='60s phases and shorter controller/HPA timers for debugging; separate from evaluation runs')
-    duration_options = parser.add_mutually_exclusive_group()
-    duration_options.add_argument('--long-run', action='store_true',
-                                  help='mobility9 only: use 120s phases (default for mobility9; kept for compatibility)')
-    duration_options.add_argument('--phase-duration', type=float,
-                                  help='traffic seconds per phase (minimum 60; default: 120 for all full experiments; joint reads campaign config; 60 with --debug)')
-    parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE,
-                        help='target request arrival rate per active UE in requests/second (default: 5)')
-    parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE,
-                        help='maximum concurrent in-flight requests per UE (default: 8)')
-    parser.add_argument('--resource-weights', nargs=4, type=float,
-                        metavar=('CPU', 'MEMORY', 'GPU', 'VRAM'),
-                        help='proposed resource-score weights, nonnegative and summing to 1')
-    parser.add_argument('--locality-weight', type=float,
-                        help='proposed traffic-share weight between 0 and 1 (default: config.yaml)')
-    routing_options = parser.add_mutually_exclusive_group()
-    routing_options.add_argument('--prefer-close', action='store_true', help='enable PreferClose Service routing')
-    routing_options.add_argument('--prefer-close-routing-only', action='store_true',
-                                 help='enable PreferClose Service routing (alias for --prefer-close)')
-    routing_options.add_argument('--cluster-wide', action='store_true',
-                                 help='use cluster-wide Service routing even when site anchors are enabled')
-    parser.add_argument('--edge-only', action='store_true',
-                        help='place workload replicas only on the three gNB nodes')
-    parser.add_argument('--spill-high', type=int, metavar='N', help='mark a pod unready at N pending detections')
-    parser.add_argument('--spill-low', type=int, metavar='N', help='restore readiness at N or fewer pending detections')
-    parser.add_argument('--site-anchors', action='store_true',
-                        help='start both arms with one fixed serving pod per gNB within the total replica budget')
-    return parser
-
-
-def _parse_args(argv=None):
-    """Parse arguments; a profile supplies defaults that explicit flags may still override."""
-    parser = _build_parser()
-    selected, _ = parser.parse_known_args(argv)
-    if selected.profile:
-        parser.set_defaults(**PROFILES[selected.profile])
-    return parser, parser.parse_args(argv)
-
-
 def main(argv=None):
     parser, args = _parse_args(argv)
     if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
@@ -2332,7 +1227,7 @@ def main(argv=None):
     controller_config = yaml.safe_load((ROOT / 'config.yaml').read_text())
     try:
         resource_weights = validate_resource_weights(
-            dict(zip(('cpu', 'memory', 'gpu', 'vram'), args.resource_weights))
+            dict(zip(('cpu', 'memory'), args.resource_weights))
             if args.resource_weights is not None else controller_config['resource_weights'])
     except ValueError as exc:
         parser.error(str(exc))
@@ -2660,7 +1555,7 @@ def main(argv=None):
                             scale_down_pods=args.scale_down_pods,
                             scale_down_period_seconds=args.scale_down_period_seconds,
                             cpu_hpa_target=args.cpu_hpa_target,
-                            prefer_close=settings['pod_share_scoring'], no_hpa=args.no_hpa,
+                            pod_share_scoring=settings['pod_share_scoring'], no_hpa=args.no_hpa,
                             asymmetric_latency=args.asymmetric_latency,
                             site_anchors=args.site_anchors, edge_only=args.edge_only, site_nodes=site_nodes,
                             base_manifest=output / 'workload.yaml', vertical_budget=arm_budgets_obj.get(arm),

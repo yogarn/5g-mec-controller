@@ -4,7 +4,7 @@ from pathlib import Path
 import math
 import yaml
 
-DEFAULT_RESOURCE_WEIGHTS = {'cpu': .5, 'memory': .5, 'gpu': 0., 'vram': 0.}
+DEFAULT_RESOURCE_WEIGHTS = {'cpu': .5, 'memory': .5}
 
 
 def validate_resource_weights(weights):
@@ -12,7 +12,7 @@ def validate_resource_weights(weights):
             any(isinstance(v, bool) or not isinstance(v, (int, float)) or
                 not math.isfinite(v) or v < 0 for v in weights.values()) or
             not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-9)):
-        raise ValueError('resource_weights must contain nonnegative finite cpu, memory, gpu and vram weights summing to 1')
+        raise ValueError('resource_weights must contain nonnegative finite cpu and memory weights summing to 1')
     return {key: float(value) for key, value in weights.items()}
 
 
@@ -37,9 +37,6 @@ class Settings:
     max_metric_age_seconds: float
     scale_down_seconds: float
     resource_weights: dict[str, float]
-    gpu_nodes: tuple[str, ...]
-    gpu_utilization_query: str | None
-    vram_utilization_query: str | None
     zero_locality_nodes: tuple[str, ...]
     deschedule_interval_seconds: float
     scheduler_name: str = 'mec-placement-scheduler'
@@ -55,9 +52,8 @@ def load_settings(path: str, *, allow_zero_min_replicas: bool = False) -> Settin
     allowed = {'manifest', 'namespace', 'prometheus_url', 'latency_query', 'slo_seconds',
                'min_replicas', 'max_replicas', 'interval_seconds', 'mode', 'mutate',
                'eligible_nodes', 'cpu_utilization_query', 'mobility_query', 'cpu_saturation',
-               'locality_weight', 'prefer_close', 'cooldown_seconds', 'max_metric_age_seconds',
-               'scale_down_seconds', 'resource_weights', 'gpu_nodes',
-               'gpu_utilization_query', 'vram_utilization_query', 'zero_locality_nodes',
+               'locality_weight', 'pod_share_scoring', 'prefer_close', 'cooldown_seconds', 'max_metric_age_seconds',
+               'scale_down_seconds', 'resource_weights', 'zero_locality_nodes',
                'deschedule_interval_seconds', 'scheduler_name', 'scheduler_interval_seconds'}
     if set(data) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(data) - allowed)}')
@@ -90,20 +86,7 @@ def load_settings(path: str, *, allow_zero_min_replicas: bool = False) -> Settin
         raise ValueError('zero_locality_nodes must be a unique subset of eligible_nodes')
     if nodes and len(zero_locality_nodes) == len(nodes):
         raise ValueError('at least one eligible node must require locality telemetry')
-    if mode == 'mobility-aware' and 'gpu_nodes' not in data:
-        raise ValueError('mobility-aware mode requires an explicit gpu_nodes inventory')
-    gpu_nodes = data.get('gpu_nodes', [])
-    if (not isinstance(gpu_nodes, list) or
-            any(not isinstance(n, str) or not n.strip() for n in gpu_nodes) or
-            len(set(gpu_nodes)) != len(gpu_nodes) or not set(gpu_nodes).issubset(nodes)):
-        raise ValueError('gpu_nodes must be a unique subset of eligible_nodes')
     resource_weights = validate_resource_weights(data.get('resource_weights', DEFAULT_RESOURCE_WEIGHTS))
-    for key in ('gpu_utilization_query', 'vram_utilization_query'):
-        query = data.get(key)
-        if (query is not None and (not isinstance(query, str) or not query.strip())) or (
-                mode == 'mobility-aware' and gpu_nodes and
-                any(resource_weights[k] > 0 for k in ('gpu', 'vram')) and query is None):
-            raise ValueError(f'{key} must be a nonempty query when GPU nodes are configured')
     if mode == 'mobility-aware':
         if not nodes or any(not isinstance(data.get(k), str) or not data[k].strip() for k in ('cpu_utilization_query', 'mobility_query')):
             raise ValueError('mobility-aware mode requires eligible_nodes, cpu_utilization_query and mobility_query')
@@ -133,8 +116,7 @@ def load_settings(path: str, *, allow_zero_min_replicas: bool = False) -> Settin
                     number('cpu_saturation', .8, 0, 1), float(locality_weight),
                     number('cooldown_seconds', 120, 0),
                     number('max_metric_age_seconds', 30, 0),
-                    number('scale_down_seconds', 300, 0), resource_weights, tuple(gpu_nodes),
-                    data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
+                    number('scale_down_seconds', 300, 0), resource_weights,
                     tuple(zero_locality_nodes), number('deschedule_interval_seconds', 30, 0),
                     scheduler_name.strip(), number('scheduler_interval_seconds', 1.0, 0))
 
