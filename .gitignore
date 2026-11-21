@@ -12,3 +12,6 @@ apps/pedestrian-detection/models/*.onnx
 
 # Compiled Go controller binary; reproduce with `cd placement && go build ./cmd/placement-controller`.
 placement/placement-controller
+
+# Generated architecture diagram artifacts
+.archify/
