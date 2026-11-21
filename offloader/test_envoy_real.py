@@ -2,6 +2,7 @@
 import http.client
 import http.server
 import json
+import math
 from pathlib import Path
 import socket
 import subprocess
@@ -145,12 +146,9 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
             OffloadConfig(
                 mode='vertical',
                 offload_p90_threshold_ms=150.0,
-                recovery_p90_threshold_ms=125.0,
                 min_samples=15,
                 breach_duration_seconds=2.0,
                 min_fresh_updates=2,
-                probe_min_samples=5,
-                recovery_stable_seconds=2.0,
                 min_dwell_seconds=3.0,
             ),
             collector_snapshot_url='http://127.0.0.1:9/offload/snapshot',
@@ -167,6 +165,7 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
 
     containers = []
     envoy_ports = {}
+    envoy_admin_ports = {}
     try:
         # 2. Launch 3 real Envoy containers using the repo's envoy-ingress.yaml templates.
         used_ports = {xds_port, admin_port, *ports.values()}
@@ -181,6 +180,7 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
             lport = alloc_port()
             aport = alloc_port()
             envoy_ports[site] = lport
+            envoy_admin_ports[site] = aport
             cfg = _build_envoy_bootstrap(site, lport, aport, xds_port)
             cfg_file = tmp_path / f'envoy-{site}.yaml'
             cfg_file.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding='utf-8')
@@ -211,29 +211,50 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
             assert hdrs['x-mec-route'] == 'local'
             assert body['server_node'] == expected_local_node[site]
 
-        # 3. Manual LOCAL -> CORE -> LOCAL on each site one at a time; other two sites stay LOCAL.
-        auth = {'Authorization': f'Bearer {admin_token}', 'Content-Type': 'application/json'}
-        switch_interval = ctrl.policy.config.route_switch_interval_seconds
-        for target_site in SITES:
-            sim_now[0] += switch_interval
+        def _envoy_admin_stats(site: str, prefix: str) -> dict[str, int]:
+            with urlopen(f'http://127.0.0.1:{envoy_admin_ports[site]}/stats?filter={prefix}', timeout=3) as resp:
+                lines = resp.read().decode('utf-8').splitlines()
+            out = {}
+            for line in lines:
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    try:
+                        out[k.strip()] = int(v.strip())
+                    except ValueError:
+                        pass
+            return out
+
+        def _override(site: str, route: str | None):
             req = Request(
                 f'http://127.0.0.1:{admin_port}/override',
-                data=json.dumps({'site': target_site, 'route': 'CORE'}).encode(),
+                data=json.dumps({'site': site, 'route': route}).encode(),
                 method='POST',
                 headers=auth,
             )
             with urlopen(req, timeout=3) as resp:
                 assert resp.status == 200
+
+        # 3. Manual LOCAL -> SPREAD -> LOCAL on each site one at a time; other two sites stay LOCAL.
+        auth = {'Authorization': f'Bearer {admin_token}', 'Content-Type': 'application/json'}
+        switch_interval = ctrl.policy.config.route_switch_interval_seconds
+        for target_site in SITES:
+            sim_now[0] += switch_interval
+            _override(target_site, 'SPREAD')
             _wait_until(lambda s=target_site: (
-                ctrl.policy.states[s].active_route == 'CORE'
-                and _request_envoy(envoy_ports[s])[2].get('server_node') == 'core-5g'
+                ctrl.policy.states[s].active_route == 'SPREAD'
+                and _request_envoy(envoy_ports[s])[1].get('x-mec-route') == 'spread'
             ))
+            # Verify Envoy accepted spread-gnb-N EDS cluster with zero rejections.
+            stats = _envoy_admin_stats(target_site, f'cluster.spread-{target_site}.update_')
+            assert stats.get(f'cluster.spread-{target_site}.update_success', 0) >= 1
+            assert stats.get(f'cluster.spread-{target_site}.update_rejected', 0) == 0
             for other in SITES:
                 code, hdrs, body = _request_envoy(envoy_ports[other])
                 assert code == 200
                 if other == target_site:
-                    assert hdrs['x-mec-route'] == 'core' and body['server_node'] == 'core-5g'
-                    # Forced local probe MUST still reach local backend while user route is CORE.
+                    assert hdrs['x-mec-route'] == 'spread'
+                    assert body['server_node'] in (expected_local_node[other], 'core-5g')
+                    # Forced local probe MUST still reach local backend while user route is SPREAD.
                     pcode, phdrs, pbody = _request_envoy(envoy_ports[other], headers={'X-MEC-Probe': 'local'})
                     assert pcode == 200 and phdrs['x-mec-route'] == 'local' and pbody['server_node'] == expected_local_node[other]
                 else:
@@ -241,22 +262,76 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
 
             # Switch back to LOCAL and clear override.
             sim_now[0] += switch_interval
-            for route in ('LOCAL', None):
-                req = Request(
-                    f'http://127.0.0.1:{admin_port}/override',
-                    data=json.dumps({'site': target_site, 'route': route}).encode(),
-                    method='POST',
-                    headers=auth,
-                )
-                with urlopen(req, timeout=3) as resp:
-                    assert resp.status == 200
+            _override(target_site, 'LOCAL')
+            _override(target_site, None)
             _wait_until(lambda s=target_site: (
                 ctrl.policy.states[s].active_route == 'LOCAL'
                 and _request_envoy(envoy_ports[s])[2].get('server_node') == expected_local_node[s]
             ))
 
-        # 4. Automatic p90-driven offload and probe-driven recovery on gnb-2 (gnb-1 & gnb-3 stay LOCAL).
-        def _snap(gnb2_p90, gnb2_seq, probe_p90=None, probe_seq=0, core_attempts=0):
+        # 3b. Real Envoy weighted EDS proportion check for k=1 (p=1/2=0.5) and k=2 (p=1/3=0.3333).
+        # With c=1, x_i=1: local weight=k, core weight=1 -> theoretical core ratio p = 1 / (1 + k).
+        # Binomial 4-sigma tolerance for N=240 requests: tol = 4 * sqrt(p*(1-p)/N).
+        sample_n = 240
+        sim_now[0] += switch_interval
+        _override('gnb-1', 'SPREAD')
+        _wait_until(lambda: (
+            ctrl.policy.states['gnb-1'].active_route == 'SPREAD'
+            and _request_envoy(envoy_ports['gnb-1'])[1].get('x-mec-route') == 'spread'
+        ))
+        # Ensure Envoy has polled the current EDS version for k=1 before sampling.
+        time.sleep(0.5)
+        core_hits_k1 = 0
+        for _ in range(sample_n):
+            code, hdrs, body = _request_envoy(envoy_ports['gnb-1'])
+            assert code == 200 and hdrs['x-mec-route'] == 'spread'
+            assert body['server_node'] in ('gnb1', 'core-5g')
+            if body['server_node'] == 'core-5g':
+                core_hits_k1 += 1
+        p_k1 = 1.0 / (1.0 + 1.0 * 1.0)
+        tol_k1 = 4.0 * math.sqrt(p_k1 * (1.0 - p_k1) / sample_n)
+        ratio_k1 = core_hits_k1 / sample_n
+        assert abs(ratio_k1 - p_k1) <= tol_k1, f'k=1 core ratio {ratio_k1:.4f} outside {p_k1:.4f} +/- {tol_k1:.4f}'
+
+        # Enter SPREAD on gnb-2 as well -> k=2 -> gnb-1 EDS weights recomputed (local=2, core=1, p=1/3).
+        sim_now[0] += switch_interval
+        _override('gnb-2', 'SPREAD')
+        _wait_until(lambda: (
+            ctrl.policy.states['gnb-2'].active_route == 'SPREAD'
+            and _request_envoy(envoy_ports['gnb-2'])[1].get('x-mec-route') == 'spread'
+        ))
+        # Allow Envoy EDS refresh (0.2s) to apply the new k=2 weights on gnb-1.
+        time.sleep(0.6)
+        stats_k2 = _envoy_admin_stats('gnb-1', 'cluster.spread-gnb-1.update_')
+        assert stats_k2.get('cluster.spread-gnb-1.update_rejected', 0) == 0
+        core_hits_k2 = 0
+        for _ in range(sample_n):
+            code, hdrs, body = _request_envoy(envoy_ports['gnb-1'])
+            assert code == 200 and hdrs['x-mec-route'] == 'spread'
+            assert body['server_node'] in ('gnb1', 'core-5g')
+            if body['server_node'] == 'core-5g':
+                core_hits_k2 += 1
+        p_k2 = 1.0 / (1.0 + 2.0 * 1.0)
+        tol_k2 = 4.0 * math.sqrt(p_k2 * (1.0 - p_k2) / sample_n)
+        ratio_k2 = core_hits_k2 / sample_n
+        assert abs(ratio_k2 - p_k2) <= tol_k2, f'k=2 core ratio {ratio_k2:.4f} outside {p_k2:.4f} +/- {tol_k2:.4f}'
+        print(
+            f'REAL_ENVOY_SPREAD_RATIO k=1: {core_hits_k1}/{sample_n}={ratio_k1:.4f} (expected {p_k1:.4f} +/- {tol_k1:.4f}); '
+            f'k=2: {core_hits_k2}/{sample_n}={ratio_k2:.4f} (expected {p_k2:.4f} +/- {tol_k2:.4f})'
+        )
+
+        # Return both gnb-1 and gnb-2 to LOCAL and clear overrides before automatic test.
+        for s in ('gnb-1', 'gnb-2'):
+            sim_now[0] += switch_interval
+            _override(s, 'LOCAL')
+            _override(s, None)
+            _wait_until(lambda site=s: (
+                ctrl.policy.states[site].active_route == 'LOCAL'
+                and _request_envoy(envoy_ports[site])[2].get('server_node') == expected_local_node[site]
+            ))
+
+        # 4. Automatic p90-driven SPREAD entry and overall-p90 recovery on gnb-2 (gnb-1 & gnb-3 stay LOCAL).
+        def _snap(gnb2_p90, gnb2_seq, overall_p90=None, overall_seq=0):
             return {
                 'generated_at': wall_start + sim_now[0],
                 'window_seconds': 15.0,
@@ -269,8 +344,8 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
                             'local': {
                                 'status': 'ok',
                                 'p90_ms': gnb2_p90 if s == 'gnb-2' else 70.0,
-                                'attempts': 0 if core_attempts and s == 'gnb-2' else 20,
-                                'successes': 0 if core_attempts and s == 'gnb-2' else 20,
+                                'attempts': 20,
+                                'successes': 20,
                                 'errors': 0,
                                 'timeouts': 0,
                                 'error_rate': 0.0,
@@ -280,72 +355,69 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
                                 'newest_sample_seq': gnb2_seq if s == 'gnb-2' else 1,
                             },
                             'core': {
-                                'status': 'ok' if core_attempts and s == 'gnb-2' else 'empty',
-                                'p90_ms': 90,
-                                'attempts': core_attempts if s == 'gnb-2' else 0,
-                                'successes': core_attempts if s == 'gnb-2' else 0,
+                                'status': 'empty',
+                                'p90_ms': None,
+                                'attempts': 0,
+                                'successes': 0,
                                 'errors': 0,
+                                'last_sample_age_seconds': None,
+                                'newest_sample_seq': 0,
+                            },
+                            'overall': {
+                                'status': 'ok' if (s == 'gnb-2' and overall_p90 is not None) else 'ok',
+                                'p90_ms': overall_p90 if (s == 'gnb-2' and overall_p90 is not None) else (gnb2_p90 if s == 'gnb-2' else 70.0),
+                                'attempts': 20,
+                                'successes': 20,
+                                'errors': 0,
+                                'timeouts': 0,
+                                'error_rate': 0.0,
                                 'last_sample_age_seconds': 0.1,
+                                'newest_sample_seq': overall_seq if (s == 'gnb-2' and overall_seq) else (gnb2_seq if s == 'gnb-2' else 1),
                             },
                             'unknown': {'status': 'empty', 'p90_ms': None, 'attempts': 0, 'successes': 0, 'errors': 0, 'timeouts': 0, 'error_rate': None, 'last_sample_age_seconds': None, 'newest_sample_seq': 0},
                         },
                         'probe': {
-                            'local': {
-                                'status': 'ok' if (s == 'gnb-2' and probe_p90 is not None) else 'empty',
-                                'p90_ms': probe_p90 if s == 'gnb-2' else None,
-                                'attempts': 6 if (s == 'gnb-2' and probe_p90 is not None) else 0,
-                                'successes': 6 if (s == 'gnb-2' and probe_p90 is not None) else 0,
-                                'errors': 0,
-                                'timeouts': 0,
-                                'error_rate': 0.0 if (s == 'gnb-2' and probe_p90 is not None) else None,
-                                'last_sample_age_seconds': 0.1 if (s == 'gnb-2' and probe_p90 is not None) else None,
-                                'newest_sample_seq': probe_seq if s == 'gnb-2' else 0,
-                            }
+                            'local': {'status': 'empty', 'p90_ms': None, 'attempts': 0, 'successes': 0, 'errors': 0, 'timeouts': 0, 'error_rate': None, 'last_sample_age_seconds': None, 'newest_sample_seq': 0},
                         },
                     }
                     for s in SITES
                 },
             }
 
-        # 4. Automatic p90-driven offload and probe-driven recovery on gnb-2 (gnb-1 & gnb-3 stay LOCAL).
-        # Record a complete healthy Local window, then sustain a latency breach.
-        automatic_start = sim_now[0]
-        for t in (10, 25):
-            sim_now[0] = automatic_start + t
-            current_snap['value'] = _snap(70.0, t)
-            ctrl.poll_once()
-        for t in range(26, 31):
+        # Advance past gnb-2 post-ACK window from step 3b, then sustain a latency breach.
+        automatic_start = sim_now[0] + 20.0
+        for t in range(0, 5):
             sim_now[0] = automatic_start + t
             current_snap['value'] = _snap(220.0, 10 + t)
             ctrl.poll_once()
         _wait_until(lambda: (
-            ctrl.policy.states['gnb-2'].active_route == 'CORE'
-            and _request_envoy(envoy_ports['gnb-2'])[2].get('server_node') == 'core-5g'
+            ctrl.policy.states['gnb-2'].active_route == 'SPREAD'
+            and _request_envoy(envoy_ports['gnb-2'])[1].get('x-mec-route') == 'spread'
         ))
         assert _request_envoy(envoy_ports['gnb-1'])[2].get('server_node') == 'gnb1'
         assert _request_envoy(envoy_ports['gnb-3'])[2].get('server_node') == 'gnb-3'
 
-        # Healthy probes permit recovery at the rate Local previously sustained.
-        for t in range(50, 56):
+        # After post-ACK window (15s), overall p90 <= SLO returns gnb-2 to LOCAL without probe gate.
+        for t in range(25, 30):
             sim_now[0] = automatic_start + t
-            current_snap['value'] = _snap(220.0, 30, probe_p90=90.0, probe_seq=100 + t, core_attempts=20)
+            current_snap['value'] = _snap(220.0, 30, overall_p90=110.0, overall_seq=100 + t)
             ctrl.poll_once()
         _wait_until(lambda: (
             ctrl.policy.states['gnb-2'].active_route == 'LOCAL'
             and _request_envoy(envoy_ports['gnb-2'])[2].get('server_node') == 'gnb-2'
         ))
 
-        # Put gnb-2 back on CORE via automatic offload before testing offloader restart.
-        for t in range(60, 65):
+        # Put gnb-2 back on SPREAD via automatic offload before testing offloader restart.
+        for t in range(45, 50):
             sim_now[0] = automatic_start + t
-            current_snap['value'] = _snap(220.0, 50 + t)
+            current_snap['value'] = _snap(220.0, 200 + t)
             ctrl.poll_once()
         _wait_until(lambda: (
-            ctrl.policy.states['gnb-2'].active_route == 'CORE'
-            and _request_envoy(envoy_ports['gnb-2'])[2].get('server_node') == 'core-5g'
+            ctrl.policy.states['gnb-2'].active_route == 'SPREAD'
+            and _request_envoy(envoy_ports['gnb-2'])[1].get('x-mec-route') == 'spread'
         ))
 
-        # 5. Offloader restart while Envoy is still alive (with gnb-2 on CORE from old epoch!).
+        # 5. Offloader restart while Envoy is still alive (with gnb-2 on SPREAD from old epoch!).
         old_epoch = ctrl.xds.epoch
         admin_srv.shutdown()
         admin_srv.server_close()
@@ -370,10 +442,9 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
         # In REST-JSON xDS, Envoy rejects the invalid config, keeps polling with the old
         # version_info (never ACKing the bad version), and continues serving LOCAL traffic;
         # the controller's ACK timeout marks envoy_update_failed while keeping desired != active.
-        # First wait for gnb-1 to ACK the post-restart LOCAL version.
         _wait_until(lambda: ctrl.policy.states['gnb-1'].active_route == 'LOCAL')
-        bad_ver = ctrl.xds.inject_invalid_rds_for_test('gnb-1', 'CORE')
-        ctrl.policy.states['gnb-1'].desired_route = 'CORE'
+        bad_ver = ctrl.xds.inject_invalid_rds_for_test('gnb-1', 'SPREAD')
+        ctrl.policy.states['gnb-1'].desired_route = 'SPREAD'
         ctrl.policy.states['gnb-1'].pending_update_since = sim_now[0]
         # Allow Envoy several poll cycles to receive and reject the invalid RouteConfiguration.
         time.sleep(1.0)
@@ -381,7 +452,7 @@ def test_real_envoy_rds_eds_manual_auto_restart_and_nack(tmp_path):
         ctrl.poll_once()
         assert ctrl.xds.status_snapshot()['sites']['gnb-1']['acked_version'] != bad_ver
         assert ctrl.policy.states['gnb-1'].envoy_update_failed is True
-        assert ctrl.policy.states['gnb-1'].desired_route == 'CORE'
+        assert ctrl.policy.states['gnb-1'].desired_route == 'SPREAD'
         assert ctrl.policy.states['gnb-1'].active_route == 'LOCAL'
         code, hdrs, body = _request_envoy(envoy_ports['gnb-1'])
         assert code == 200 and hdrs['x-mec-route'] == 'local' and body['server_node'] == 'gnb1'

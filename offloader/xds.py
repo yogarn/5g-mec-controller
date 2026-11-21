@@ -6,7 +6,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from offloader.policy import RouteSwitchBusy, SITES
+from offloader.policy import RouteSwitchBusy, SITES, spread_local_weight
 
 
 RDS_TYPE_URL = 'type.googleapis.com/envoy.config.route.v3.RouteConfiguration'
@@ -21,13 +21,22 @@ def local_eds_service_name(site: str) -> str:
     return f'local-{site}'
 
 
+def spread_eds_service_name(site: str) -> str:
+    return f'spread-{site}'
+
+
 CORE_EDS_SERVICE_NAME = 'core-5g'
 
 
 def build_route_configuration(site: str, route: str, version: str, *, route_timeout: str = '10s') -> dict:
     """Build an Envoy v3 RouteConfiguration for one site with explicit headers and no cross-backend retries."""
-    target_cluster = 'core_backend' if route == 'CORE' else 'local_backend'
-    route_label = 'core' if route == 'CORE' else 'local'
+    route_upper = route.upper()
+    if route_upper == 'SPREAD':
+        target_cluster = spread_eds_service_name(site)
+        route_label = 'spread'
+    else:
+        target_cluster = 'local_backend'
+        route_label = 'local'
     return {
         '@type': RDS_TYPE_URL,
         'name': route_config_name(site),
@@ -97,21 +106,36 @@ def build_route_configuration(site: str, route: str, version: str, *, route_time
     }
 
 
-def build_cluster_load_assignment(service_name: str, endpoints: list[tuple[str, int]]) -> dict:
-    """Build an Envoy v3 ClusterLoadAssignment pinned to explicit Pod IPs."""
-    lb_endpoints = [
-        {
+def build_cluster_load_assignment(service_name: str, endpoints: list[tuple]) -> dict:
+    """Build an Envoy v3 ClusterLoadAssignment pinned to explicit Pod IPs (optionally weighted)."""
+    seen: set[tuple[str, int]] = set()
+    lb_endpoints = []
+    for item in sorted(endpoints):
+        if len(item) == 3:
+            ip, port, weight = item
+            weight_int = int(weight)
+            if weight_int < 1:
+                raise ValueError(f'EDS load_balancing_weight must be >= 1, got {weight_int}')
+        else:
+            ip, port = item
+            weight_int = None
+        key = (str(ip), int(port))
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
             'endpoint': {
                 'address': {
                     'socket_address': {
-                        'address': ip,
-                        'port_value': int(port),
+                        'address': key[0],
+                        'port_value': key[1],
                     }
                 }
             }
         }
-        for ip, port in sorted(endpoints)
-    ]
+        if weight_int is not None:
+            entry['load_balancing_weight'] = weight_int
+        lb_endpoints.append(entry)
     return {
         '@type': EDS_TYPE_URL,
         'cluster_name': service_name,
@@ -140,13 +164,39 @@ class XdsState:
         self._site_last_nack: dict[str, str | None] = {site: None for site in SITES}
         self._invalid_rds_version: dict[str, str | None] = {site: None for site in SITES}
         self._eds_seq: int = 1
-        self._eds_endpoints: dict[str, list[tuple[str, int]]] = {
-            local_eds_service_name(site): [] for site in SITES
-        }
-        self._eds_endpoints[CORE_EDS_SERVICE_NAME] = []
+        self._local_endpoints: dict[str, list[tuple[str, int]]] = {site: [] for site in SITES}
+        self._core_endpoints: list[tuple[str, int]] = []
+        self._eds_endpoints: dict[str, list[tuple]] = self._build_eds_map_locked()
 
     def _ver(self, seq: int) -> str:
         return f'{self.epoch}-{seq}'
+
+    def _spread_count_locked(self) -> int:
+        return sum(1 for r in self._site_routes.values() if r == 'SPREAD')
+
+    def _build_eds_map_locked(self) -> dict[str, list[tuple]]:
+        local_weight = spread_local_weight(self._spread_count_locked())
+        eds_map: dict[str, list[tuple]] = {}
+        core_sorted = sorted(set(self._core_endpoints))
+        eds_map[CORE_EDS_SERVICE_NAME] = core_sorted
+        for site in SITES:
+            local_sorted = sorted(set(self._local_endpoints.get(site, [])))
+            eds_map[local_eds_service_name(site)] = local_sorted
+            local_set = set(local_sorted)
+            spread_eps: list[tuple[str, int, int]] = [
+                (ip, port, local_weight) for ip, port in local_sorted
+            ]
+            for ip, port in core_sorted:
+                if (ip, port) not in local_set:
+                    spread_eps.append((ip, port, 1))
+            eds_map[spread_eds_service_name(site)] = sorted(spread_eps)
+        return eds_map
+
+    def _refresh_eds_locked(self):
+        new_map = self._build_eds_map_locked()
+        if new_map != self._eds_endpoints:
+            self._eds_endpoints = new_map
+            self._eds_seq += 1
 
     def set_site_route(self, site: str, route: str) -> str:
         route = route.upper()
@@ -158,10 +208,12 @@ class XdsState:
                 self._site_routes[site] = route
                 version = self._ver(self._site_seq[site])
                 self._site_version_routes[site][version] = route
+                # Recompute weighted spread-gnb-N endpoints when k changes.
+                self._refresh_eds_locked()
                 return version
             return self._ver(self._site_seq[site])
 
-    def inject_invalid_rds_for_test(self, site: str, desired_route: str = 'CORE') -> str:
+    def inject_invalid_rds_for_test(self, site: str, desired_route: str = 'SPREAD') -> str:
         """Test-only helper: bump site version and serve an invalid RouteConfiguration so Envoy NACKs."""
         if site not in self._site_routes:
             raise ValueError(f'unknown site: {site}')
@@ -171,6 +223,7 @@ class XdsState:
             version = self._ver(self._site_seq[site])
             self._site_version_routes[site][version] = desired_route.upper()
             self._invalid_rds_version[site] = version
+            self._refresh_eds_locked()
             return version
 
     def reset_routes(self) -> dict[str, str]:
@@ -184,22 +237,21 @@ class XdsState:
                 self._site_last_nack[site] = None
                 self._invalid_rds_version[site] = None
                 versions[site] = version
+            self._refresh_eds_locked()
         return versions
 
     def update_endpoints(self, local_by_site: dict[str, list[tuple[str, int]]], core_endpoints: list[tuple[str, int]]):
-        new_map = {
-            local_eds_service_name(site): sorted(set(local_by_site.get(site, [])))
-            for site in SITES
-        }
-        new_map[CORE_EDS_SERVICE_NAME] = sorted(set(core_endpoints))
         with self.lock:
-            if new_map != self._eds_endpoints:
-                self._eds_endpoints = new_map
-                self._eds_seq += 1
+            self._local_endpoints = {
+                site: sorted(set(local_by_site.get(site, [])))
+                for site in SITES
+            }
+            self._core_endpoints = sorted(set(core_endpoints))
+            self._refresh_eds_locked()
 
     def get_endpoints_snapshot(self) -> dict[str, list[tuple[str, int]]]:
         with self.lock:
-            return {k: list(v) for k, v in self._eds_endpoints.items()}
+            return {k: [(e[0], e[1]) for e in v] for k, v in self._eds_endpoints.items()}
 
     def _site_from_rds_request(self, req: dict) -> str | None:
         names = req.get('resource_names') or []
@@ -301,6 +353,7 @@ class XdsState:
 
     def status_snapshot(self) -> dict:
         with self.lock:
+            k = self._spread_count_locked()
             return {
                 'epoch': self.epoch,
                 'sites': {
@@ -315,7 +368,9 @@ class XdsState:
                     for site in SITES
                 },
                 'eds_version': self._ver(self._eds_seq),
-                'endpoints': {k: [f'{ip}:{port}' for ip, port in v] for k, v in self._eds_endpoints.items()},
+                'spread_sites': k,
+                'spread_local_weight': spread_local_weight(k),
+                'endpoints': {k_name: [f'{e[0]}:{e[1]}' for e in v] for k_name, v in self._eds_endpoints.items()},
             }
 
 

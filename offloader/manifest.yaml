@@ -56,15 +56,11 @@ data:
     collector_timeout_seconds: 1.0
     poll_interval_seconds: 1.0
     offload_p90_threshold_ms: 150.0
-    recovery_p90_threshold_ms: 125.0
     min_samples: 15
     min_error_samples: 5
     offload_error_rate_threshold: 0.5
     breach_duration_seconds: 5.0
     min_fresh_updates: 2
-    probe_min_samples: 5
-    probe_max_error_rate: 0.1
-    recovery_stable_seconds: 10.0
     min_dwell_seconds: 15.0
     route_switch_interval_seconds: 5.0
     stale_after_seconds: 5.0

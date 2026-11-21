@@ -1,4 +1,4 @@
-"""Lightweight local recovery probe worker (active only while a site is in CORE).
+"""Lightweight diagnostic local probe worker (active while a site is in SPREAD; not a decision gate).
 
 Measured path documentation:
 - Probe traffic originates from the Core offloader process, traverses the Core-to-gNB

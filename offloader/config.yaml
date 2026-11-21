@@ -22,26 +22,22 @@ collector_timeout_seconds: 1.0
 # 1 Hz polling cadence (never on the per-request data plane).
 poll_interval_seconds: 1.0
 
-# The p90 trigger is above 150 ms and recovery is at or below 125 ms,
-# giving 25 ms of hysteresis.
+# The p90 trigger enters SPREAD above 150 ms (SLO) and returns to LOCAL when
+# overall post-ACK p90 is at or below 150 ms (SLO) with dwell and fresh updates.
 offload_p90_threshold_ms: 150.0
-recovery_p90_threshold_ms: 125.0
 min_samples: 15
 min_error_samples: 5
 offload_error_rate_threshold: 0.5
 breach_duration_seconds: 5.0
 min_fresh_updates: 2
-probe_min_samples: 5
-probe_max_error_rate: 0.1
-recovery_stable_seconds: 10.0
 min_dwell_seconds: 15.0
 route_switch_interval_seconds: 5.0
 stale_after_seconds: 5.0
 envoy_ack_timeout_seconds: 5.0
 envoy_route_timeout: 10s
 
-# Recovery probes (sent only while a site is in CORE; forced to local_backend via X-MEC-Probe: local).
-# Measured path: Core offloader -> site Envoy ingress -> local_backend inference pod.
+# Diagnostic local probes (sent while a site is in SPREAD; forced to local_backend via X-MEC-Probe: local).
+# Probes are diagnostic only and do not gate SPREAD -> LOCAL recovery.
 probe_interval_seconds: 1.0
 probe_timeout_seconds: 2.0
 probe_image_path: /app/apps/pedestrian-detection/images/bus.jpg

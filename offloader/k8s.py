@@ -32,7 +32,12 @@ def filter_pinned_endpoints(
     core_app_label: str = 'mec-placement-pedestrian-detection-core',
     container_port: int = 5000,
 ) -> tuple[dict[str, list[tuple[str, int]]], list[tuple[str, int]]]:
-    """Partition ready Pod endpoints strictly by nodeName and workload role label."""
+    """Partition ready Pod endpoints strictly by nodeName and workload role label.
+
+    Ready managed edge pods scheduled on core_node are included in core_endpoints
+    so they serve both the core-5g cluster and the Core portion of spread-gnb-N
+    clusters. Not-ready or terminating pods are excluded and IPs are deduplicated.
+    """
     node_to_site = {node: site for site, node in site_nodes.items()}
     local_by_site: dict[str, list[tuple[str, int]]] = {site: [] for site in SITES}
     core_endpoints: list[tuple[str, int]] = []

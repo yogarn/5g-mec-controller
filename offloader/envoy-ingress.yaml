@@ -83,6 +83,19 @@ data:
                 refresh_delay: 1s
                 cluster_names:
                   - offloader_xds
+        - name: spread-gnb-1
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: spread-gnb-1
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
     admin:
       address:
         socket_address:
@@ -240,6 +253,19 @@ data:
                 refresh_delay: 1s
                 cluster_names:
                   - offloader_xds
+        - name: spread-gnb-2
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: spread-gnb-2
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
     admin:
       address:
         socket_address:
@@ -389,6 +415,19 @@ data:
           lb_policy: ROUND_ROBIN
           eds_cluster_config:
             service_name: core-5g
+            eds_config:
+              resource_api_version: V3
+              api_config_source:
+                api_type: REST
+                transport_api_version: V3
+                refresh_delay: 1s
+                cluster_names:
+                  - offloader_xds
+        - name: spread-gnb-3
+          type: EDS
+          lb_policy: ROUND_ROBIN
+          eds_cluster_config:
+            service_name: spread-gnb-3
             eds_config:
               resource_api_version: V3
               api_config_source:

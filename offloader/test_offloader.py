@@ -15,14 +15,22 @@ from collector.server import Collector, load_settings, make_handler
 from experiments import campaign
 from offloader.budget import VerticalBudget
 from offloader.k8s import filter_pinned_endpoints
-from offloader.policy import OffloadConfig, SITES, VerticalOffloadPolicy
+from offloader.policy import (
+    OffloadConfig,
+    SITES,
+    VerticalOffloadPolicy,
+    spread_core_ratio,
+    spread_local_weight,
+)
 from offloader.scaler import PodAccounting, VerticalDynamicScaler, account_edge_pods
 from offloader.server import VerticalOffloadController
 from offloader.xds import (
     CORE_EDS_SERVICE_NAME,
     XdsState,
+    build_cluster_load_assignment,
     local_eds_service_name,
     route_config_name,
+    spread_eds_service_name,
     start_admin_server,
     start_xds_server,
 )
@@ -62,13 +70,16 @@ def _make_snapshot(site_overrides=None):
     sites = {}
     for site, node in (('gnb-1', 'gnb1'), ('gnb-2', 'gnb-2'), ('gnb-3', 'gnb-3')):
         ov = site_overrides.get(site, {})
+        user = {
+            'local': ov.get('user_local', _make_bucket(p90_ms=80.0, seq=1)),
+            'core': ov.get('user_core', _make_bucket(status='empty', p90_ms=None, attempts=0, successes=0, age=None, seq=0)),
+            'unknown': _make_bucket(status='empty', p90_ms=None, attempts=0, successes=0, age=None, seq=0),
+        }
+        if 'user_overall' in ov:
+            user['overall'] = ov['user_overall']
         sites[site] = {
             'node': node,
-            'user': {
-                'local': ov.get('user_local', _make_bucket(p90_ms=80.0, seq=1)),
-                'core': ov.get('user_core', _make_bucket(status='empty', p90_ms=None, attempts=0, successes=0, age=None, seq=0)),
-                'unknown': _make_bucket(status='empty', p90_ms=None, attempts=0, successes=0, age=None, seq=0),
-            },
+            'user': user,
             'probe': {
                 'local': ov.get('probe_local', _make_bucket(status='empty', p90_ms=None, attempts=0, successes=0, age=None, seq=0)),
             },
@@ -82,194 +93,317 @@ def _make_snapshot(site_overrides=None):
     }
 
 
-@pytest.mark.parametrize(('hot_site', 'more_capacity'), [('gnb-1', False), ('gnb-2', True), ('gnb-3', False)])
-def test_single_site_breach_requires_supported_traffic_rate_and_healthy_probes(hot_site, more_capacity):
+@pytest.mark.parametrize('hot_site', SITES)
+def test_single_site_enter_spread_and_exit_on_overall_p90_without_probe_gate(hot_site):
     cfg = OffloadConfig(
         mode='vertical',
         offload_p90_threshold_ms=150.0,
-        recovery_p90_threshold_ms=125.0,
         min_samples=15,
         breach_duration_seconds=5.0,
         min_fresh_updates=2,
-        probe_min_samples=5,
-        recovery_stable_seconds=5.0,
-        min_dwell_seconds=10.0,
+        min_dwell_seconds=15.0,
     )
     policy = VerticalOffloadPolicy(cfg)
     local_ready = {s: 1 for s in SITES}
     core_ready = 3
     wall_start = 1700000000.0
     policy.record_envoy_ack(hot_site, 'LOCAL', '1', wall_start)
-    for sec in (0, 15):
-        snap = _make_snapshot({hot_site: {'user_local': _make_bucket(attempts=75, successes=75)}})
-        snap['generated_at'] = wall_start + sec
-        policy.evaluate(float(sec), snap, local_ready, core_ready)
 
-    # Four 5 RPS users arrive at the hot site, which previously handled one.
+    # Local p90 breaches SLO (>150ms) across breach_duration with fresh updates.
+    enter_events = []
     for sec in range(16, 22):
         snap = _make_snapshot({
             hot_site: {'user_local': _make_bucket(p90_ms=210.0, attempts=20, successes=20, seq=10 + sec)},
         })
-        policy.evaluate(float(sec), snap, local_ready, core_ready)
+        snap['generated_at'] = wall_start + sec
+        enter_events.extend(policy.evaluate(float(sec), snap, local_ready, core_ready))
 
-    # Only hot_site switches to CORE; the other two sites stay LOCAL.
     for s in SITES:
         if s == hot_site:
-            assert policy.states[s].desired_route == 'CORE'
+            assert policy.states[s].desired_route == 'SPREAD'
             assert policy.states[s].last_decision_reason == 'local_p90_breach'
         else:
             assert policy.states[s].desired_route == 'LOCAL'
 
-    # Simulate Envoy ACK for hot_site.
-    ack_ev = policy.record_envoy_ack(hot_site, 'CORE', '2', wall_start + 22)
+    rd = [e for e in enter_events if e.event == 'route_decision' and e.site == hot_site]
+    assert len(rd) == 1
+    assert rd[0].old_route == 'LOCAL' and rd[0].new_route == 'SPREAD'
+    assert rd[0].extra['c'] == 3 and rd[0].extra['x_i'] == 1 and rd[0].extra['k'] == 1
+    assert rd[0].extra['core_ratio'] == pytest.approx(0.75, abs=1e-6)
+
+    # Simulate Envoy ACK for hot_site entering SPREAD.
+    ack_ev = policy.record_envoy_ack(hot_site, 'SPREAD', '2', wall_start + 22, monotonic_now=22.0)
     assert ack_ev is not None and ack_ev.event == 'envoy_ack'
-    assert policy.states[hot_site].active_route == 'CORE'
+    assert ack_ev.extra['k'] == 1 and ack_ev.extra['c'] == 3 and ack_ev.extra['x_i'] == 1
+    assert policy.states[hot_site].active_route == 'SPREAD'
 
-    def tick(sec, core_attempts, probe_p90=125):
-        snap = _make_snapshot({
-            hot_site: {
-                'user_local': _make_bucket(status='empty', attempts=0, successes=0),
-                'user_core': _make_bucket(attempts=core_attempts, successes=core_attempts, seq=100 + sec),
-                'probe_local': _make_bucket(p90_ms=probe_p90, seq=200 + sec),
-            }
-        })
+    def tick(sec, overall_p90, *, probe_p90=None):
+        ov = {
+            'user_overall': _make_bucket(p90_ms=overall_p90, attempts=25, successes=25, seq=100 + sec),
+        }
+        if probe_p90 is not None:
+            ov['probe_local'] = _make_bucket(p90_ms=probe_p90, seq=200 + sec)
+        snap = _make_snapshot({hot_site: ov})
         snap['generated_at'] = wall_start + sec
-        policy.evaluate(float(sec), snap, local_ready, core_ready)
+        return policy.evaluate(float(sec), snap, local_ready, core_ready)
 
-    tick(36, 75)
-    assert policy.states[hot_site].recovery_started_at is None
-    for sec in range(37, 44):
-        tick(sec, 300)
-    assert policy.states[hot_site].desired_route == 'CORE'
-    assert policy.states[hot_site].last_status_note == 'recovery_waiting_for_supported_traffic_rate'
+    # Before post-ACK window completes (22 + 15 = 37): must hold SPREAD even if overall p90 <= SLO.
+    evs = tick(35, 110.0)
+    assert policy.states[hot_site].desired_route == 'SPREAD'
+    assert policy.states[hot_site].last_status_note == 'spread_waiting_post_ack'
+    assert any(e.event == 'hold_route' and e.reason == 'spread_waiting_post_ack' and e.extra['k'] == 1 for e in evs)
 
-    # A brief drop in demand, or a probe above the cutoff, cannot return traffic.
-    tick(44, 75)
-    tick(45, 300)
-    tick(46, 75, probe_p90=126)
-    assert policy.states[hot_site].recovery_started_at is None
+    # After post-ACK window, overall p90 > SLO (160ms): must NOT exit SPREAD.
+    for sec in range(37, 42):
+        tick(sec, 160.0)
+    assert policy.states[hot_site].desired_route == 'SPREAD'
+    assert policy.states[hot_site].last_status_note == 'spread_p90_above_slo'
 
-    if more_capacity:
-        local_ready[hot_site] += 1
-    for sec in range(47, 53):
-        tick(sec, 150 if more_capacity else 75)
-
+    # Overall p90 <= SLO (150ms) with NO probe at all (and unhealthy probe on next tick): exits to LOCAL!
+    tick(42, 150.0, probe_p90=None)
+    assert policy.states[hot_site].desired_route == 'SPREAD'  # 1 fresh update < min_fresh_updates(2)
+    exit_evs = tick(43, 145.0, probe_p90=999.0)
     assert policy.states[hot_site].desired_route == 'LOCAL'
-    assert policy.states[hot_site].last_decision_reason == 'local_probe_recovered'
-    for s in SITES:
-        if s != hot_site:
-            assert policy.states[s].desired_route == 'LOCAL'
+    assert policy.states[hot_site].last_decision_reason == 'spread_overall_p90_recovered'
+    exit_rd = [e for e in exit_evs if e.event == 'route_decision' and e.site == hot_site]
+    assert len(exit_rd) == 1
+    assert exit_rd[0].extra['c'] == 3 and exit_rd[0].extra['x_i'] == 1 and exit_rd[0].extra['k'] == 1
 
 
-@pytest.mark.parametrize('signal', ['latency', 'errors'])
-@pytest.mark.parametrize('local_history', [{}, {2: 60, 4: 60, 5: 10}], ids=['no-history', 'low-load-history'])
-def test_core_overload_returns_after_local_pods_grow_even_without_supported_rate(signal, local_history):
-    policy = VerticalOffloadPolicy()
-    site = 'gnb-2'
-    state = policy.states[site]
-    state.desired_route = 'CORE'
-    state.last_transition_time = 0
-    state.offload_ready_count = 2
-    state.healthy_local_rps.update(local_history)
+def test_spread_weights_and_core_ratios_match_specification_examples():
+    # Example 1: c=3, x=3 for all sites -> k=1: 50%, k=2: 33.3%, k=3: 25%.
+    assert spread_core_ratio(3, 3, 1) == pytest.approx(0.5, abs=1e-4)
+    assert spread_core_ratio(3, 3, 2) == pytest.approx(1 / 3, abs=1e-4)
+    assert spread_core_ratio(3, 3, 3) == pytest.approx(0.25, abs=1e-4)
+
+    # Example 2: c=3, x=(gnb-1:1, gnb-2:3, gnb-3:2)
+    # k=3 -> 50%, 25%, 33.3%
+    assert spread_core_ratio(3, 1, 3) == pytest.approx(0.5, abs=1e-4)
+    assert spread_core_ratio(3, 3, 3) == pytest.approx(0.25, abs=1e-4)
+    assert spread_core_ratio(3, 2, 3) == pytest.approx(1 / 3, abs=1e-4)
+    # Only gnb-2 and gnb-3 SPREAD (k=2) -> 33.3% and 42.9%
+    assert spread_core_ratio(3, 3, 2) == pytest.approx(1 / 3, abs=1e-4)
+    assert spread_core_ratio(3, 2, 2) == pytest.approx(3 / 7, abs=1e-4)
+
+    # Verify EDS ClusterLoadAssignment weights dynamically recompute as k changes.
+    xds = XdsState(epoch='ep1')
+    local_eps = {
+        'gnb-1': [('10.1.0.1', 5000)],
+        'gnb-2': [('10.2.0.1', 5000), ('10.2.0.2', 5000), ('10.2.0.3', 5000)],
+        'gnb-3': [('10.3.0.1', 5000), ('10.3.0.2', 5000)],
+    }
+    core_eps = [('10.9.0.1', 5000), ('10.9.0.2', 5000), ('10.9.0.3', 5000)]
+    xds.update_endpoints(local_eps, core_eps)
+
+    def _eds_weights(site):
+        status, body = xds.handle_eds({'version_info': '', 'resource_names': [spread_eds_service_name(site)]})
+        assert status == 200
+        lb_eps = body['resources'][0]['endpoints'][0]['lb_endpoints']
+        return {
+            e['endpoint']['address']['socket_address']['address']: e['load_balancing_weight']
+            for e in lb_eps
+        }
+
+    # k=1 (gnb-2 enters SPREAD): local weight=1, core weight=1 -> core share = 3/(3+3)=50%
+    xds.set_site_route('gnb-2', 'SPREAD')
+    w2 = _eds_weights('gnb-2')
+    assert all(v >= 1 for v in w2.values())
+    assert w2['10.2.0.1'] == 1 and w2['10.9.0.1'] == 1
+
+    # k=2 (gnb-3 enters SPREAD): local weight=2, core weight=1 -> gnb-2: 3/9=33.3%, gnb-3: 3/7=42.9%
+    eds_v_before = xds.status_snapshot()['eds_version']
+    xds.set_site_route('gnb-3', 'SPREAD')
+    assert xds.status_snapshot()['eds_version'] != eds_v_before
+    w2 = _eds_weights('gnb-2')
+    w3 = _eds_weights('gnb-3')
+    assert w2['10.2.0.1'] == 2 and w2['10.9.0.1'] == 1
+    assert w3['10.3.0.1'] == 2 and w3['10.9.0.1'] == 1
+    assert sum(w2[ip] for ip, _ in core_eps) / sum(w2.values()) == pytest.approx(1 / 3, abs=1e-4)
+    assert sum(w3[ip] for ip, _ in core_eps) / sum(w3.values()) == pytest.approx(3 / 7, abs=1e-4)
+
+    # k=3 (gnb-1 enters SPREAD): local weight=3, core weight=1 -> 50%, 25%, 33.3%
+    xds.set_site_route('gnb-1', 'SPREAD')
+    for site, expected_ratio in (('gnb-1', 0.5), ('gnb-2', 0.25), ('gnb-3', 1 / 3)):
+        ws = _eds_weights(site)
+        for ip, _ in local_eps[site]:
+            assert ws[ip] == 3
+        for ip, _ in core_eps:
+            assert ws[ip] == 1
+        assert sum(ws[ip] for ip, _ in core_eps) / sum(ws.values()) == pytest.approx(expected_ratio, abs=1e-4)
+
+    # gnb-1 exits SPREAD -> k drops back to 2 -> gnb-2 and gnb-3 local weights recomputed to 2.
+    xds.set_site_route('gnb-1', 'LOCAL')
+    assert _eds_weights('gnb-2')['10.2.0.1'] == 2
+    assert _eds_weights('gnb-3')['10.3.0.1'] == 2
+
+
+def test_k_change_restarts_post_ack_window_for_other_spread_sites():
+    cfg = OffloadConfig(breach_duration_seconds=1.0, min_fresh_updates=2, min_dwell_seconds=5.0, route_switch_interval_seconds=5.0)
+    policy = VerticalOffloadPolicy(cfg)
     wall_start = 1700000000.0
-    policy.record_envoy_ack(site, 'CORE', '2', wall_start)
-    local_ready = {s: 2 for s in SITES}
+    local_ready = {'gnb-1': 1, 'gnb-2': 3, 'gnb-3': 2}
 
-    def tick(sec, *, core_age=0.2, probe_p90=125):
-        overload = (
-            _make_bucket(p90_ms=1900, seq=100 + sec, age=core_age)
-            if signal == 'latency'
-            else _make_bucket(
-                status='no_success', p90_ms=None, attempts=5, successes=0, errors=5,
-                seq=100 + sec, age=core_age,
-            )
-        )
+    # gnb-1 is already in SPREAD and its post-ACK window has elapsed (confirmed at t=0, now t=20).
+    st1 = policy.states['gnb-1']
+    st1.desired_route = st1.active_route = 'SPREAD'
+    st1.last_transition_time = 0.0
+    st1.spread_confirmed_since = wall_start
+
+    # gnb-2 breaches local SLO and enters SPREAD at t=21 (k: 1 -> 2).
+    for sec in (20, 21):
         snap = _make_snapshot({
-            site: {'user_core': overload, 'probe_local': _make_bucket(p90_ms=probe_p90, seq=200 + sec)},
+            'gnb-1': {'user_overall': _make_bucket(p90_ms=160.0, seq=sec)},
+            'gnb-2': {'user_local': _make_bucket(p90_ms=220.0, seq=sec)},
         })
         snap['generated_at'] = wall_start + sec
-        return policy.evaluate(float(sec), snap, local_ready, 3)
-
-    for sec in range(15, 32):
-        tick(sec)
-    assert state.core_overload_confirmed
-    assert state.recovery_started_at is None
-
-    local_ready[site] = 9
-    tick(32, core_age=6)
-    assert not state.core_overload_confirmed
-    for sec in range(33, 40):
-        tick(sec, probe_p90=126)
-    assert state.core_overload_confirmed
-    assert state.recovery_started_at is None
-
-    for sec in range(40, 50):
-        tick(sec)
-        assert state.desired_route == 'CORE'
-    event, = tick(50)
-    assert event.reason == 'core_overloaded_local_capacity'
-    assert event.extra['offload_local_ready_endpoints'] == 2
-    assert event.local_ready_endpoints == 9
-    assert state.desired_route == 'LOCAL'
-    assert state.offload_ready_count is None
-
-    # Another offload at nine pods records the new count. The same capacity cannot trigger another return.
-    policy.record_envoy_ack(site, 'LOCAL', '3', wall_start + 65)
-    for sec in range(65, 85):
-        snap = _make_snapshot({site: {'user_local': _make_bucket(p90_ms=210, seq=300 + sec)}})
         policy.evaluate(float(sec), snap, local_ready, 3)
-    assert state.desired_route == 'CORE'
-    assert state.offload_ready_count == 9
-    policy.record_envoy_ack(site, 'CORE', '4', wall_start + 85)
-    for sec in range(100, 120):
-        tick(sec)
-    assert state.desired_route == 'CORE'
+
+    assert policy.states['gnb-2'].desired_route == 'SPREAD'
+    # gnb-1's post-ACK window MUST have been restarted to wall_start + 21!
+    assert st1.spread_confirmed_since == wall_start + 21
+
+    # ACK gnb-2 at t=22.
+    policy.record_envoy_ack('gnb-2', 'SPREAD', '2', wall_start + 22, monotonic_now=22.0)
+
+    # Even when gnb-1 overall p90 drops to 90ms at t=30 (< 21+15=36), gnb-1 MUST wait for its restarted post-ACK window.
+    for sec in range(28, 35):
+        snap = _make_snapshot({
+            'gnb-1': {'user_overall': _make_bucket(p90_ms=90.0, seq=100 + sec)},
+            'gnb-2': {'user_overall': _make_bucket(p90_ms=180.0, seq=100 + sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        policy.evaluate(float(sec), snap, local_ready, 3)
+    assert st1.desired_route == 'SPREAD'
+    assert st1.last_status_note == 'spread_waiting_post_ack'
+
+    # Once both gnb-1 restarted post-ACK (36) and gnb-2 post-ACK (37) complete, gnb-1 can exit to LOCAL.
+    for sec in (37, 38):
+        snap = _make_snapshot({
+            'gnb-1': {'user_overall': _make_bucket(p90_ms=90.0, seq=200 + sec)},
+            'gnb-2': {'user_overall': _make_bucket(p90_ms=180.0, seq=200 + sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        policy.evaluate(float(sec), snap, local_ready, 3)
+    assert st1.desired_route == 'LOCAL'
 
 
-@pytest.mark.parametrize(
-    ('first_route', 'second_route'),
-    [('CORE', 'CORE'), ('CORE', 'LOCAL'), ('LOCAL', 'CORE'), ('LOCAL', 'LOCAL')],
-)
-def test_runtime_switches_share_one_interval_after_ack(first_route, second_route):
-    policy = VerticalOffloadPolicy(OffloadConfig(breach_duration_seconds=1, recovery_stable_seconds=1))
-    routes = {'gnb-1': first_route, 'gnb-2': second_route}
+def test_two_sites_eligible_to_exit_picks_largest_core_ratio_then_site_name_and_serializes():
+    cfg = OffloadConfig(breach_duration_seconds=1.0, min_fresh_updates=2, min_dwell_seconds=5.0, route_switch_interval_seconds=5.0)
+    policy = VerticalOffloadPolicy(cfg)
     wall_start = 1700000000.0
-    for site, route in routes.items():
-        if route == 'LOCAL':
-            policy.states[site].desired_route = 'CORE'
-            policy.states[site].offload_ready_count = 1
-            policy.record_envoy_ack(site, 'CORE', '1', wall_start)
+    # gnb-2 has x=3 (core_ratio=3/9=33.3%), gnb-3 has x=2 (core_ratio=3/7=42.9%) -> gnb-3 MUST exit first!
+    local_ready = {'gnb-1': 1, 'gnb-2': 3, 'gnb-3': 2}
+    for s in ('gnb-2', 'gnb-3'):
+        st = policy.states[s]
+        st.desired_route = st.active_route = 'SPREAD'
+        st.last_transition_time = 0.0
+        st.spread_confirmed_since = wall_start
 
     def tick(sec):
-        overrides = {}
-        for site, route in routes.items():
-            if route == 'CORE':
-                overrides[site] = {'user_local': _make_bucket(p90_ms=220 if sec >= 20 else 80, seq=sec)}
-            else:
-                overrides[site] = {
-                    'user_core': _make_bucket(p90_ms=1800, seq=sec),
-                    'probe_local': _make_bucket(p90_ms=40, seq=sec),
-                }
-        snapshot = _make_snapshot(overrides)
-        snapshot['generated_at'] = wall_start + sec
-        events = policy.evaluate(sec, snapshot, dict.fromkeys(SITES, 2), 3)
-        return [(event.site, event.new_route) for event in events if event.event == 'route_decision']
+        snap = _make_snapshot({
+            'gnb-2': {'user_overall': _make_bucket(p90_ms=100.0, seq=sec)},
+            'gnb-3': {'user_overall': _make_bucket(p90_ms=100.0, seq=sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        return [e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision']
 
-    # A breaching site must not add load to a CORE pool that another site already reports as
-    # overloaded, so in that case the failback happens first and the offload follows it.
-    first_site, first_target, second_site, second_target = 'gnb-1', first_route, 'gnb-2', second_route
-    if (first_route, second_route) == ('CORE', 'LOCAL'):
-        first_site, first_target, second_site, second_target = 'gnb-2', 'LOCAL', 'gnb-1', 'CORE'
+    assert tick(20) == []  # 1st fresh update
+    evs = tick(21)         # 2nd fresh update: both eligible, only gnb-3 (higher core_ratio) exits!
+    assert [(e.site, e.new_route) for e in evs] == [('gnb-3', 'LOCAL')]
+    assert policy.states['gnb-2'].desired_route == 'SPREAD'
+
+    # gnb-2 cannot exit before gnb-3 ACK + post-ACK window (15s).
+    assert tick(22) == []
+    policy.record_envoy_ack('gnb-3', 'LOCAL', '2', wall_start + 23, monotonic_now=23.0)
+    for sec in range(24, 38):
+        assert tick(sec) == []
+    # At t=38 (gnb-3 post-ACK 23+15=38 finishes, and gnb-2 already collected >=2 fresh updates since its restarted post-ACK 21+15=36), gnb-2 exits.
+    evs2 = tick(38)
+    assert [(e.site, e.new_route) for e in evs2] == [('gnb-2', 'LOCAL')]
+
+    # Tie-breaker test: identical core_ratio -> lexicographical site name order (gnb-1 before gnb-2).
+    policy2 = VerticalOffloadPolicy(cfg)
+    for s in ('gnb-1', 'gnb-2'):
+        st = policy2.states[s]
+        st.desired_route = st.active_route = 'SPREAD'
+        st.last_transition_time = 0.0
+        st.spread_confirmed_since = wall_start
+    equal_ready = {'gnb-1': 2, 'gnb-2': 2, 'gnb-3': 2}
+    for sec in (20, 21):
+        snap = _make_snapshot({
+            'gnb-1': {'user_overall': _make_bucket(p90_ms=110.0, seq=sec)},
+            'gnb-2': {'user_overall': _make_bucket(p90_ms=110.0, seq=sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        out = [e for e in policy2.evaluate(float(sec), snap, equal_ready, 3) if e.event == 'route_decision']
+    assert [(e.site, e.new_route) for e in out] == [('gnb-1', 'LOCAL')]
+
+
+def test_no_flip_flop_when_p90_oscillates_around_slo():
+    cfg = OffloadConfig(
+        offload_p90_threshold_ms=150.0,
+        breach_duration_seconds=5.0,
+        min_fresh_updates=2,
+        min_dwell_seconds=15.0,
+        route_switch_interval_seconds=5.0,
+    )
+    policy = VerticalOffloadPolicy(cfg)
+    wall_start = 1700000000.0
+    local_ready = {s: 2 for s in SITES}
+    policy.record_envoy_ack('gnb-1', 'LOCAL', '1', wall_start)
+
+    transitions = []
+    # Oscillate p90 around 150ms every second (145, 155, 145, 155, ...) for 60 seconds while LOCAL.
+    for sec in range(1, 61):
+        p90 = 155.0 if sec % 2 == 1 else 145.0
+        snap = _make_snapshot({
+            'gnb-1': {'user_local': _make_bucket(p90_ms=p90, seq=sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        transitions.extend(e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision')
+    assert transitions == []
+    assert policy.states['gnb-1'].desired_route == 'LOCAL'
+
+    # Now oscillate while in SPREAD (145, 155, 145, 155, ...) after post-ACK: must NOT exit or flip-flop!
+    st = policy.states['gnb-1']
+    st.desired_route = st.active_route = 'SPREAD'
+    st.last_transition_time = 60.0
+    st.spread_confirmed_since = wall_start + 60.0
+    for sec in range(76, 136):
+        p90 = 145.0 if sec % 2 == 0 else 155.0
+        snap = _make_snapshot({
+            'gnb-1': {'user_overall': _make_bucket(p90_ms=p90, seq=100 + sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        transitions.extend(e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision')
+    assert transitions == []
+    assert policy.states['gnb-1'].desired_route == 'SPREAD'
+
+
+def test_runtime_switches_serialize_across_ack_and_post_ack_window():
+    policy = VerticalOffloadPolicy(OffloadConfig(breach_duration_seconds=1.0, min_dwell_seconds=5.0, route_switch_interval_seconds=5.0))
+    wall_start = 1700000000.0
+    local_ready = dict.fromkeys(SITES, 2)
+
+    def tick(sec):
+        snap = _make_snapshot({
+            'gnb-1': {'user_local': _make_bucket(p90_ms=220.0 if sec >= 20 else 80.0, seq=sec)},
+            'gnb-2': {'user_local': _make_bucket(p90_ms=220.0 if sec >= 20 else 80.0, seq=sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        return [(e.site, e.new_route) for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision']
 
     assert tick(19) == []
     assert tick(20) == []
-    assert tick(21) == [(first_site, first_target)]
-    for sec in (22, 23):
+    assert tick(21) == [('gnb-1', 'SPREAD')]
+    # Pending ACK blocks gnb-2.
+    assert tick(22) == []
+    assert tick(23) == []
+    policy.record_envoy_ack('gnb-1', 'SPREAD', '2', wall_start + 24, monotonic_now=24.0)
+    # Post-ACK window (15s after 24 -> 39) blocks gnb-2 even after 5s switch interval.
+    for sec in range(24, 39):
         assert tick(sec) == []
-    policy.record_envoy_ack(first_site, first_target, '2', wall_start + 24, monotonic_now=24)
-    for sec in range(24, 29):
-        assert tick(sec) == []
-    assert tick(29) == [(second_site, second_target)]
+    assert tick(39) == [('gnb-2', 'SPREAD')]
 
 
 def test_min_samples_and_no_duplicate_rolling_window_trigger():
@@ -309,7 +443,7 @@ def test_total_failure_error_rate_triggers_fallback():
             }
         })
         policy.evaluate(float(sec), snap, local_ready, 3)
-    assert policy.states['gnb-1'].desired_route == 'CORE'
+    assert policy.states['gnb-1'].desired_route == 'SPREAD'
     assert policy.states['gnb-1'].last_decision_reason == 'local_error_rate_breach'
 
 
@@ -352,11 +486,11 @@ def test_core_unready_blocks_offload_and_fails_back_if_core_lost():
             'gnb-1': {'user_local': _make_bucket(p90_ms=260.0, attempts=20, successes=20, seq=10 + sec)},
         })
         policy.evaluate(float(sec), snap, local_ready, core_ready_count=2)
-    assert policy.states['gnb-1'].desired_route == 'CORE'
+    assert policy.states['gnb-1'].desired_route == 'SPREAD'
 
     # Core loss still obeys global pacing, including when the previous ACK times out.
     assert not policy.evaluate(10.0, _make_snapshot(), local_ready, core_ready_count=0)
-    assert policy.states['gnb-1'].desired_route == 'CORE'
+    assert policy.states['gnb-1'].desired_route == 'SPREAD'
     events = policy.evaluate(12.0, _make_snapshot(), local_ready, core_ready_count=0)
     assert policy.states['gnb-1'].desired_route == 'LOCAL'
     assert any(ev.site == 'gnb-1' and ev.reason == 'core_backend_unready_failback' for ev in events)
@@ -373,13 +507,13 @@ def test_envoy_update_failure_tracks_desired_and_active_separately():
         })
         policy.evaluate(float(sec), snap, local_ready, 3)
 
-    assert policy.states['gnb-2'].desired_route == 'CORE'
+    assert policy.states['gnb-2'].desired_route == 'SPREAD'
     assert policy.states['gnb-2'].active_route == 'LOCAL'
 
-    # Envoy NACK keeps active_route at LOCAL while desired_route remains CORE.
+    # Envoy NACK keeps active_route at LOCAL while desired_route remains SPREAD.
     nack_ev = policy.record_envoy_nack('gnb-2', 'invalid route config', 4.0)
     assert nack_ev.event == 'envoy_update_failed'
-    assert nack_ev.desired_route == 'CORE'
+    assert nack_ev.desired_route == 'SPREAD'
     assert nack_ev.active_route == 'LOCAL'
     assert policy.states['gnb-2'].envoy_update_failed is True
 
@@ -392,7 +526,7 @@ def test_envoy_update_failure_tracks_desired_and_active_separately():
         policy.evaluate(float(sec), snap, local_ready, 3)
     events = policy.evaluate(10.0, _make_snapshot(), local_ready, 3)
     assert any(ev.site == 'gnb-3' and ev.event == 'envoy_update_failed' and ev.reason == 'envoy_ack_timeout' for ev in events)
-    assert policy.states['gnb-3'].desired_route == 'CORE'
+    assert policy.states['gnb-3'].desired_route == 'SPREAD'
     assert policy.states['gnb-3'].active_route == 'LOCAL'
 
 
@@ -436,9 +570,11 @@ def test_collector_offload_snapshot_separates_user_and_probe_and_never_reports_z
     snap = collector.offload_snapshot()
     u_local = snap['sites']['gnb-1']['user']['local']
     u_core = snap['sites']['gnb-1']['user']['core']
+    u_overall = snap['sites']['gnb-1']['user']['overall']
     p_local = snap['sites']['gnb-1']['probe']['local']
     assert u_local['status'] == 'ok' and u_local['p90_ms'] == 180.0 and u_local['attempts'] == 2 and u_local['timeouts'] == 1
     assert u_core['status'] == 'ok' and u_core['p90_ms'] == 70.0 and u_core['attempts'] == 1
+    assert u_overall['status'] == 'ok' and u_overall['attempts'] == 3 and u_overall['successes'] == 2 and u_overall['p90_ms'] == 180.0
     assert p_local['status'] == 'ok' and p_local['p90_ms'] == 60.0 and p_local['attempts'] == 1
 
     # Advance past stale_after_seconds (5s) -> status becomes 'stale'.
@@ -481,7 +617,7 @@ def test_xds_server_rds_eds_ack_nack_and_reset():
         auth_headers = {'Authorization': f'Bearer {admin_token}', 'Content-Type': 'application/json'}
 
         # Discovery listener MUST NOT expose admin mutation endpoints.
-        xds_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'CORE'}))
+        xds_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'SPREAD'}))
         assert xds_conn.getresponse().status == 404
         xds_conn.close()
         xds_conn = http.client.HTTPConnection('127.0.0.1', xds_port, timeout=2)
@@ -491,7 +627,7 @@ def test_xds_server_rds_eds_ack_nack_and_reset():
         resp = admin_conn.getresponse()
         resp.read()
         assert resp.status == 401
-        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'CORE'}), {'Authorization': 'Bearer wrong'})
+        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'SPREAD'}), {'Authorization': 'Bearer wrong'})
         resp = admin_conn.getresponse()
         resp.read()
         assert resp.status == 401
@@ -509,19 +645,19 @@ def test_xds_server_rds_eds_ack_nack_and_reset():
         assert routes[2]['route']['cluster'] == 'local_backend'  # user route
         assert 'retry_policy' not in routes[2]['route']
 
-        # Manual override to CORE for gnb-1 only via authenticated admin listener.
-        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'CORE'}), auth_headers)
+        # Manual override to SPREAD for gnb-1 only via authenticated admin listener.
+        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'SPREAD'}), auth_headers)
         resp = admin_conn.getresponse()
         ov = json.loads(resp.read())
-        assert resp.status == 200 and ov['desired_route'] == 'CORE'
+        assert resp.status == 200 and ov['desired_route'] == 'SPREAD'
 
-        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-2', 'route': 'CORE'}), auth_headers)
+        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-2', 'route': 'SPREAD'}), auth_headers)
         resp = admin_conn.getresponse()
         resp.read()
         assert resp.status == 429
         assert ctrl.policy.states['gnb-2'].manual_override is None
 
-        # Envoy polls RDS with old version v1 -> gets v2 (core_backend for user, local_backend for probe).
+        # Envoy polls RDS with old version v1 -> gets v2 (spread-gnb-1 for user, local_backend for probe).
         xds_conn.request('POST', '/v3/discovery:routes', json.dumps({
             'version_info': v1, 'node': {'id': 'envoy-gnb-1'}, 'resource_names': [route_config_name('gnb-1')]
         }))
@@ -531,9 +667,9 @@ def test_xds_server_rds_eds_ack_nack_and_reset():
         assert resp.status == 200 and data['version_info'] == v2
         routes = data['resources'][0]['virtual_hosts'][0]['routes']
         assert routes[1]['route']['cluster'] == 'local_backend'
-        assert routes[2]['route']['cluster'] == 'core_backend'
+        assert routes[2]['route']['cluster'] == 'spread-gnb-1'
 
-        # Envoy ACKs version v2 -> receives 304 and active_route updates to CORE.
+        # Envoy ACKs version v2 -> receives 304 and active_route updates to SPREAD.
         now[0] = 103.0
         xds_conn.request('POST', '/v3/discovery:routes', json.dumps({
             'version_info': v2, 'node': {'id': 'envoy-gnb-1'}, 'resource_names': [route_config_name('gnb-1')]
@@ -541,30 +677,38 @@ def test_xds_server_rds_eds_ack_nack_and_reset():
         resp = xds_conn.getresponse()
         resp.read()
         assert resp.status == 304
-        assert ctrl.policy.states['gnb-1'].active_route == 'CORE'
+        assert ctrl.policy.states['gnb-1'].active_route == 'SPREAD'
 
         now[0] = 105.0
-        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-2', 'route': 'CORE'}), auth_headers)
+        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-2', 'route': 'SPREAD'}), auth_headers)
         resp = admin_conn.getresponse()
         resp.read()
         assert resp.status == 429
         now[0] = 108.0
-        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-2', 'route': 'CORE'}), auth_headers)
+        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-2', 'route': 'SPREAD'}), auth_headers)
         resp = admin_conn.getresponse()
         resp.read()
         assert resp.status == 200
 
-        # EDS check returns pinned endpoints.
+        # EDS check returns pinned endpoints including weighted spread-gnb-1 (k=2 -> local weight 2, core weight 1).
         xds_conn.request('POST', '/v3/discovery:endpoints', json.dumps({
-            'version_info': '', 'resource_names': [local_eds_service_name('gnb-1'), CORE_EDS_SERVICE_NAME]
+            'version_info': '', 'resource_names': [local_eds_service_name('gnb-1'), CORE_EDS_SERVICE_NAME, spread_eds_service_name('gnb-1')]
         }))
         resp = xds_conn.getresponse()
         eds = json.loads(resp.read())
         assert resp.status == 200
-        by_name = {r['cluster_name']: r['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['socket_address']['address'] for r in eds['resources']}
-        assert by_name == {'local-gnb-1': '172.16.4.10', 'core-5g': '172.16.10.50'}
+        by_name = {
+            r['cluster_name']: [
+                (e['endpoint']['address']['socket_address']['address'], e.get('load_balancing_weight'))
+                for e in r['endpoints'][0]['lb_endpoints']
+            ]
+            for r in eds['resources']
+        }
+        assert by_name['local-gnb-1'] == [('172.16.4.10', None)]
+        assert by_name['core-5g'] == [('172.16.10.50', None)]
+        assert by_name['spread-gnb-1'] == [('172.16.10.50', 1), ('172.16.4.10', 2)]
 
-        # Authenticated reset to local-only returns all sites to LOCAL and locks CORE overrides (403).
+        # Authenticated reset to local-only returns all sites to LOCAL and locks SPREAD overrides (403).
         admin_conn.request('POST', '/reset', json.dumps({'mode': 'local-only'}), auth_headers)
         resp = admin_conn.getresponse()
         res = json.loads(resp.read())
@@ -572,7 +716,7 @@ def test_xds_server_rds_eds_ack_nack_and_reset():
         assert ctrl.policy.states['gnb-1'].desired_route == 'LOCAL'
         assert ctrl.policy.states['gnb-1'].active_route == 'UNKNOWN'  # until Envoy ACKs new version
 
-        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'CORE'}), auth_headers)
+        admin_conn.request('POST', '/override', json.dumps({'site': 'gnb-1', 'route': 'SPREAD'}), auth_headers)
         resp = admin_conn.getresponse()
         resp.read()
         assert resp.status == 403
@@ -727,7 +871,7 @@ def test_unlabeled_pre_header_timeouts_trigger_offload_only_when_local_confirmed
     # 3. Consecutive unlabeled timeouts strictly within LOCAL-confirmed interval with Core ready -> ONLY gnb-2 offloads!
     for sec in range(12, 18):
         policy.evaluate(float(sec), _unknown_timeout_snap('gnb-2', first_ts=1005.0, seq=30 + sec), local_ready, 3)
-    assert policy.states['gnb-2'].desired_route == 'CORE'
+    assert policy.states['gnb-2'].desired_route == 'SPREAD'
     assert policy.states['gnb-2'].last_decision_reason == 'local_unlabeled_timeout_breach'
     assert policy.states['gnb-1'].desired_route == 'LOCAL'
     assert policy.states['gnb-3'].desired_route == 'LOCAL'
@@ -738,11 +882,11 @@ def test_unlabeled_pre_header_timeouts_trigger_offload_only_when_local_confirmed
         policy.evaluate(float(sec), _unknown_timeout_snap('gnb-1', first_ts=1005.0, seq=60 + sec), local_ready, 3)
     assert policy.states['gnb-1'].desired_route == 'LOCAL'
 
-    # 5. Timeouts while CORE is active on gnb-2 MUST NOT cause erroneous transition.
-    policy.record_envoy_ack('gnb-2', 'CORE', 'ep-2', 1020.0)
+    # 5. Timeouts while SPREAD is active on gnb-2 MUST NOT cause erroneous transition.
+    policy.record_envoy_ack('gnb-2', 'SPREAD', 'ep-2', 1020.0)
     for sec in range(26, 32):
         policy.evaluate(float(sec), _unknown_timeout_snap('gnb-2', first_ts=1025.0, seq=90 + sec), local_ready, 3)
-    assert policy.states['gnb-2'].desired_route == 'CORE'
+    assert policy.states['gnb-2'].desired_route == 'SPREAD'
 
 
 def test_readiness_gate_rejects_unready_local_core_mismatch_and_unacked_reset():
@@ -893,6 +1037,10 @@ def test_envoy_and_core_manifests_parse_cleanly():
             clusters = {c['name']: c for c in envoy_cfg['static_resources']['clusters']}
             assert clusters['local_backend']['type'] == 'EDS'
             assert clusters['core_backend']['type'] == 'EDS'
+            site = doc['metadata']['name'].removeprefix('mec-envoy-').removesuffix('-config')
+            spread_name = spread_eds_service_name(site)
+            assert clusters[spread_name]['type'] == 'EDS'
+            assert clusters[spread_name]['eds_cluster_config']['service_name'] == spread_name
 
     core_doc = yaml.safe_load(Path('offloader/core-backend.yaml').read_text())
     assert core_doc['spec']['replicas'] == 3
@@ -1341,10 +1489,15 @@ def test_cleanup_does_not_reduce_core_pool_without_local_ack(monkeypatch):
         )
 
 
-def test_ready_dynamic_core_pod_joins_fallback_endpoints():
-    def pod(role, node, ip, ready=True):
+def test_ready_dynamic_core_pod_joins_core_and_spread_without_duplicates():
+    def pod(app, role, node, ip, ready=True, terminating=False):
+        meta = {'labels': {'app': app}}
+        if role is not None:
+            meta['labels']['mec-replica'] = role
+        if terminating:
+            meta['deletionTimestamp'] = '2026-11-21T00:00:00Z'
         return {
-            'metadata': {'labels': {'app': 'mec-placement-pedestrian-detection', 'mec-replica': role}},
+            'metadata': meta,
             'spec': {'nodeName': node},
             'status': {'phase': 'Running', 'podIP': ip, 'conditions': [
                 {'type': 'Ready', 'status': 'True' if ready else 'False'},
@@ -1352,70 +1505,141 @@ def test_ready_dynamic_core_pod_joins_fallback_endpoints():
         }
 
     local, core = filter_pinned_endpoints([
-        pod('managed', 'core-5g', '172.16.10.11'),
-        pod('managed', 'core-5g', '172.16.10.12', ready=False),
-        pod('anchor-gnb-1', 'core-5g', '172.16.10.13'),
-        pod('managed', 'gnb1', '172.16.20.11'),
+        pod('mec-placement-pedestrian-detection-core', None, 'core-5g', '172.16.10.10'),
+        pod('mec-placement-pedestrian-detection', 'managed', 'core-5g', '172.16.10.11'),
+        pod('mec-placement-pedestrian-detection', 'managed', 'core-5g', '172.16.10.11'),  # duplicate IP
+        pod('mec-placement-pedestrian-detection', 'managed', 'core-5g', '172.16.10.12', ready=False),
+        pod('mec-placement-pedestrian-detection', 'managed', 'core-5g', '172.16.10.14', terminating=True),
+        pod('mec-placement-pedestrian-detection', 'anchor-gnb-1', 'core-5g', '172.16.10.13'),
+        pod('mec-placement-pedestrian-detection', 'managed', 'gnb1', '172.16.20.11'),
+        pod('mec-placement-pedestrian-detection', 'managed', 'gnb1', '172.16.20.12', terminating=True),
     ])
-    assert core == [('172.16.10.11', 5000)]
+    assert core == [('172.16.10.10', 5000), ('172.16.10.11', 5000)]
     assert local['gnb-1'] == [('172.16.20.11', 5000)]
 
+    # Verify both core-5g and spread-gnb-1 include the managed core-5g pod with valid weights and no duplicate IPs.
+    xds = XdsState(epoch='ep-dup')
+    xds.update_endpoints(local, core)
+    xds.set_site_route('gnb-1', 'SPREAD')
+    xds.set_site_route('gnb-2', 'SPREAD')
+    status, body = xds.handle_eds({
+        'version_info': '',
+        'resource_names': [CORE_EDS_SERVICE_NAME, spread_eds_service_name('gnb-1')],
+    })
+    assert status == 200
+    res_map = {r['cluster_name']: r['endpoints'][0]['lb_endpoints'] for r in body['resources']}
+    core_ips = [e['endpoint']['address']['socket_address']['address'] for e in res_map[CORE_EDS_SERVICE_NAME]]
+    assert core_ips == ['172.16.10.10', '172.16.10.11']
+    spread_entries = [
+        (e['endpoint']['address']['socket_address']['address'], e['load_balancing_weight'])
+        for e in res_map[spread_eds_service_name('gnb-1')]
+    ]
+    assert len(spread_entries) == len({ip for ip, _ in spread_entries})
+    assert spread_entries == [
+        ('172.16.10.10', 1),
+        ('172.16.10.11', 1),
+        ('172.16.20.11', 2),
+    ]
+    with pytest.raises(ValueError, match='load_balancing_weight must be >= 1'):
+        build_cluster_load_assignment('spread-gnb-1', [('172.16.10.10', 5000, 0)])
 
-def _core_site_state(policy, site, *, since):
-    st = policy.states[site]
-    st.desired_route = st.active_route = 'CORE'
-    st.core_confirmed_since = since
-    return st
 
-
-def test_breaching_site_does_not_offload_while_core_overload_is_confirmed_elsewhere():
+def test_second_site_enters_spread_without_core_overload_gate():
     policy = VerticalOffloadPolicy(OffloadConfig(breach_duration_seconds=1, min_dwell_seconds=1, route_switch_interval_seconds=1))
     wall_start = 1700000000.0
-    gnb1 = _core_site_state(policy, 'gnb-1', since=wall_start)
+    gnb1 = policy.states['gnb-1']
+    gnb1.desired_route = gnb1.active_route = 'SPREAD'
+    gnb1.spread_confirmed_since = wall_start
 
-    def tick(sec, gnb2_p90, core_p90=1800):
+    # Even while gnb-1 overall p90 is very high (>SLO), gnb-2 is NOT blocked by any core_overloaded gate;
+    # weighting by k replaces that gate.
+    seen = []
+    for sec in range(20, 23):
         snapshot = _make_snapshot({
-            'gnb-2': {'user_local': _make_bucket(p90_ms=gnb2_p90, seq=sec)},
-            'gnb-1': {'user_core': _make_bucket(p90_ms=core_p90, seq=sec),
-                      'probe_local': _make_bucket(p90_ms=400, seq=sec)},
+            'gnb-1': {'user_overall': _make_bucket(p90_ms=1800.0, seq=sec)},
+            'gnb-2': {'user_local': _make_bucket(p90_ms=700.0, seq=sec)},
         })
         snapshot['generated_at'] = wall_start + sec
-        return [e for e in policy.evaluate(float(sec), snapshot, dict.fromkeys(SITES, 2), 3) if e.site == 'gnb-2']
-
-    # CORE becomes confirmed overloaded for gnb-1 while gnb-2 is still healthy.
-    for sec in range(16, 25):
-        tick(sec, gnb2_p90=80)
-    assert gnb1.core_overload_confirmed
-
-    seen = []
-    for sec in range(25, 40):
-        seen += tick(sec, gnb2_p90=700)
-    assert not [e for e in seen if e.event == 'route_decision']
-    assert len([e for e in seen if e.reason == 'core_overloaded_hold_local']) == 1
-    assert policy.states['gnb-2'].desired_route == 'LOCAL'
-
-    # When CORE is healthy again, the pending breach is allowed to offload.
-    seen = []
-    for sec in range(40, 52):
-        seen += [e for e in tick(sec, gnb2_p90=700, core_p90=80) if e.event == 'route_decision']
-    assert seen and seen[0].new_route == 'CORE'
+        seen += [e for e in policy.evaluate(float(sec), snapshot, dict.fromkeys(SITES, 2), 3) if e.site == 'gnb-2']
+    rds = [e for e in seen if e.event == 'route_decision']
+    assert len(rds) == 1 and rds[0].new_route == 'SPREAD'
+    assert rds[0].extra['k'] == 2 and rds[0].extra['c'] == 3 and rds[0].extra['x_i'] == 2
+    assert rds[0].extra['core_ratio'] == pytest.approx(3 / 7, abs=1e-6)
 
 
-def test_core_state_hold_reasons_are_logged_once_with_probe_evidence():
+def test_spread_state_hold_reasons_logged_once_with_spread_metrics():
     policy = VerticalOffloadPolicy(OffloadConfig())
-    st = _core_site_state(policy, 'gnb-2', since=1700000000.0)
-    st.offload_ready_count = 2
+    st = policy.states['gnb-2']
+    st.desired_route = st.active_route = 'SPREAD'
     wall_start = 1700000000.0
+    st.spread_confirmed_since = wall_start
     events = []
     for sec in range(20, 30):
         snapshot = _make_snapshot({
-            'gnb-2': {'probe_local': _make_bucket(p90_ms=400, seq=sec),
-                      'user_core': _make_bucket(p90_ms=900, seq=sec)},
+            'gnb-2': {'user_overall': _make_bucket(p90_ms=220.0, seq=sec)},
         })
         snapshot['generated_at'] = wall_start + sec
         events += [e for e in policy.evaluate(float(sec), snapshot, dict.fromkeys(SITES, 3), 3) if e.site == 'gnb-2']
-    holds = [e for e in events if e.reason == 'core_probe_not_recovered']
+    holds = [e for e in events if e.reason == 'spread_p90_above_slo']
     assert len(holds) == 1
     record = holds[0].to_dict()
-    assert record['probe_p90_ms'] == 400 and record['probe_successes'] == 20
-    assert record['core_user_p90_ms'] == 900 and record['offload_local_ready_endpoints'] == 2
+    assert record['c'] == 3 and record['x_i'] == 3 and record['k'] == 1
+    assert record['core_ratio'] == pytest.approx(0.5, abs=1e-6)
+
+
+def test_enter_spread_has_priority_over_exit_to_local_on_same_tick():
+    cfg = OffloadConfig(breach_duration_seconds=1.0, min_fresh_updates=2, min_dwell_seconds=5.0, route_switch_interval_seconds=5.0)
+    policy = VerticalOffloadPolicy(cfg)
+    wall_start = 1700000000.0
+    local_ready = {'gnb-1': 2, 'gnb-2': 2, 'gnb-3': 2}
+
+    # gnb-2 is already in SPREAD and ready to exit; gnb-3 breaches LOCAL SLO on the same tick.
+    st2 = policy.states['gnb-2']
+    st2.desired_route = st2.active_route = 'SPREAD'
+    st2.last_transition_time = 0.0
+    st2.spread_confirmed_since = wall_start
+
+    for sec in (20, 21):
+        snap = _make_snapshot({
+            'gnb-2': {'user_overall': _make_bucket(p90_ms=90.0, seq=sec)},
+            'gnb-3': {'user_local': _make_bucket(p90_ms=260.0, seq=sec)},
+        })
+        snap['generated_at'] = wall_start + sec
+        evs = [e for e in policy.evaluate(float(sec), snap, local_ready, 3) if e.event == 'route_decision']
+
+    # SLO protection (entering SPREAD) MUST win over exiting SPREAD on the same tick.
+    assert [(e.site, e.old_route, e.new_route) for e in evs] == [('gnb-3', 'LOCAL', 'SPREAD')]
+    assert policy.states['gnb-3'].desired_route == 'SPREAD'
+    assert policy.states['gnb-2'].desired_route == 'SPREAD'
+    assert policy.states['gnb-2'].last_status_note == 'route_switch_waiting'
+
+
+def test_verify_vertical_path_smoke_manual_uses_spread(monkeypatch, capsys):
+    from types import SimpleNamespace
+    import utils.verify_vertical_path as vvp
+
+    sent_routes = []
+
+    def fake_http(url, *, method='GET', payload=None, token=None, timeout=5.0):
+        sent_routes.append(payload['route'])
+        return {'ok': True}
+
+    def fake_attempt(*args, **kwargs):
+        cur = sent_routes[-1]
+        if cur == 'SPREAD':
+            return {'success': True, 'ingress_site': 'gnb-1', 'selected_route': 'spread', 'server_node': 'core-5g', 'server_pod': 'p-core', 'http_status': 200, 'duration_ms': 40.0}
+        return {'success': True, 'ingress_site': 'gnb-1', 'selected_route': 'local', 'server_node': 'gnb1', 'server_pod': 'p-local', 'http_status': 200, 'duration_ms': 20.0}
+
+    monkeypatch.setattr(vvp, '_http_json', fake_http)
+    monkeypatch.setattr(vvp, 'attempt', fake_attempt)
+    monkeypatch.setattr(vvp.time, 'sleep', lambda _s: None)
+    args = SimpleNamespace(
+        site='gnb-1', ingress_url='http://127.0.0.1:31801/detect', source_ip='127.0.0.1',
+        offloader_url='http://127.0.0.1:18086', token_file=None, wait_ack=0.0, timeout=1.0,
+    )
+    vvp.cmd_smoke_manual(args)
+    out = json.loads(capsys.readouterr().out)
+    assert sent_routes == ['LOCAL', 'SPREAD', 'LOCAL', None]
+    assert out['all_ok'] is True
+    assert out['during']['expected_route'] == 'spread'
+    assert out['during']['selected_route'] == 'spread'

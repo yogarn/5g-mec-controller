@@ -125,8 +125,8 @@ class VerticalOffloadController:
                 return []
             return [
                 site for site in SITES
-                if self.policy.states[site].desired_route == 'CORE'
-                or self.policy.states[site].active_route == 'CORE'
+                if self.policy.states[site].desired_route == 'SPREAD'
+                or self.policy.states[site].active_route == 'SPREAD'
             ]
 
     def poll_once(self) -> list[dict]:
