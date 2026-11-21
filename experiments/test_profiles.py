@@ -21,6 +21,7 @@ LEGACY = {
     ],
     'vertical-smoke': [
         *_FULL, *_SHARED, '--phase-schedule', campaign.VERTICAL_SMOKE_SCHEDULE, '--phase-duration', '60',
+        '--arms', 'vertical',
     ],
     'vertical-mobility': [
         '--comparison', 'placement', '--fixed-replicas', '9', '--no-hpa', *_SHARED,
@@ -57,3 +58,13 @@ def test_mobility_profile_uses_24_ues_with_hotspot_at_most_18():
     phases = campaign.parse_schedule(campaign.VERTICAL_MOBILITY_SCHEDULE)
     assert {p['workload_ue'] for p in phases} == {24}
     assert max(max(p['gnb1_ues'], p['gnb2_ues'], p['gnb3_ues']) for p in phases[1:]) == 18
+
+
+def test_only_the_smoke_profile_selects_vertical_arms():
+    assert {n: p.get('arms', 'all') for n, p in campaign.PROFILES.items()} == {
+        'vertical-joint': 'all', 'vertical-smoke': 'vertical',
+        'vertical-mobility': 'all', 'scaling-staircase': 'all',
+    }
+    assert [a for a, _m, _v in campaign.ARM_SELECTIONS['vertical']] == ['baseline-vertical', 'proposed-vertical']
+    assert [a for a, _m, _v in campaign.ARM_SELECTIONS['all']] == [
+        'baseline-local', 'proposed-local', 'baseline-vertical', 'proposed-vertical']

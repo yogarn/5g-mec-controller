@@ -48,6 +48,12 @@ FOUR_ARM_SPECS = (
     ('baseline-vertical', 'baseline', 'vertical'),
     ('proposed-vertical', 'proposed', 'vertical'),
 )
+# 'vertical' runs only the two offloading arms; used by the smoke profile because the local-only arms are
+# unaffected by offloader changes. Full runs always use 'all'.
+ARM_SELECTIONS = {
+    'all': FOUR_ARM_SPECS,
+    'vertical': tuple(spec for spec in FOUR_ARM_SPECS if spec[2] == 'vertical'),
+}
 UPF_PLACEMENT_QUERY = (
     'ue_request_upf_placement_window_attempts{job="ue-telemetry-placement",node=~"core-5g|gnb-2|gnb-3"} / 5'
 )
@@ -104,7 +110,7 @@ _VERTICAL_FULL = {
 PROFILES = {
     'vertical-joint': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE},
     'vertical-smoke': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_SMOKE_SCHEDULE,
-                       'phase_duration': 60.0},
+                       'phase_duration': 60.0, 'arms': 'vertical'},
     'vertical-mobility': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,
                           'phase_schedule': VERTICAL_MOBILITY_SCHEDULE},
     'scaling-staircase': {
@@ -2070,6 +2076,8 @@ def _build_parser():
     parser.add_argument('--method-order', choices=('baseline-first', 'proposed-first', 'random'),
                         default='baseline-first',
                         help='order in which baseline and proposed run (default: baseline-first)')
+    parser.add_argument('--arms', choices=sorted(ARM_SELECTIONS), default='all',
+                        help='four-arm only: run all arms, or only the vertical arms (smoke profile)')
     parser.add_argument('--vertical-mode', choices=VERTICAL_MODES, default='off',
                         help='vertical offloading mode: off (default), local-only (0 Core), vertical (Core fallback), or four-arm (both modes and methods, same total ceiling)')
     parser.add_argument('--debug', action='store_true',
@@ -2483,7 +2491,7 @@ def main(argv=None):
                 local_arm_budget = vertical_budget.for_arm_mode('local-only', fixed_total=fixed_vertical)
                 arm_budgets_obj = {
                     arm_name: (local_arm_budget if arm_vmode == 'local-only' else vertical_budget)
-                    for arm_name, _method, arm_vmode in FOUR_ARM_SPECS
+                    for arm_name, _method, arm_vmode in ARM_SELECTIONS[args.arms]
                 }
             else:
                 vertical_budget = vertical_budget_from_settings(
@@ -2504,6 +2512,7 @@ def main(argv=None):
     shared_metadata = {
         'workload': workload,
         'vertical_mode': args.vertical_mode,
+        'arms': args.arms if args.vertical_mode == 'four-arm' else None,
         'vertical_budget': vertical_budget.to_metadata() if vertical_budget is not None else None,
         'arm_budgets': {k: v.to_metadata() for k, v in arm_budgets_obj.items()} if vertical_active else None,
         'core_backend_replicas': vertical_budget.core_fallback_replicas if vertical_budget is not None else None,
@@ -2638,7 +2647,7 @@ def main(argv=None):
         _campaign_manifest(output, args.tc_ms is not None, workload, prefer_close=args.prefer_close,
                            site_anchors=args.site_anchors, spill_high=args.spill_high, spill_low=args.spill_low,
                            edge_only=args.edge_only, site_nodes=site_nodes)
-        plan_arms = (FOUR_ARM_SPECS if args.vertical_mode == 'four-arm'
+        plan_arms = (ARM_SELECTIONS[args.arms] if args.vertical_mode == 'four-arm'
                      else [(method, method, args.vertical_mode) for method in method_order])
         for arm, method, _ in plan_arms:
             arm_dir = output / arm if args.vertical_mode == 'four-arm' else output
@@ -2697,7 +2706,7 @@ def main(argv=None):
         minutes = sum(phase_durations) / 60
         duration_desc = (f'{settings["phase_duration"]:g}s each' if not hold_seconds
                          else f'{settings["phase_duration"]:g}s each + {hold_seconds}s final hold')
-        arm_count = len(FOUR_ARM_SPECS) if args.vertical_mode == 'four-arm' else len(method_order)
+        arm_count = len(ARM_SELECTIONS[args.arms]) if args.vertical_mode == 'four-arm' else len(method_order)
         print(f'Campaign: {len(phases)} phases per method, {duration_desc}; '
               f'{minutes:g} minutes traffic per arm ({arm_count * minutes:g} minutes total), '
               'plus UE switching, setup and transfer. Objective: all-attempt p90 '
@@ -2788,7 +2797,7 @@ def main(argv=None):
                 if metric_unit == 'milliseconds':
                     _prepare_floor_adapter(root, 0, unit=metric_unit)
             if args.vertical_mode == 'four-arm':
-                for arm_name, method, arm_vertical_mode in FOUR_ARM_SPECS:
+                for arm_name, method, arm_vertical_mode in ARM_SELECTIONS[args.arms]:
                     print(f'=== {arm_name.upper()} ({method}, {arm_vertical_mode}) ===', flush=True)
                     reset(workload)
                     run_method(settings, args.campaign, root, method, delay, slo_ms, cli_max_replicas, args.debug,
@@ -2797,7 +2806,10 @@ def main(argv=None):
                                min_replicas=cli_min_replicas, output_name=arm_name, vertical_mode=arm_vertical_mode,
                                initial_core_replicas=initial_core_replicas, restore_core_pool=False)
                 command([sys.executable, '-m', 'utils.vertical_summary', root, '--slo-ms', str(slo_ms)])
-                command([sys.executable, '-m', 'utils.plot_vertical', root, root / 'plots', '--slo-ms', str(slo_ms)])
+                if args.arms == 'all':
+                    command([sys.executable, '-m', 'utils.plot_vertical', root, root / 'plots', '--slo-ms', str(slo_ms)])
+                else:
+                    print(f'Plots skipped: arms={args.arms} is a partial run.', flush=True)
             else:
                 for method in method_order:
                     print(f'=== {method.upper()} ===', flush=True)
