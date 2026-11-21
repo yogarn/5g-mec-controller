@@ -206,7 +206,7 @@ data:
           },
           "targets": [
             {
-              "expr": "count by (node) (container_memory_working_set_bytes{namespace=\"services\",container=\"pedestrian-detection\"})",
+              "expr": "count by (node) (last_over_time(container_memory_working_set_bytes{namespace=\"services\",container=\"pedestrian-detection\"}[15s]))",
               "instant": true,
               "legendFormat": "{{node}}"
             }
@@ -245,7 +245,7 @@ data:
           },
           "targets": [
             {
-              "expr": "count by (node) (container_memory_working_set_bytes{namespace=\"services\",container=\"pedestrian-detection\"})",
+              "expr": "count by (node) (last_over_time(container_memory_working_set_bytes{namespace=\"services\",container=\"pedestrian-detection\"}[15s]))",
               "legendFormat": "{{node}}"
             }
           ]
