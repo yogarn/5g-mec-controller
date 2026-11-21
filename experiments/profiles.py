@@ -107,7 +107,9 @@ PROFILES = {
         'scenario': 'scaler-staircase',
         'cpu_hpa_target': 80,
         'slo_ms': 150.0,
-        'asymmetric_latency': True,
+        # Full floor formula (p90 - floor) / (SLO - floor) in both directions: this stage has a ~140 ms latency
+        # floor above L0, so the below-target raw p90 branch of the asymmetric metric never allowed a scale-down.
+        'asymmetric_latency': False,
         'min_replicas': 3,
         'max_replicas': 18,
         'scale_down_stabilization_seconds': 60,

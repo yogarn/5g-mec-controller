@@ -30,7 +30,7 @@ LEGACY = {
     'scaling-staircase': [
         '--config', 'experiments/campaign-mobility-core.yaml', '--workload', 'pedestrian-detection',
         '--comparison', 'scaling', '--scenario', 'scaler-staircase', '--autoscaler', 'hpa',
-        '--cpu-hpa-target', '80', '--slo-ms', '150', '--asymmetric-latency',
+        '--cpu-hpa-target', '80', '--slo-ms', '150',  # full floor formula (no --asymmetric-latency), see PROFILES
         '--min-replicas', '3', '--max-replicas', '18', '--scale-down-stabilization-seconds', '60',
         '--phase-duration', '120', '--phase-transition', 'continuous', '--rps-per-ue', '5',
         '--max-in-flight-per-ue', '8', '--tc-ms', '10',
