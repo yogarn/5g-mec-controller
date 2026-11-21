@@ -91,7 +91,7 @@ spec:
       containers:
         - name: placement-controller
           # Timing-instrumented release built from source commit 74c8752.
-          image: 10.34.211.140:30500/placement-controller@sha256:b7a184c70764ae7bb131c945f67b6f2e332ab941bbd25b8eddc2113cbfd3921a
+          image: 10.34.211.140:30500/placement-controller@sha256:8b45ecf4ed7299ada1c71e7e08638b0b035446f4d630187047fdc3183b41fb26
           imagePullPolicy: Always
           args:
             - --config=/etc/placement/config.yaml

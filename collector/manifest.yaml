@@ -43,7 +43,7 @@ spec:
         site: core
       containers:
         - name: collector
-          image: 10.34.211.140:30500/ue-telemetry-collector:refactor-20261121T142427Z
+          image: 10.34.211.140:30500/ue-telemetry-collector:simplify-20261121T150311Z
           imagePullPolicy: Always
           ports:
             - name: http
