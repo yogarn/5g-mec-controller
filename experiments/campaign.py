@@ -70,6 +70,60 @@ DEFAULT_DESCHEDULE_INTERVAL_S = 30
 DEFAULT_PHASE_SECONDS = 120
 MOBILITY_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
 SCALER_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
+
+# Named experiment profiles. The run scripts only select a profile; every experiment constant lives here.
+# Smoke and the full joint run share all settings except the schedule and phase length.
+VERTICAL_JOINT_SCHEDULE = '3:1:1:1,6:3:2:1,9:6:2:1,12:6:4:2,15:6:6:3,18:5:8:5,24:4:12:8,24:2:16:6,18:2:8:8,15:1:5:9,3:1:1:1'
+VERTICAL_SMOKE_SCHEDULE = '3:1:1:1,6:4:1:1,3:1:1:1'
+# 24 UEs (the reserved subscribers); hotspot is at most 18 UEs because nine fixed replicas leave at most seven
+# pods at one site once the other two sites keep one anchor each.
+VERTICAL_MOBILITY_SCHEDULE = '24:10:7:7,24:2:18:4,24:2:15:7,24:2:11:11,24:2:7:15,24:2:4:18'
+_VERTICAL_COMMON = {
+    'config': 'experiments/campaign-vertical.yaml',
+    'vertical_mode': 'four-arm',
+    'scenario': 'mobility9',
+    'phase_duration': 120.0,
+    'rps_per_ue': 5.0,
+    'max_in_flight_per_ue': 8,
+    'slo_ms': 150.0,
+    'tc_ms': 10.0,
+    'pod_share_scoring': True,
+    'deschedule_interval': 30.0,
+    'locality_weight': 0.4,
+    'resource_weights': [0.5, 0.5, 0.0, 0.0],
+    'prefer_close': True,
+    'site_anchors': True,
+}
+_VERTICAL_FULL = {
+    'comparison': 'full',
+    'cpu_hpa_target': 80,
+    'scale_down_stabilization_seconds': 60,
+    'asymmetric_latency': True,
+    'proposed_scale_down_period_seconds': 15,
+}
+PROFILES = {
+    'vertical-joint': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE},
+    'vertical-smoke': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_SMOKE_SCHEDULE,
+                       'phase_duration': 60.0},
+    'vertical-mobility': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,
+                          'phase_schedule': VERTICAL_MOBILITY_SCHEDULE},
+    'scaling-staircase': {
+        'config': 'experiments/campaign-mobility-core.yaml',
+        'workload': 'pedestrian-detection',
+        'comparison': 'scaling',
+        'scenario': 'scaler-staircase',
+        'cpu_hpa_target': 80,
+        'slo_ms': 150.0,
+        'asymmetric_latency': True,
+        'min_replicas': 3,
+        'max_replicas': 18,
+        'scale_down_stabilization_seconds': 60,
+        'phase_duration': 120.0,
+        'rps_per_ue': 5.0,
+        'max_in_flight_per_ue': 8,
+        'tc_ms': 10.0,
+    },
+}
 FINAL_HOLD_SECONDS = 360
 COMPARISONS = ('full', 'placement', 'scaling')
 AUTOSCALERS = ('controller', 'hpa')
@@ -1952,8 +2006,10 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
     command([sys.executable, '-m', 'utils.telemetry_history', output / 'requests.jsonl', output, '--prometheus-url', config['prometheus_url']])
 
 
-def main(argv=None):
+def _build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--profile', choices=sorted(PROFILES),
+                        help='named experiment profile with all of its constants; the run scripts select one')
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or pedestrian-detection)')
@@ -2044,7 +2100,20 @@ def main(argv=None):
     parser.add_argument('--spill-low', type=int, metavar='N', help='restore readiness at N or fewer pending detections')
     parser.add_argument('--site-anchors', action='store_true',
                         help='start both arms with one fixed serving pod per gNB within the total replica budget')
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _parse_args(argv=None):
+    """Parse arguments; a profile supplies defaults that explicit flags may still override."""
+    parser = _build_parser()
+    selected, _ = parser.parse_known_args(argv)
+    if selected.profile:
+        parser.set_defaults(**PROFILES[selected.profile])
+    return parser, parser.parse_args(argv)
+
+
+def main(argv=None):
+    parser, args = _parse_args(argv)
     if not args.check and args.plan_only is None and (not args.campaign or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.campaign)):
         parser.error('provide a new campaign name using letters, digits, hyphens or underscores')
     if args.prefer_close_routing_only:

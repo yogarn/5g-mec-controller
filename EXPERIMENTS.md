@@ -963,12 +963,17 @@ the readiness gate.
 
 ## Vertical joint four-arm campaign
 
-On Core, run `./run-vertical-full.sh`. The script is the canonical full-run
-profile. It opens the localhost offloader admin forward if needed, and saves
-stdout and stderr in `results/vertical_joint_full_*.log`. A fresh result
-directory contains the rendered HPA, scheduler config, events and plots.
+On Core, run `./run-vertical-full.sh`. The scripts take no tuning flags: each
+selects a named profile in `experiments/campaign.py` (`PROFILES`), and every
+experiment constant (schedule, UE count, replicas, weights, SLO) is changed in
+that file. The profile is the canonical full-run configuration. The script opens
+the localhost offloader admin forward if needed, and saves stdout and stderr in
+`results/vertical_joint_full_*.log`. A fresh result directory contains the
+rendered HPA, scheduler config, events and plots.
 `./run-vertical-smoke.sh` uses the same configuration with three 60-second
-phases. Both scripts accept `--plan-only DIRECTORY` for offline validation.
+phases, `./run-vertical-mobility.sh` runs the 24-UE mobility comparison, and
+`./run-vertical-suite.sh` runs joint, scaling and mobility in order. Each
+accepts `--plan-only DIRECTORY` for offline validation.
 
 The full schedule is 11 continuous 120-second phases per arm at 5 RPS per UE.
 The runner executes baseline local-only, proposed local-only, baseline vertical,

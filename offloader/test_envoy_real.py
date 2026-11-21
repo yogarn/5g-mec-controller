@@ -70,7 +70,7 @@ def _start_dummy_backend(node_name: str, pod_name: str) -> tuple[http.server.Thr
 
 def _build_envoy_bootstrap(site: str, listen_port: int, admin_port: int, xds_port: int) -> dict:
     # Load the actual repository manifest ConfigMap template and rebind ports/xDS host for local loopback test.
-    docs = list(yaml.safe_load_all(Path('offloader/envoy-ingress.yaml').read_text(encoding='utf-8')))
+    docs = list(yaml.safe_load_all(Path(__file__).with_name('envoy-ingress.yaml').read_text(encoding='utf-8')))
     cm_name = f'mec-envoy-{site}-config'
     cm = next(d for d in docs if d['kind'] == 'ConfigMap' and d['metadata']['name'] == cm_name)
     cfg = yaml.safe_load(cm['data']['envoy.yaml'])
