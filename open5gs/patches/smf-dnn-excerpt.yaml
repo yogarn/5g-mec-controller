@@ -1,0 +1,20 @@
+# EXCERPT, not applicable as-is: entries added to smf.yaml inside the SMF ConfigMap.
+# The Core-DNN profile uses the existing core UPF entries, including embb.testbed
+# for gNB1. Joint and mobility use the local mec.icn-2.testbed session on gNB1.
+smf:
+  pfcp:
+    client:
+      upf:
+      - address: 172.16.20.70     # upf-gnb-2
+        dnn:
+        - embb.gnb2.testbed
+      - address: 172.16.20.200    # upf-gnb-3
+        dnn:
+        - embb.gnb3.testbed
+  session:
+  - subnet: 10.63.1.0/24
+    dnn: embb.gnb2.testbed
+    gateway: 10.63.1.1
+  - subnet: 10.64.1.0/24
+    dnn: embb.gnb3.testbed
+    gateway: 10.64.1.1

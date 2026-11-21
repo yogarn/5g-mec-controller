@@ -1,0 +1,5 @@
+# kubectl -n open5gs patch svc smf --patch-file patches/svc-smf-externalip.yaml
+# The base SMF Service already exposes metrics on 9090; only the external address is added.
+spec:
+  externalIPs:
+  - 10.34.211.140

@@ -6,7 +6,7 @@ Evaluate placement and scaling of a containerized service in a 5G MEC testbed as
 
 ## Comparisons
 
-Use the same service, requests, routes, replica bounds, eligible nodes and measurement windows for each matched comparison. The latency objective is all-attempt p90 at or below the configured threshold (currently 500 ms); freeze it before evaluation. p95 and successful-within-threshold attainment are diagnostic metrics, not a separate 95% objective.
+Use the same service, requests, routes, replica bounds, eligible nodes and measurement windows for each matched comparison. The latency objective is all-attempt p90 at or below the configured threshold (150 ms in the vertical suite). Freeze it before evaluation. Track p95 and successful-within-threshold attainment as supplementary metrics.
 
 1. Compare a conventional Kubernetes autoscaler with the proposed scaling policy using the same scheduler and placement constraints.
 2. Compare the proposed scaler with and without mobility-aware placement to isolate the placement contribution.

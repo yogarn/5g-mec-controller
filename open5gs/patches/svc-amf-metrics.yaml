@@ -1,0 +1,8 @@
+# kubectl -n open5gs patch svc amf --patch-file patches/svc-amf-metrics.yaml
+# The base Service has no metrics port; 9005 avoids a clash with the SMF port 9090 on the shared externalIP.
+spec:
+  ports:
+  - name: metrics
+    port: 9005
+    targetPort: 9090
+    protocol: TCP

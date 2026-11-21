@@ -68,7 +68,7 @@ The debug profile retains the configured 13 phases at 60 seconds each: 13 minute
 | HPA scale-up stabilization | 0 s | 0 s |
 | Placement-only / descheduling cooldown (`desired == replicas`) | 120 s | 15 s |
 | Proposed scale-down stabilization (sustained-lower) | 300 s | 30 s |
-| Descheduler check | 120 s | 30 s |
+| Descheduler check | 30 s | 30 s |
 | Node CPU rate window | 120 s | 60 s |
 | HPA scale-down stabilization (rolling-max) | 300 s | 30 s |
 | Collector p90/site-count window | 15 s | unchanged |
@@ -80,7 +80,7 @@ The scrape values above are the agreed experiment configuration; the profile doe
 
 The effective phase duration and debug flag are saved in `campaign.yaml`; generated controller and HPA manifests retain the exact policy settings. Traffic shaping, request timeouts, UE cleanup deadlines and Pod readiness checks are unchanged.
 
-Omit `--tc-ms` for no added delay. Omit `--slo-ms` to use `slo_seconds` from `config.yaml` (currently 500 ms). Both methods use the same settings, saved in the campaign's `campaign.yaml`.
+The campaign defaults are 10 ms of one-way traffic shaping and a 150 ms reporting SLO. Both methods use the same settings, which the runner records in the campaign's `campaign.yaml`.
 
 To compare placement under a shared replica budget, pass `--max-replicas`:
 
@@ -168,15 +168,17 @@ The tool inserts only new subscribers; do not reprovision the existing pool. Wri
 
 The application remains in namespace **services**. The runner deletes only the named `mec-placement-face-detection` Deployment/Service and `mec-placement-face-detection-baseline` HPA before each method and after completion. Kubernetes removes the app Deployment's dependent managed groups. It never deletes all resources in `services`, never touches the collector in `placement`, and never deletes historical data.
 
-The baseline uses Kubernetes' **default scheduler** with the same required eligibility (`gnb1`, `gnb-2`, `gnb-3`, `core-5g`) as proposed. It has no preference or special fallback rule for any node. The proposed controller scores all four nodes using the same placement algorithm; core has zero gNB-local traffic because it is not a gNB site, but can be selected on its resource score. Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 1 CPU / 512 MiB per-pod limits (limits are twice requests), shared replica ceiling (`--max-replicas`, default 100) and starting replica count of three (override with `--min-replicas`). The CPU baseline HPA uses `averageUtilization: 80`, targeting 400m per pod (80% of the 500m request, or 40% of the 1-CPU limit). Placement-only comparisons use the same latency HPA for both methods. Treat runs with different resource limits or HPA targets as separate experimental configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
+For joint and mobility in the vertical suite, `gnb1` is an eligible AN-MEC node alongside `gnb-2` and `gnb-3`. UEs use local PDU sessions and send traffic through their site Envoy. Vertical arms add `core-5g` as a fallback. The scaling stage uses the Core-DNN profile for gNB1 and pins the workload to `core-5g` with Kubernetes' default scheduler. Proposed Go placement measures request demand by serving UPF. Each campaign records its topology in the metadata.
 
-For both methods, each UE group sends to its own gNB's NodePort, using `site_node_ips` from `experiments/campaign.yaml`. The runner checks these against Kubernetes node InternalIPs. The Service uses `externalTrafficPolicy: Cluster`, `internalTrafficPolicy: Cluster`, no `trafficDistribution` preference, and `sessionAffinity: None`. Verify that the live kube-proxy uses iptables mode: the Service settings alone do not select the proxy mode. In iptables mode, each new connection randomly selects a ready endpoint across the cluster. A node with k of R ready Pods therefore receives approximately k/R of new connections, including core. This is probabilistic balancing, not strict round robin or load-based spillover; reused connections stay on their selected backend. The runner rejects locality preferences and client affinity before starting UE traffic. Routing from each UE through its UPF to its configured NodePort must be verified on the live network; preflight does not prove those paths.
+Both methods use the same digest-pinned app image, photo set, 500m CPU / 256 MiB requests and 1 CPU / 512 MiB per-pod limits. The standard non-vertical joint profile defaults to a replica ceiling of 100 and a starting count of three. The vertical suite uses stage-specific budgets. The CPU baseline HPA uses `averageUtilization: 80`, targeting 400m per pod (80% of the 500m request, or 40% of the 1-CPU limit). Placement-only comparisons use the same latency HPA for both methods. Treat runs with different resource limits or HPA targets as separate experimental configurations. The scheduler and proposed placement policy also use the CPU request when checking node capacity; this can reduce the number of pods that fit. Descheduling removes one source replica before creating its replacement, so there is no temporary surge above the desired ceiling. During relocation, available capacity may fall by one, including a temporary service gap at one replica. The application NodePort is discovered automatically. Requests remain lower than limits, so monitor node load and CPU throttling.
+
+For both methods, each UE group sends to its configured application ingress NodePort, using `site_node_ips` from `experiments/campaign.yaml`. The runner checks these against Kubernetes node InternalIPs. The Service uses `externalTrafficPolicy: Cluster`, `internalTrafficPolicy: Cluster`, no `trafficDistribution` preference, and `sessionAffinity: None`. Verify that the live kube-proxy uses iptables mode: the Service settings alone do not select the proxy mode. In iptables mode, each new connection randomly selects a ready endpoint across the cluster. A node with k of R ready Pods therefore receives approximately k/R of new connections, including core. This is probabilistic balancing, not strict round robin or load-based spillover; reused connections stay on their selected backend. The runner rejects locality preferences and client affinity before starting UE traffic. Routing from each UE through its UPF to its configured NodePort must be verified on the live network; preflight does not prove those paths.
 
 To cancel a foreground campaign, press Ctrl+C once and allow cleanup to finish. The runner attempts to stop remote UEs and local processes, remove experiment workloads, and clean up campaign traffic shaping. Avoid a forced kill or repeated interrupts during cleanup. Interrupted methods skip the normal result transfer and summaries; retain their local logs and UE-host raw results. Label campaigns using the previous `PreferSameNode` Service as a separate routing condition and do not pool them with cluster-wide routing results.
 
 When `--tc-ms` is specified, both methods use the reserved Calico pool `mec-campaign-reserved` (`172.16.40.0/23`) and the runner applies the requested one-way netem delay per inter-node egress interface, in both directions, only to TCP port 5000 traffic to or from that pool. It checks the filters during traffic and removes its filters and IFB devices after deleting the experiment pods. The pool and empty `clsact` hooks remain reserved after the run so that unrelated pods cannot inherit stale rules after a crash and existing filters are never removed. Explicitly assigning unrelated pods to this pool defeats isolation. A forced process kill can leave filters and IFBs; the next campaign with `--tc-ms` refuses to overwrite them and requires manual cleanup. Without `--tc-ms`, the runner adds no shaping or pool annotation.
 
-The controller computes `ceil(current replicas × all-attempt p90 / target)`, within its configured bounds. `--slo-ms` sets that target and the threshold for both methods' summaries and plots. The collector's separately configured SLO-attainment metric is not changed by the flag; the campaign plots calculate attainment from raw attempts. The controller plans added replicas individually against projected capacity and applies the resulting per-node counts without a per-step cooldown. The descheduler checks every 120 seconds when the workload is settled and scaling is not needed. It evaluates all occupied nodes, selects the largest strictly positive target-minus-current score delta, and removes one source replica before creating its replacement. Placement and replacement remain enforced through node-specific Deployments; this uses Deployment scale-down rather than the Kubernetes Eviction API and does not enforce PodDisruptionBudgets. In-flight progress is stored durably; old surge-first migration state must be completed before upgrading. Missing required metrics make reconciliation fail closed.
+The legacy Python controller computes `ceil(current replicas × all-attempt p90 / target)`, within its configured bounds. `--slo-ms` sets that target and the threshold for both methods' summaries and plots. The collector's separately configured SLO-attainment metric is not changed by the flag; the campaign plots calculate attainment from raw attempts. The controller plans added replicas individually against projected capacity and applies the resulting per-node counts without a per-step cooldown. In this legacy Python configuration, the descheduler checks every 30 seconds by default when the workload is settled and scaling is idle. It evaluates all occupied nodes, selects the largest strictly positive target-minus-current score delta, and removes one source replica before creating its replacement. Placement and replacement remain enforced through node-specific Deployments; this uses Deployment scale-down rather than the Kubernetes Eviction API and does not enforce PodDisruptionBudgets. In-flight progress is stored durably; old surge-first migration state must be completed before upgrading. Missing required metrics make reconciliation fail closed.
 
 The objective is **all-attempt p90 <=150 ms** by default, not a p95 objective. Per-attempt violation rates and p95 remain supplementary diagnostics.
 
@@ -213,7 +215,7 @@ Locality is relative request-attempt demand: `site attempts / total attempts`. I
 
 The Go descheduler evaluates positive score improvements using a post-removal resource snapshot. It skips eviction if the freed source node would win replacement scheduling, waits for settled Pods, and evicts at most one Pod per interval through the Eviction API. The ReplicaSet creates its replacement and the Go scheduler scores current conditions before binding it. PodDisruptionBudget rejection defers eviction.
 
-Both methods use native HPA for replica management. In the full-system comparison, baseline uses CPU HPA and proposed uses latency HPA; in the placement comparison, both use the same latency HPA. Normal scale-down stabilization is 300 seconds (30 seconds with `--debug`). There are no per-node child Deployments or Python controller processes in the default path.
+Both methods use native HPA for replica management. In the full-system comparison, baseline uses CPU HPA and proposed uses latency HPA; in the placement comparison, both use the same latency HPA. The legacy HPA profile defaults to 300 seconds of scale-down stabilization (30 seconds with `--debug`). The vertical suite sets 60 seconds for joint and scaling and disables HPA for mobility. There are no per-node child Deployments or Python controller processes in the default path.
 
 Placement scoring can be configured per campaign without editing `config.yaml`:
 
@@ -453,8 +455,7 @@ steady state: joint's 300s scale-down stabilization spans several 120s phases.
 The staircase gives both HPAs matched behavior: scale up by at most 4 Pods/30s,
 scale down by at most 1 Pod/30s, scale-down stabilization 60s, and scale-down
 tolerance 0.01. This requires Kubernetes support for per-direction HPA tolerance
-(v1.35 cluster used here). CPU baseline still targets 80% of requests. The `ramp` shortcut now opts into the floor-adjusted variant described below;
-direct scenario invocation keeps raw RT/SLO unless `--latency-floor-ms` is set.
+(v1.35 cluster used here). CPU baseline still targets 80% of requests. The staircase defaults to the 125 ms floor-adjusted variant described below.
 These settings do not guarantee SLO attainment or full replica convergence;
 integer rounding, metric delay, and floor choice remain limitations.
 Do not label this configuration as the unchanged default-HPA comparison.
@@ -491,20 +492,19 @@ An overestimated reference can make the signal zero and encourage excessive
 downscaling. A reference close to the SLO increases sensitivity. Record changes
 as distinct experimental configurations rather than tuning an ongoing run.
 
-`--latency-floor-ms` accepts nonnegative whole milliseconds, requires the
-staircase scaling or full/joint comparison with native HPA when nonzero, and
-must be below the internal RT target (`SLO * --rt-target-factor`). Use
-`bash experiments/run.sh ramp scaler_floor_01` to try 125ms, or append
-`--latency-floor-ms 0` to retain raw RT/SLO. Direct campaign invocation defaults
-to zero. Full/joint runs can explicitly use `--latency-floor-ms 125`;
-placement-only mobility retains its matched raw-RT autoscalers.
+Native HPA staircase and full/joint comparisons default to a 125 ms floor.
+`--latency-floor-ms` accepts nonnegative whole milliseconds and must be below
+the internal RT target (`SLO * --rt-target-factor`). Use `--latency-floor-ms 0`
+for raw RT/SLO. Placement-only comparisons with site anchors can opt into the
+floor for both arms.
 
 For each nonzero reference the campaign renders a separate adapter metric, e.g.
 `ue_p90_excess_latency_125ms_seconds`, using
 `clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.125, 0)`
-with the existing complete-telemetry-window guard. Missing/incomplete source
-telemetry stays absent, while an observed latency below the reference produces
-a legitimate zero. The HPA target is `25m` seconds for the 125/150ms example.
+directly from the collector p90 metric (emitted whenever the sliding window is
+nonempty). Missing source telemetry (e.g. idle window) stays absent, while an
+observed latency below the reference produces a legitimate zero. The HPA target
+is `25m` seconds for the 125/150ms example.
 
 `--plan-only` writes the proposed HPA, adapter ConfigMap preview and run metadata
 without cluster access. During an actual campaign, after capacity checks and
@@ -661,11 +661,8 @@ continuous UE transitions, SLO 150ms, TC 10ms, 5 RPS/UE, and max 8 in flight/UE.
 | scaling | 1:1:1 → 4:4:4 → 1:1:1 | Shared min/initial 3, max 12; default scheduler on core-5g | 6 minutes |
 | joint | 1:1:1 → 1:7:1 → 1:1:7 → 1:1:1 | Shared min/initial 3, max 12; full-system comparison | 8 minutes |
 
-Scaling uses the existing floor-adjusted latency policy (130ms reference, 20ms
-excess target). The joint smoke wrapper defaults to the full-system raw RT/SLO
-policy. Full joint campaigns accept an explicit latency floor; the smoke wrapper
-still accepts this override only for scaling. Joint compares the full system,
-so do not interpret it as an isolated scaling comparison.
+The scaling and joint smoke profiles default to a 125 ms reference and a 25 ms
+excess-latency target at a 150 ms SLO. Joint compares the full system.
 Mobility clamps the HPA budget; readiness can temporarily fall during eviction.
 These short tests check wiring, transitions, measurement, and plotting. They do
 not guarantee a particular scaling/relocation action or steady-state result.
@@ -699,8 +696,8 @@ finish. The JSON status records timeout/failure rather than claiming success.
 
 Replica overrides: `--replicas N` for mobility; `--min-replicas N --max-replicas N`
 for scaling/joint. `--config`, `--slo-ms`, `--tc-ms`, `--rps-per-ue`,
-`--max-in-flight-per-ue`, and `--method-order` are available. Scaling alone
-accepts `--latency-floor-ms`; set it explicitly to 0 for a raw-RT smoke comparison.
+`--max-in-flight-per-ue`, and `--method-order` are available. Set
+`--latency-floor-ms 0` for a raw-RT smoke comparison.
 The wrapper does not rebuild images or change image digests. Build and validate
 the HTTP-thread-capable image before attributing a smoke run to five HTTP threads.
 
@@ -819,6 +816,15 @@ original zones. Proposed Go scheduling uses `traffic_share - pod_share` as its
 locality term; ordinary runs keep the previous traffic-share score. The
 Service is deleted during teardown. Both arms retain the same routing setting.
 
+Use `--site-anchors` to enable PreferClose and add one fixed serving replica on
+each eligible application ingress node in both arms. Full topology runs have
+anchors on core, gNB2, and gNB3. Edge-only runs have two anchors, on gNB2 and gNB3.
+The runner waits for the anchors to be ready endpoints of the shared NodePort
+Service before starting UE traffic. The HPAs and proposed controller manage the
+main Deployment. Campaign metadata records the anchor locations and both managed
+and total replica bounds. The scaling-only comparison uses core-5g for all
+application replicas.
+
 Pedestrian Pods use a 35-second `preStop` wait within a 60-second termination
 grace period, allowing in-flight requests time to complete after eviction.
 The descheduler still evicts before the ReplicaSet creates its replacement.
@@ -832,17 +838,16 @@ bash run-experiments-steep.sh
 ```
 
 The script runs `steep_pl_off_01` (baseline first), then `steep_pl_off_02`
-(proposed first). It prints node CPU usage and gnb1's allocated resources
+(proposed first). It prints node CPU usage
 before each campaign and stops if a campaign fails. For an offline preview of both
 campaigns, run `bash run-experiments-steep.sh --plan-only /tmp/steep-edge-plans`.
 
-Both campaigns use `--edge-only` with spillover off. The eligible workload nodes are `gnb1`,
-`gnb-2`, and `gnb-3`, which are the three UE ingress sites. Each has a fixed
-anchor. Both arms use the same latency HPA and PreferClose, which routes
-within the ingress zone while a local endpoint is ready. If an anchor and all
-other local endpoints are unavailable, PreferClose can route to another gNB.
-Compare local-served fractions using the per-site CSV below. Record the pinned
-image digest when comparing with earlier runs.
+Both campaigns use `--edge-only` with spillover off. Only gNB2 and gNB3 host
+application pods, including one fixed anchor each. gNB1 UEs still enter via core,
+where the Service falls back to ready endpoints on the two eligible edge nodes.
+Both arms use the same latency HPA and PreferClose. Compare local-served
+fractions using the per-site CSV below. Record the pinned image digest when
+comparing with earlier runs.
 
 ### Steep placement spillover smoke test
 
@@ -850,7 +855,7 @@ Run this in Bash on core from the repository root before launching the
 later spill-on pair with `bash run-experiments-steep.sh --spill`. Use an idle cluster and a shell with `kubectl`,
 `jq`, `curl`, and the campaign virtual environment. The smoke test uses one
 anchor per site in a temporary namespace, with no UEs, HPA, or TC changes.
-The shell restores the four original zone labels and deletes the namespace
+The shell restores the three original compute-node zone labels and deletes the namespace
 on exit.
 
 ```bash
@@ -863,7 +868,7 @@ ns=${ns,,}
 app=mec-placement-pedestrian-detection
 image=apps/pedestrian-detection/images/bus.jpg
 zone=topology.kubernetes.io/zone
-nodes=(gnb1 gnb-2 gnb-3 core-5g)
+nodes=(core-5g gnb-2 gnb-3)
 loads=()
 bash experiments/run.sh --plan-only "$scratch/plan" --config experiments/campaign-steep.yaml \
   --comparison placement --autoscaler hpa --prefer-close --site-anchors \
@@ -951,6 +956,50 @@ For each arm, `summary-sites.csv` groups successful responses by `phase` and
 and spill rate is `remote_successes / attributed`, where `attributed` is
 `local_successes + remote_successes`. Report `unattributed_successes`
 separately, and leave either fraction blank when the denominator is zero.
-Remote successes include both other gNBs and core. The spill-on minus
+Locality is measured against the application ingress node, so a core response
+to a gNB1 UE counts as local. The spill-on minus
 spill-off comparison accounts for remote routing that also occurs without
 the readiness gate.
+
+## Vertical joint four-arm campaign
+
+On Core, run `./run-vertical-full.sh`. The script is the canonical full-run
+profile. It opens the localhost offloader admin forward if needed, and saves
+stdout and stderr in `results/vertical_joint_full_*.log`. A fresh result
+directory contains the rendered HPA, scheduler config, events and plots.
+`./run-vertical-smoke.sh` uses the same configuration with three 60-second
+phases. Both scripts accept `--plan-only DIRECTORY` for offline validation.
+
+The full schedule is 11 continuous 120-second phases per arm at 5 RPS per UE.
+The runner executes baseline local-only, proposed local-only, baseline vertical,
+then proposed vertical. Every arm has a total desired replica ceiling of 18.
+Local-only starts with three edge anchors and allows up to 15 managed pods.
+Vertical starts with the same anchors and three Core fallback pods and allows
+up to 12 managed pods across edge and Core. The runner seeds one managed replica
+when UE traffic starts and native HPA owns subsequent scaling.
+
+Baseline uses CPU utilization at 80% of requests on the managed Deployment and
+Kubernetes default scheduling. Proposed uses a native external-metric HPA with
+ratio `p90/150` up to 150 ms and `(p90-125)/25` above 150 ms. Both use 60-second
+scale-down stabilization. Joint deliberately limits proposed to one Pod removed
+per 15 seconds via `--proposed-scale-down-period-seconds 15`. Baseline uses the
+cluster's standard HPA rate policy. A separate matched-rate experiment can omit
+the proposed-only flag and pass `--scale-down-pods 1 --scale-down-period-seconds 15`
+for both arms. Scaling uses a matched 1 Pod per 30 seconds, and mobility fixes
+each arm at nine replicas with HPA disabled. Go proposed scheduling uses UPF demand share minus
+managed-pod share independently of Service routing. It watches pod events with
+a 1-second fallback tick. The Go descheduler checks every 30 seconds and
+requires a score improvement of at least 0.05.
+
+Both vertical arms use the same offloader. When a site's Core p90 exceeds
+150 ms for at least five seconds with fresh samples, the offloader can return
+traffic to edge once the site has more Ready local endpoints than it had at
+offload and local probes remain healthy for ten seconds. The 15-second route
+dwell also applies. This Core-overload path uses endpoint growth and probe
+health to authorize the return, without requiring an estimated local RPS limit.
+Runtime switches in either direction share one global 5-second interval across
+sites, configurable through `route_switch_interval_seconds`. The interval
+starts at the decision and restarts when Envoy acknowledges the new route.
+When an ACK times out, the decision time still enforces the interval. Manual
+switches and failback after loss of all Core endpoints share the same interval.
+Campaign setup and cleanup use administrative resets to initialize all routes.

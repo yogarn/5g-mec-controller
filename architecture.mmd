@@ -1,0 +1,78 @@
+flowchart TB
+    subgraph CORE["Core Node — core-5g"]
+        direction LR
+        FGC["5G Core"]
+        PD0["Pedestrian Detection"]
+        CA0["cAdvisor"]
+        COL["UE Collector"]
+        PROM["Prometheus"]
+        CTRL["Custom Scheduler / Descheduler"]
+        HPA["SLO-Based HPA<br/>Prometheus Adapter"]
+        API["Kubernetes API"]
+
+        COL --> PROM
+        CA0 --> PROM
+        PROM --> CTRL
+        PROM --> HPA
+        CTRL -->|"Bind / Evict"| API
+        HPA -->|"Scale"| API
+        API --> PD0
+    end
+
+    subgraph AN1["AN1 — gnb1"]
+        PD1["Pedestrian Detection"]
+        CA1["cAdvisor"]
+        UPF1["UPF"]
+        GNB1["gNodeB"]
+        UE1["UEs"]
+
+        UE1 --> GNB1 --> UPF1
+        UPF1 --> PD1
+    end
+
+    subgraph AN2["AN2 — gnb-2"]
+        PD2["Pedestrian Detection"]
+        CA2["cAdvisor"]
+        UPF2["UPF"]
+        GNB2["gNodeB"]
+        UE2["UEs"]
+
+        UE2 --> GNB2 --> UPF2
+        UPF2 --> PD2
+    end
+
+    subgraph AN3["AN3 — gnb-3"]
+        PD3["Pedestrian Detection"]
+        CA3["cAdvisor"]
+        UPF3["UPF"]
+        GNB3["gNodeB"]
+        UE3["UEs"]
+
+        UE3 --> GNB3 --> UPF3
+        UPF3 --> PD3
+    end
+
+    UPF1 --> FGC
+    UPF1 -->|"Core access"| PD0
+    UPF1 -.->|"UE telemetry transit"| COL
+
+    API --> PD1
+    API --> PD2
+    API --> PD3
+
+    subgraph LEGEND["Legend"]
+        L1["Contribution"]
+        L2["Open source"]
+        L3["Existing"]
+    end
+
+    classDef contribution fill:#dbeafe,stroke:#2563eb,color:#172554
+    classDef opensource fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef existing fill:#f1f5f9,stroke:#64748b,color:#0f172a
+
+    class PD0,PD1,PD2,PD3,COL,CTRL,L1 contribution
+    class CA0,CA1,CA2,CA3,PROM,HPA,API,L2 opensource
+    class FGC,UPF1,UPF2,UPF3,GNB1,GNB2,GNB3,UE1,UE2,UE3,L3 existing
+
+    %% cAdvisor runs on every node; one scrape arrow is shown.
+    %% Service routing may select a pedestrian Pod on any node.
