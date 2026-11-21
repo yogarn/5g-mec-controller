@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.transforms import ScaledTranslation
 from matplotlib.ticker import FixedLocator, MaxNLocator
 from utils.cadvisor_resources import POD_LOOKUP_MAX_AGE_S
+from utils.defaults import SLO_MS
 from utils.phase_windows import summarize_windows, write_windows
 from utils.transient_analysis import _percentile
 from utils.resource_windows import build_resource_windows
@@ -452,7 +453,7 @@ def build_pod_placement_15s(method_dir, window_rows, nodes, freshness_s=POD_LOOK
     return placement_rows
 
 
-def build_pod_observations(method_dir, window_rows, nodes):
+def build_pod_observations(method_dir, window_rows, nodes, *, archived_core_count=None):
     """Keep every saved Pod snapshot at its actual observation time.
 
     Phase intervals are half open, so a boundary observation belongs to the
@@ -475,16 +476,24 @@ def build_pod_observations(method_dir, window_rows, nodes):
         if line.strip():
             rec = json.loads(line)
             if 'error' not in rec and 'pods' in rec and 'sample_time' in rec:
-                observations[float(rec['sample_time'])] = rec['pods']
-    for when, pods in sorted(observations.items()):
+                observations[float(rec['sample_time'])] = rec
+    for when, rec in sorted(observations.items()):
         for index, (phase, start, end, aligned_start) in enumerate(intervals):
             if start <= when < end or (index == len(intervals) - 1 and when == end):
                 for node in nodes:
+                    pods = rec['pods']
+                    from_readiness = False
+                    if node == 'core-5g' and ('core_pods' in rec or archived_core_count is not None):
+                        from_readiness = 'core_pods' not in rec
+                        pods = [*pods, *rec.get('core_pods', [])]
                     selected = [p for p in pods if p.get('node') == node]
+                    count = archived_core_count if from_readiness else len(selected)
+                    ready = archived_core_count if from_readiness else sum(bool(p.get('ready')) for p in selected)
                     output.append(dict(phase=phase, sample_time=when,
                                        aligned_sample_s=aligned_start + when - start,
-                                       node=node, pod_count=len(selected),
-                                       ready_count=sum(bool(p.get('ready')) for p in selected)))
+                                       node=node, pod_count=count, ready_count=ready))
+                    if from_readiness:
+                        output[-1]['from_readiness'] = True
                 break
     return output
 
@@ -1067,8 +1076,8 @@ def main(argv=None, *, export_png=None, slo_coverage=True):
     parser.add_argument("output_dir", type=Path, help="directory for 300 DPI PNG figures")
     parser.add_argument("--csv-dir", type=Path,
                         help="separate CSV/metadata directory; default: sibling csv for plots, csv-review for plots-review, or OUTPUT_DIR-csv")
-    parser.add_argument("--slo-ms", type=float, default=500,
-                        help="controller p90 target and recorded request SLO in milliseconds (default: 500)")
+    parser.add_argument("--slo-ms", type=float, default=SLO_MS,
+                        help="controller p90 target and recorded request SLO in milliseconds (default: %(default)g)")
     args = parser.parse_args(argv)
     export_png = export_png or _export_png
     try:

@@ -49,10 +49,26 @@ class TelemetryPublisher:
             self.dropped += 1
         print(f'warning: telemetry dropped: {reason}', file=sys.stderr)
 
-    def submit(self, source, result):
+    def submit(self, source, result, *, site=None):
+        payload = {
+            'ue_ip': source,
+            'duration_ms': result['duration_ms'],
+            'http_status': result['http_status'],
+            'success': result['success'],
+        }
+        effective_site = result.get('ingress_site') or site
+        if effective_site:
+            payload['site'] = effective_site
+        if result.get('selected_route') in ('local', 'core'):
+            payload['route'] = result['selected_route']
+        if result.get('server_node'):
+            payload['server_node'] = result['server_node']
+        if result.get('traffic_class') in ('user', 'probe'):
+            payload['traffic_class'] = result['traffic_class']
+        if result.get('timed_out'):
+            payload['timed_out'] = True
         try:
-            self.queues[source].put_nowait({'ue_ip': source, 'duration_ms': result['duration_ms'],
-                                           'http_status': result['http_status'], 'success': result['success']})
+            self.queues[source].put_nowait(payload)
         except queue.Full:
             self._drop('queue full')
 
@@ -120,8 +136,11 @@ class TelemetryPublisher:
         print(f'telemetry: delivered={self.delivered} dropped={self.dropped}', file=sys.stderr)
 
 
-def request_with_telemetry(attempt, publisher, url, method, body, headers, source, timeout, **attempt_options):
+def request_with_telemetry(attempt, publisher, url, method, body, headers, source, timeout, *, site=None, **attempt_options):
     result = attempt(url, method, body, headers, source, timeout, **attempt_options)
     if publisher is not None:
-        publisher.submit(source, result)
+        if site is None:
+            publisher.submit(source, result)
+        else:
+            publisher.submit(source, result, site=site)
     return result

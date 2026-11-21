@@ -162,8 +162,13 @@ def attempt(url, method, body, headers, source, timeout, *, response_contract='h
         req_headers['X-Request-ID'] = request_id
     status = None
     error = None
+    timed_out = False
     raw_body = None
     content_type = None
+    ingress_site = None
+    selected_route = None
+    route_version = None
+    traffic_class = None
     conn = None
     try:
         cls = http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection
@@ -175,9 +180,21 @@ def attempt(url, method, body, headers, source, timeout, *, response_contract='h
         response = conn.getresponse()
         status = response.status
         content_type = response.getheader('Content-Type')
+        ingress_site = _optional_str(response.getheader('X-MEC-Site'))
+        raw_route = _optional_str(response.getheader('X-MEC-Route'))
+        if raw_route is not None and raw_route.lower() in ('local', 'core'):
+            selected_route = raw_route.lower()
+        route_version = _optional_str(response.getheader('X-MEC-Route-Version'))
+        raw_tc = _optional_str(response.getheader('X-MEC-Traffic-Class'))
+        if raw_tc is not None and raw_tc.lower() in ('user', 'probe'):
+            traffic_class = raw_tc.lower()
+        if status == 504:
+            timed_out = True
         raw_body = response.read()
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError) as exc:
         error = f'{type(exc).__name__}: {exc}'
+        if isinstance(exc, (socket.timeout, TimeoutError)):
+            timed_out = True
         if isinstance(exc, http.client.IncompleteRead):
             raw_body = exc.partial
     finally:
@@ -234,7 +251,8 @@ def attempt(url, method, body, headers, source, timeout, *, response_contract='h
     return {'start_time': start, 'end_time': end_time,
             'duration_ms': duration_ms,
             'http_status': status, 'error': error,
-            'transport_error': transport_error, 'http_success': http_success,
+            'transport_error': transport_error, 'timed_out': timed_out,
+            'http_success': http_success,
             'response_contract': response_contract, 'response_valid': response_valid,
             'response_validation_error': validation_error,
             'response_content_type': content_type,
@@ -242,6 +260,8 @@ def attempt(url, method, body, headers, source, timeout, *, response_contract='h
             'response_body_truncated': truncated,
             'response_json': payload, 'response_body': response_text,
             'response_parse_error': parse_error,
+            'ingress_site': ingress_site, 'selected_route': selected_route,
+            'route_version': route_version, 'traffic_class': traffic_class or 'user',
             'success': success, **server_fields}
 
 

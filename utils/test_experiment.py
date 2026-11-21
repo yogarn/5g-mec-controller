@@ -30,8 +30,8 @@ class FakeUEs:
         self.closed = True
 
 
-@pytest.mark.parametrize('valid_response', [True, False])
-def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys, valid_response):
+@pytest.mark.parametrize(('valid_response', 'compact_response_log'), [(True, False), (True, True), (False, True)])
+def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys, valid_response, compact_response_log):
     bodies = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -51,7 +51,8 @@ def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys, val
     image.write_bytes(b'fixture-image')
     args = argparse.Namespace(url=f'http://127.0.0.1:{server.server_port}/detect', image=str(image),
                               ue_config='ue.yaml', nr_ue='/bin/nr-ue', phase_schedule='1:1:0:0,1:0:1:0,1:0:0:1',
-                              phase_duration=0.03, timeout=1, output_dir=str(tmp_path / 'run'), armed=True)
+                              phase_duration=0.03, timeout=1, output_dir=str(tmp_path / 'run'), armed=True,
+                              compact_response_log=compact_response_log)
     monkeypatch.setattr(experiment, 'OwnedUELifecycle', FakeUEs)
     try:
         experiment.run(args)
@@ -69,8 +70,12 @@ def test_ramp_switches_and_sends_face_payload(tmp_path, monkeypatch, capsys, val
     records = [json.loads(line) for line in (tmp_path / 'run' / 'requests.jsonl').read_text().splitlines()]
     requests = [r for r in records if r['event'] == 'request']
     assert all(r['http_success'] and r['response_valid'] == valid_response for r in requests)
-    assert all(r['response_json'] == ({'face_count': 0, 'faces': []} if valid_response
-                                     else {'error': 'broken inference'}) for r in requests)
+    expected_payload = {'face_count': 0, 'faces': []} if valid_response else {'error': 'broken inference'}
+    if valid_response and compact_response_log:
+        assert all(r['response_json'] is None and r['response_body'] is None for r in requests)
+    else:
+        assert all(r['response_json'] == expected_payload and json.loads(r['response_body']) == expected_payload
+                   for r in requests)
     assert all(p['successes'] == (p['attempts'] if valid_response else 0) for p in phases)
     if not valid_response:
         assert all(p['slo_attainment_all_attempts'] == 0 for p in phases)
@@ -298,6 +303,7 @@ def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
         campaign_ue.run(settings)
     assert json.loads(captured[captured.index('--site-urls') + 1]) == site_urls
     assert '--url' not in captured
+    assert '--compact-response-log' in captured
     assert captured[captured.index('--rps-per-ue') + 1] == '7.5'
     assert captured[captured.index('--max-in-flight-per-ue') + 1] == '6'
     assert captured[captured.index('--telemetry-url') + 1] == settings['telemetry_url']

@@ -16,21 +16,19 @@ class PreflightError(Exception):
 
 
 def collector_status(settings):
-    """Check scrape health and window completeness independently of latency."""
+    """Check scrape health, overflow counter, and attempts independently of latency."""
     prometheus = Prometheus(settings.prometheus_url, settings.max_metric_age_seconds)
     labels = 'job="ue-telemetry"'
     up = prometheus.scalar(f'up{{{labels}}}')
     if up != 1:
         raise PreflightError('collector scrape is down or invalid')
-    complete = prometheus.scalar(f'ue_request_window_complete{{{labels}}}')
-    if complete == 0:
-        raise PreflightError('collector window incomplete due to overflow')
-    if complete != 1:
-        raise PreflightError('collector window completeness metric is invalid')
+    overflow = prometheus.scalar(f'ue_telemetry_overflow_evictions_total{{{labels}}}')
+    if overflow < 0 or not float(overflow).is_integer():
+        raise PreflightError('collector overflow counter metric is invalid')
     attempts = prometheus.scalar(f'ue_request_window_attempts{{{labels}}}')
     if attempts < 0 or not float(attempts).is_integer():
         raise PreflightError('collector window attempts metric is invalid')
-    return {'attempts': int(attempts), 'window': 'complete', 'scrape': 'up'}
+    return {'attempts': int(attempts), 'overflow_evictions': int(overflow), 'scrape': 'up'}
 
 
 def kubectl(*args):
@@ -122,6 +120,8 @@ def render_report(report):
         if name == 'prometheus_query' and result.get('unverified'):
             lines.append('  Telemetry is not established; verify it before running the controller. '
                          'The controller fails closed without valid latency.')
+    for warning in report.get('warnings', []):
+        lines.append(f'[WARN] {warning}')
     for limitation in report['limitations']:
         lines.append(f'[NOT CHECKED] {limitation}')
     status = ('OK (unverified telemetry warning)' if report['ok'] and
@@ -145,7 +145,7 @@ def main(argv=None):
             report['checks'][name] = {'ok': False, 'error': str(exc)}
             return None
 
-    settings = check('configuration', lambda: load_settings(args.config))
+    settings = check('configuration', lambda: load_settings(args.config, allow_zero_min_replicas=args.allow_zero_replicas))
     identity = (check('workload_identity', lambda: workload_identity(settings.manifest, settings.namespace))
                 if settings else None)
     connected = check('kubernetes', lambda: kubectl('get', '--raw=/readyz').strip() or 'ready')
@@ -174,6 +174,11 @@ def main(argv=None):
 
         check('prometheus_health', http_health)
         collector = check('collector', lambda: collector_status(settings))
+        if collector is not None and collector['overflow_evictions'] > 0:
+            report['warnings'].append(
+                f"collector reported {collector['overflow_evictions']} overflow evictions "
+                '(oldest samples evicted at max_observations)'
+            )
         check('prometheus_query', lambda: {
             'latency_seconds': Prometheus(settings.prometheus_url, settings.max_metric_age_seconds).scalar(settings.latency_query),
             'query': settings.latency_query})

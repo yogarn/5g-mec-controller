@@ -95,7 +95,10 @@ def run_continuous_phases(phases, durations, lifecycle, images, assignments, url
             image_index = assignments[index]
             image = images[image_index]
             group = f"gnb-{session['site'] + 1}"
-            result = dispatch(urls[group], image, session['ip'], publisher)
+            try:
+                result = dispatch(urls[group], image, session['ip'], publisher, site=group)
+            except TypeError:
+                result = dispatch(urls[group], image, session['ip'], publisher)
             with condition:
                 stat['completed'] += 1
                 stat['successes'] += int(result['success'])

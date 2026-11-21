@@ -16,5 +16,5 @@ IMAGE = Path(__file__).resolve().parent.parent / 'apps/face-detection/images'
 NR_UE = HOME / 'ueransim/build/nr-ue'
 SCHEDULE = '1:1:0:0,1:0:1:0,1:0:0:1'
 PHASE_DURATION = 30.0
-SLO_MS = 500.0
+SLO_MS = 150.0
 RESULTS = Path('results')

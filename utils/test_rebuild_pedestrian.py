@@ -100,4 +100,4 @@ def test_short_shell_commands_forward_to_the_right_module(tmp_path, action, args
         assert '--slo-ms' not in cmd
         assert '--tc-ms' not in cmd
         assert cmd[cmd.index('--scenario') + 1] == 'scaler-staircase'
-        assert cmd[cmd.index('--latency-floor-ms') + 1] == '125'
+        assert '--latency-floor-ms' not in cmd  # default is 0.8 x SLO

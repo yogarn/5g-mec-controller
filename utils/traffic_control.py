@@ -7,9 +7,15 @@ Empty clsact hooks are also retained to avoid deleting other owners' filters.
 import hashlib
 import ipaddress
 import json
+import logging
 import math
+import os
+import shlex
 import subprocess
+import time
 import uuid
+
+logger = logging.getLogger(__name__)
 
 POOL_NAME = 'mec-campaign-reserved'
 POOL_CIDR = '172.16.40.0/23'
@@ -103,9 +109,39 @@ class TrafficDelay:
                 result.append((node, interface, 'mec' + suffix))
         return result
 
+    def _read_exec(self, node, description, *args):
+        env = None
+        for attempt in range(1, 4):
+            try:
+                return self._exec(node, *args, capture_output=True, timeout=10, env=env).stdout
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                detail = (exc.stderr or b'').strip()
+                if isinstance(detail, bytes):
+                    detail = detail.decode(errors='replace')
+                message = f'{node}: {description} failed on attempt {attempt}/3: {detail or exc}'
+                if attempt == 3:
+                    raise RuntimeError(message) from exc
+                logger.warning('%s; retrying in 1s with SPDY exec', message)
+                env = dict(os.environ, KUBECTL_REMOTE_COMMAND_WEBSOCKETS='false')
+                time.sleep(1)
+
+    def _read_tc(self, node, *args):
+        return self._read_exec(node, 'tc ' + ' '.join(args), 'tc', *args)
+
+    def _tc_snapshot(self, node, queries):
+        # A separator after each successful command also frames empty filter output.
+        script = '\n'.join(shlex.join(('tc', *query)) + "\nprintf '\\036'" for query in queries)
+        output = self._read_exec(node, 'tc health snapshot', 'sh', '-ec', script)
+        *results, trailing = output.split('\x1e')
+        if len(results) != len(queries) or trailing:
+            raise RuntimeError(f'{node}: incomplete tc health snapshot')
+        return iter(results)
+
+    def _filter_query(self, interface, preference):
+        return ('filter', 'show', 'dev', interface, 'egress', 'pref', str(preference))
+
     def _filter(self, node, interface, preference):
-        return self._exec(node, 'tc', 'filter', 'show', 'dev', interface, 'egress',
-                          'pref', str(preference), capture_output=True).stdout
+        return self._read_tc(node, *self._filter_query(interface, preference))
 
     def start(self):
         if self.started or self.devices:
@@ -114,8 +150,7 @@ class TrafficDelay:
         interfaces = self._agents_and_devices()
         try:
             for node, interface, ifb in interfaces:
-                qdiscs = json.loads(self._exec(node, 'tc', '-j', 'qdisc', 'show', 'dev', interface,
-                                               capture_output=True).stdout)
+                qdiscs = json.loads(self._read_tc(node, '-j', 'qdisc', 'show', 'dev', interface))
                 if not any(q.get('kind') == 'clsact' for q in qdiscs):
                     self._exec(node, 'tc', 'qdisc', 'add', 'dev', interface, 'clsact')
                 for preference in PREFERENCES:
@@ -141,18 +176,28 @@ class TrafficDelay:
     def check(self):
         if not self.started:
             raise RuntimeError('traffic delay is not running')
+        by_node = {}
         for record in self.devices:
-            node, interface, ifb = record['node'], record['interface'], record['ifb']
-            qdiscs = json.loads(self._exec(node, 'tc', '-j', 'qdisc', 'show', 'dev', ifb, capture_output=True).stdout)
-            delays = [q.get('options', {}).get('delay', {}).get('delay') for q in qdiscs if q.get('kind') == 'netem']
-            # iproute2/kernel time conversion can truncate reported microseconds.
-            if len(delays) != 1 or not isinstance(delays[0], (int, float)) or delays[0] <= 0 or not math.isclose(delays[0], self.delay_ms / 1000, rel_tol=1e-9, abs_tol=0.000002):
-                raise RuntimeError(f'{node}/{ifb} {self.delay_ms:g} ms delay is missing or changed')
-            for preference, direction in record['filters']:
-                text = self._filter(node, interface, preference)
-                if (f'{direction}_ip {POOL_CIDR}' not in text or f'{direction}_port 5000' not in text
-                        or f'redirect to device {ifb}' not in text.lower()):
-                    raise RuntimeError(f'{node}/{interface} workload tc filter is missing or changed')
+            by_node.setdefault(record['node'], []).append(record)
+        for node, records in by_node.items():
+            queries = []
+            for record in records:
+                queries.append(('-j', 'qdisc', 'show', 'dev', record['ifb']))
+                queries.extend(self._filter_query(record['interface'], preference)
+                               for preference, _ in record['filters'])
+            results = self._tc_snapshot(node, queries)
+            for record in records:
+                interface, ifb = record['interface'], record['ifb']
+                qdiscs = json.loads(next(results))
+                delays = [q.get('options', {}).get('delay', {}).get('delay') for q in qdiscs if q.get('kind') == 'netem']
+                # iproute2/kernel time conversion can truncate reported microseconds.
+                if len(delays) != 1 or not isinstance(delays[0], (int, float)) or delays[0] <= 0 or not math.isclose(delays[0], self.delay_ms / 1000, rel_tol=1e-9, abs_tol=0.000002):
+                    raise RuntimeError(f'{node}/{ifb} {self.delay_ms:g} ms delay is missing or changed')
+                for preference, direction in record['filters']:
+                    text = next(results)
+                    if (f'{direction}_ip {POOL_CIDR}' not in text or f'{direction}_port 5000' not in text
+                            or f'redirect to device {ifb}' not in text.lower()):
+                        raise RuntimeError(f'{node}/{interface} workload tc filter {preference} is missing or changed')
 
     def close(self):
         errors = []

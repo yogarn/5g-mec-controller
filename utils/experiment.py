@@ -233,6 +233,7 @@ def parse_phase_durations(text, count, default):
 
 def run(args):
     transition = getattr(args, 'phase_transition', 'restart')
+    compact_response_log = getattr(args, 'compact_response_log', False)
     if transition not in ('continuous', 'restart'):
         raise ValueError('phase_transition must be continuous or restart')
     phases = parse_schedule(args.phase_schedule)
@@ -286,6 +287,7 @@ def run(args):
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
                 'workload': 'open-loop-fixed-rate', 'phase_transition': transition,
                 'response_contract': 'detection', 'response_log_schema_version': 1,
+                'response_payload_logging': 'failures-only' if compact_response_log else 'all',
                 'switching': ('continuous-unaffected; moving UEs stop-and-reattach; not handover'
                               if transition == 'continuous' else 'stop-and-reattach; not handover')}
     metadata['images'] = [{key: image[key] for key in ('filename', 'sha256', 'bytes')} for image in images]
@@ -303,6 +305,8 @@ def run(args):
                     with (out / 'ue-transitions.jsonl').open('a', encoding='utf-8') as transitions:
                         transitions.write(json.dumps(record, allow_nan=False) + '\n')
                     return
+                if compact_response_log and record.get('event') == 'request' and record.get('success'):
+                    record = record | {'response_json': None, 'response_body': None}
                 output.write(json.dumps(record, allow_nan=False) + '\n')
                 output.flush()
 
@@ -319,9 +323,9 @@ def run(args):
                 run_continuous_phases(
                     phases, phase_durations, lifecycle, images, assignments, urls,
                     float(rps_per_ue), max_in_flight_per_ue,
-                    lambda url, image, source, publisher: request_with_telemetry(
+                    lambda url, image, source, publisher, site=None: request_with_telemetry(
                         attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout,
-                        response_contract='detection'),
+                        site=site, response_contract='detection'),
                     emit, publisher_factory=(lambda ip: TelemetryPublisher(telemetry, [ip])) if telemetry else None,
                     initial_probe=initial_probe)
             finally:
@@ -364,7 +368,7 @@ def run(args):
                 cancelled = threading.Event()
                 def dispatch(group, source, ue_index, image):
                     return request_with_telemetry(attempt, publisher, urls[group], 'POST', image['body'], image['headers'], source, args.timeout,
-                                                  response_contract='detection')
+                                                  site=group, response_contract='detection')
 
                 try:
                     per_ue = run_fixed_rate_phase(
@@ -419,6 +423,8 @@ def main(argv=None):
     parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE, help='Maximum concurrent in-flight requests per UE')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
     parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')
+    parser.add_argument('--compact-response-log', action='store_true',
+                        help='retain response payloads only for failed requests')
     parser.add_argument('--telemetry-url', help='Collector HTTP(S) /observations URL')
     parser.add_argument('--telemetry-token-file', help='File containing the collector bearer token')
     parser.add_argument('--probe-service-path', action='store_true',

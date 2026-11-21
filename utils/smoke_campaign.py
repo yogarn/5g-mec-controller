@@ -52,8 +52,12 @@ def build_campaign_args(args):
         flags += ['--fixed-replicas', str(args.replicas)]
     else:
         flags += ['--min-replicas', str(args.min_replicas), '--max-replicas', str(args.max_replicas)]
-    if args.profile == 'scaling':
+    if args.latency_floor_ms is not None:
         flags += ['--latency-floor-ms', str(args.latency_floor_ms)]
+    if args.prefer_close:
+        flags.append('--prefer-close-routing-only')
+    if args.deschedule_interval is not None:
+        flags += ['--deschedule-interval', str(args.deschedule_interval)]
     if args.plan_only is not None:
         flags += ['--plan-only', str(args.plan_only.resolve())]
     return flags
@@ -224,8 +228,12 @@ def main(argv=None):
     parser.add_argument('--rps-per-ue', type=float, default=5)
     parser.add_argument('--max-in-flight-per-ue', type=int, default=8)
     parser.add_argument('--latency-floor-ms', type=int, default=None,
-                        help='scaling only: exploratory floor (default: 125); joint uses raw RT/SLO')
+                        help='override the campaign latency floor in ms (0 uses raw RT/SLO)')
     parser.add_argument('--method-order', choices=('baseline-first', 'proposed-first', 'random'), default='baseline-first')
+    parser.add_argument('--prefer-close', action='store_true',
+                        help='use PreferClose Service routing with the same placement score')
+    parser.add_argument('--deschedule-interval', type=float,
+                        help='override the proposed descheduler interval for mobility or joint')
     args = parser.parse_args(argv)
     if args.profile == 'mobility' and (args.min_replicas is not None or args.max_replicas is not None):
         parser.error('mobility uses --replicas; min/max options are for scaling and joint')
@@ -242,10 +250,8 @@ def main(argv=None):
         parser.error('replica counts and maximum in-flight requests must be positive')
     if args.max_replicas < args.min_replicas:
         parser.error('max replicas must be at least min replicas')
-    if args.latency_floor_ms is not None and args.profile != 'scaling':
-        parser.error('--latency-floor-ms is only available for the scaling profile')
-    args.latency_floor_ms = (125 if args.profile == 'scaling' else 0) if args.latency_floor_ms is None else args.latency_floor_ms
-    if args.latency_floor_ms < 0 or args.latency_floor_ms >= args.slo_ms:
+    floor = campaign.DEFAULT_LATENCY_FLOOR_MS if args.latency_floor_ms is None else args.latency_floor_ms
+    if floor < 0 or floor >= args.slo_ms:
         parser.error('latency floor must be nonnegative and smaller than the SLO')
     args.config = args.config.resolve(strict=True)
     if args.plan_only is not None:
@@ -254,8 +260,6 @@ def main(argv=None):
     metadata = smoke_metadata(args, flags)
     print(f"{args.profile}: {metadata['traffic_seconds_total'] // 60} minutes traffic across both methods; "
           '60s phases, continuous UE transitions. Stop guard: 13 minutes, plus cleanup.', flush=True)
-    if args.profile == 'joint':
-        print('Joint uses the existing full-system raw RT/SLO policy, without the scaling-only floor.', flush=True)
     if args.plan_only is not None:
         campaign.main(flags)
         (args.plan_only / 'smoke-plan.json').write_text(json.dumps(metadata, indent=2) + '\n')

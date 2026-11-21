@@ -34,7 +34,7 @@ def test_offline_profiles_render_real_campaigns_without_subprocess(tmp_path, mon
     assert plan['replica_bounds'] == {'min': minimum, 'max': maximum}
     assert plan['slo_ms'] == 150 and plan['tc_ms'] == 10
     assert plan['pacing'] == {'rps_per_ue': 5, 'max_in_flight_per_ue': 8}
-    assert plan['latency_floor_ms'] == (125 if profile == 'scaling' else 0)
+    assert plan['latency_floor_ms'] == 120
     for method in ['baseline', 'proposed']:
         hpa = yaml.safe_load((out / f'{method}-hpa.yaml').read_text())
         assert hpa['spec']['minReplicas'] == minimum
@@ -83,7 +83,7 @@ def test_invalid_custom_schedule_rejected_before_plan_or_cluster(tmp_path, monke
     ['scaling', 'test', '--min-replicas', '4', '--max-replicas', '3'],
     ['scaling', 'test', '--replicas', '5'],
     ['mobility', 'test', '--min-replicas', '3'],
-    ['joint', 'test', '--latency-floor-ms', '130'],
+    ['joint', 'test', '--latency-floor-ms', '-1'],
     ['scaling', 'test', '--slo-ms', '100'],  # Do not silently change the floor formula.
     ['mobility', 'test', '--rps-per-ue', 'nan'],
 ])

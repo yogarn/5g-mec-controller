@@ -46,7 +46,7 @@ class Settings:
     scheduler_interval_seconds: float = 1.0
 
 
-def load_settings(path: str) -> Settings:
+def load_settings(path: str, *, allow_zero_min_replicas: bool = False) -> Settings:
     config_path = Path(path).resolve()
     with config_path.open() as f:
         data = yaml.safe_load(f)
@@ -72,9 +72,11 @@ def load_settings(path: str) -> Settings:
         raise ValueError('mode must be scaling-only or mobility-aware')
     if type(data.get('mutate', False)) is not bool:
         raise ValueError('mutate must be a boolean')
-    for key in ('min_replicas', 'max_replicas'):
-        if type(data[key]) is not int or data[key] < 1:
-            raise ValueError(f'{key} must be a positive integer')
+    min_lower = 0 if allow_zero_min_replicas else 1
+    if type(data['min_replicas']) is not int or data['min_replicas'] < min_lower:
+        raise ValueError(f'min_replicas must be a {"nonnegative" if allow_zero_min_replicas else "positive"} integer')
+    if type(data['max_replicas']) is not int or data['max_replicas'] < 1:
+        raise ValueError('max_replicas must be a positive integer')
     if data['min_replicas'] > data['max_replicas']:
         raise ValueError('min_replicas exceeds max_replicas')
     nodes = data.get('eligible_nodes', [])
@@ -130,10 +132,10 @@ def load_settings(path: str) -> Settings:
                     data.get('cpu_utilization_query'), data.get('mobility_query'),
                     number('cpu_saturation', .8, 0, 1), float(locality_weight),
                     number('cooldown_seconds', 120, 0),
-                    number('max_metric_age_seconds', 120, 0),
+                    number('max_metric_age_seconds', 30, 0),
                     number('scale_down_seconds', 300, 0), resource_weights, tuple(gpu_nodes),
                     data.get('gpu_utilization_query'), data.get('vram_utilization_query'),
-                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 120, 0),
+                    tuple(zero_locality_nodes), number('deschedule_interval_seconds', 30, 0),
                     scheduler_name.strip(), number('scheduler_interval_seconds', 1.0, 0))
 
 

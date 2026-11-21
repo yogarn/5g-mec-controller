@@ -68,7 +68,7 @@ def quantity(value, kind):
     raise ValueError(f'unsupported {kind} quantity: {value}')
 
 
-def sample(output, namespace='services', app='mec-placement-face-detection', pods_only=False):
+def sample(output, namespace='services', app='mec-placement-face-detection', pods_only=False, *, core_app=None):
     stop = False
     def request_stop(signum, frame):
         nonlocal stop
@@ -79,17 +79,22 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
         next_sample = time.monotonic()
         while not stop:
             try:
-                pods = kubectl(namespace, 'get', 'pods', '-l', 'app=' + app, '-o', 'json')['items']
+                selector = f'app in ({app},{core_app})' if core_app else f'app={app}'
+                pods = kubectl(namespace, 'get', 'pods', '-l', selector, '-o', 'json')['items']
                 rows = []
+                core_rows = []
                 container_statuses = {}
                 for pod in pods:
                     metadata, status = pod['metadata'], pod.get('status', {})
                     if metadata.get('deletionTimestamp') or status.get('phase') in ('Succeeded', 'Failed'):
                         continue
-                    rows.append({'name': metadata['name'], 'node': pod.get('spec', {}).get('nodeName') or '<pending>',
+                    is_core = bool(core_app and metadata.get('labels', {}).get('app') == core_app)
+                    (core_rows if is_core else rows).append({'name': metadata['name'], 'node': pod.get('spec', {}).get('nodeName') or '<pending>',
                                  'phase': status.get('phase'),
                                  'ready': any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', [])),
                                  **{k: v for k, v in pod_timing_fields(pod).items() if v is not None}})
+                    if is_core:
+                        continue
                     cs_list = status.get('containerStatuses') or []
                     if cs_list:
                         term_reasons = []
@@ -112,6 +117,8 @@ def sample(output, namespace='services', app='mec-placement-face-detection', pod
                             'waiting_reasons': wait_reasons,
                         }
                 observation = {'sample_time': time.time(), 'pods': rows, 'metrics': {}}
+                if core_app:
+                    observation['core_pods'] = core_rows
                 if container_statuses:
                     observation['container_statuses'] = container_statuses
                 if not pods_only:
@@ -438,6 +445,7 @@ def main():
     p.add_argument('--namespace', default='services', help='workload namespace (default: services)')
     p.add_argument('--app', default='mec-placement-face-detection', help='workload app label and Pod prefix')
     p.add_argument('--pods-only', action='store_true', help='record Pod lifecycle/placement only without querying Metrics Server')
+    p.add_argument('--core-app', help='record Core fallback pods separately for placement plots')
     p = sub.add_parser('hpa-sample'); p.add_argument('output')
     p.add_argument('--namespace', default='services', help='HPA namespace (default: services)')
     p.add_argument('--hpa', required=True, help='HPA resource name')
@@ -446,7 +454,7 @@ def main():
     p.add_argument('--skip-resource-csv', action='store_true', help='skip resource-by-ramp.csv when cAdvisor is the primary resource source')
     args = parser.parse_args()
     if args.action == 'sample':
-        sample(args.output, args.namespace, args.app, pods_only=args.pods_only)
+        sample(args.output, args.namespace, args.app, pods_only=args.pods_only, core_app=args.core_app)
     elif args.action == 'hpa-sample':
         sample_hpa(args.output, args.namespace, args.hpa, interval=args.interval)
     else:

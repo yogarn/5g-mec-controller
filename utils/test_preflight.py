@@ -77,7 +77,7 @@ class PreflightTests(unittest.TestCase):
         return code, json.loads(output.getvalue()) if json_output else output.getvalue()
 
     def test_success_and_idle_report(self):
-        values = {'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 3}
+        values = {'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 3}
         code, report = self.run_preflight(values)
         self.assertEqual(code, 0)
         self.assertEqual(report['checks']['prometheus_query']['detail']['latency_seconds'], 0.2)
@@ -102,7 +102,7 @@ class PreflightTests(unittest.TestCase):
         metrics = dict(line.split(' ', 1) for line in collector.metrics().splitlines()
                        if line and not line.startswith('#') and '{' not in line)
         self.assertEqual(metrics['ue_request_window_successes'], '0')
-        values = {'up': 1, 'ue_request_window_complete': float(metrics['ue_request_window_complete']),
+        values = {'up': 1, 'ue_telemetry_overflow_evictions_total': float(metrics['ue_telemetry_overflow_evictions_total']),
                   'ue_request_window_attempts': float(metrics['ue_request_window_attempts'])}
         code, report = self.run_preflight(values, latency=float(metrics[QUERY.split('{')[0]]))
         self.assertEqual(code, 0)
@@ -111,7 +111,7 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(report['checks']['prometheus_query'].get('unverified', False))
 
     def test_old_success_only_query_is_not_treated_as_collector_idle(self):
-        values = {'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 0}
+        values = {'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 0}
         code, report = self.run_preflight(
             values, ValueError('Prometheus query returned no samples'),
             query='ue_request_duration_p90_seconds{job="ue-telemetry"}')
@@ -121,15 +121,16 @@ class PreflightTests(unittest.TestCase):
     def test_missing_latency_only_idle_when_collector_is_healthy(self):
         no_samples = ValueError('Prometheus query returned no samples')
         cases = [
-            ({'up': 0, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 0}, no_samples),
-            ({'up': 1, 'ue_request_window_complete': 0, 'ue_request_window_attempts': 0}, no_samples),
-            ({'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 2}, no_samples),
-            ({'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': -1}, no_samples),
-            ({'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 0},
+            ({'up': 0, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 0}, no_samples),
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': -1, 'ue_request_window_attempts': 0}, no_samples),
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': 1.5, 'ue_request_window_attempts': 0}, no_samples),
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 2}, no_samples),
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': -1}, no_samples),
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 0},
              ValueError('Prometheus sample is NaN')),
-            ({'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 0},
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 0},
              ValueError('invalid or stale Prometheus sample')),
-            ({'up': 1, 'ue_request_window_complete': ValueError('bad response'),
+            ({'up': 1, 'ue_telemetry_overflow_evictions_total': ValueError('bad response'),
               'ue_request_window_attempts': 0}, no_samples),
         ]
         for values, latency in cases:
@@ -137,13 +138,24 @@ class PreflightTests(unittest.TestCase):
                 code, report = self.run_preflight(values, latency)
                 self.assertEqual(code, 1)
                 self.assertFalse(report['checks']['prometheus_query'].get('unverified', False))
-        values = {'up': 1, 'ue_request_window_complete': 0, 'ue_request_window_attempts': 0}
+        # Overflow evictions are informational and non-fatal.
+        values = {'up': 1, 'ue_telemetry_overflow_evictions_total': 1, 'ue_request_window_attempts': 3}
         code, report = self.run_preflight(values, 0.2)
-        self.assertEqual(code, 1)
-        self.assertIn('overflow', report['checks']['collector']['error'])
+        self.assertEqual(code, 0)
+        self.assertEqual(report['checks']['collector']['detail']['overflow_evictions'], 1)
+        self.assertTrue(any('overflow' in w for w in report['warnings']))
+        code, text = self.run_preflight(values, 0.2, json_output=False)
+        self.assertEqual(code, 0)
+        self.assertIn('[WARN] collector reported 1 overflow evictions', text)
+        idle_overflow = {'up': 1, 'ue_telemetry_overflow_evictions_total': 1, 'ue_request_window_attempts': 0}
+        code, report = self.run_preflight(idle_overflow, no_samples)
+        self.assertEqual(code, 0)
+        self.assertTrue(report['checks']['prometheus_query']['unverified'])
+        self.assertEqual(report['checks']['collector']['detail']['overflow_evictions'], 1)
+        self.assertTrue(any('overflow' in w for w in report['warnings']))
 
     def test_missing_resources_fail(self):
-        values = {'up': 1, 'ue_request_window_complete': 1, 'ue_request_window_attempts': 1}
+        values = {'up': 1, 'ue_telemetry_overflow_evictions_total': 0, 'ue_request_window_attempts': 1}
         for missing in ('deployment', 'service'):
             with self.subTest(missing=missing):
                 code, report = self.run_preflight(values, missing=missing)

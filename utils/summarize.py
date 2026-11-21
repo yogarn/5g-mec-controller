@@ -71,7 +71,7 @@ def unique_object(pairs):
     return result
 
 
-def summarize(path, slo_ms, ue_results=None, site_results=None):
+def summarize(path, slo_ms, ue_results=None, site_results=None, *, ingress_nodes=SITE_NODES):
     number(slo_ms, 'SLO', minimum=0)
     phases = []
     ue_rows = []
@@ -244,7 +244,7 @@ def summarize(path, slo_ms, ue_results=None, site_results=None):
                                         'slo_ms': slo_ms, 'slo_met_attempts': ue_slo_met,
                                         'slo_attainment_all_attempts': ue_slo_met / ue_attempts if ue_attempts else None,
                                         'slo_attainment_scheduled': ue_slo_met / ue_scheduled if ue_scheduled else None})
-                    for group, local_node in SITE_NODES.items():
+                    for group, local_node in ingress_nodes.items():
                         site_keys = [key for key in current['ues'] if key[0] == group]
                         site_scheduled = sum(ue_arrival[k][0] for k in site_keys)
                         site_started = sum(ue_arrival[k][1] for k in site_keys)
@@ -333,6 +333,8 @@ def main(argv=None):
     parser.add_argument('input', nargs='?', help='request JSONL; defaults to the sole run in results/')
     parser.add_argument('--output-prefix', help='output prefix; defaults to summary beside the input')
     parser.add_argument('--slo-ms', type=float, default=defaults.SLO_MS, help='inclusive latency SLO in milliseconds')
+    parser.add_argument('--gnb1-ingress-node', default=SITE_NODES['gnb-1'],
+                        help='application ingress node for gNB1 when calculating local responses')
     args = parser.parse_args(argv)
     try:
         if args.input is None:
@@ -344,7 +346,8 @@ def main(argv=None):
             args.output_prefix = str(Path(args.input).parent / 'summary')
         ue_results = []
         site_results = []
-        phases = summarize(args.input, args.slo_ms, ue_results, site_results)
+        ingress_nodes = SITE_NODES | {'gnb-1': args.gnb1_ingress_node}
+        phases = summarize(args.input, args.slo_ms, ue_results, site_results, ingress_nodes=ingress_nodes)
         write_results(phases, args.output_prefix, ue_results, site_results)
         print(f'Summarized {len(phases)} phase(s), {len(site_results)} per-site result(s), and {len(ue_results)} per-UE result(s)')
         print(f'  Phase JSON: {args.output_prefix}.json')
