@@ -18,8 +18,8 @@ def test_a4_a5_defaults_and_plan_provenance(tmp_path):
 
     assert plan['hpa_scale_down'] == {
         'stabilization_window_seconds': 60,
-        'pods': 1,
-        'period_seconds': 30,
+        'pods': None,
+        'period_seconds': None,
     }
     assert plan['method_order_requested'] == 'baseline-first'
     assert plan['method_order'] == ['baseline', 'proposed']
@@ -46,7 +46,6 @@ def test_a5_custom_scale_down_applied_identically_to_both_hpas(tmp_path):
 
     expected_sd = {
         'stabilizationWindowSeconds': 30,
-        'tolerance': 0.01,
         'policies': [{'type': 'Pods', 'value': 2, 'periodSeconds': 30}],
     }
     assert base_hpa['spec']['behavior']['scaleDown'] == expected_sd

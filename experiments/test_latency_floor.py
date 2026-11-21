@@ -28,7 +28,7 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     assert rules[0]['name']['as'] == 'ue_p90_latency_seconds'
     assert rules[-1]['resources'] == {'namespaced': False}
     assert '- 0.13, 0)' in rules[-1]['metricsQuery']
-    assert 'ue_request_window_complete{job="ue-telemetry"} == 1' in rules[-1]['metricsQuery']
+    assert 'ue_request_window_complete' not in rules[-1]['metricsQuery']
 
 
 @pytest.mark.parametrize('factor,excess_target', [('1.0', '20m'), ('0.95', '12.5')])
@@ -59,7 +59,7 @@ def test_joint_floor_preserves_placement_and_reporting(tmp_path, factor, excess_
         assert spec['schedulerName'] == scheduler
         terms = spec['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
         assert {value for term in terms for match in term['matchFields']
-                for value in match['values']} == {'gnb1', 'gnb-2', 'gnb-3', 'core-5g'}
+                for value in match['values']} == {'gnb-2', 'gnb-3', 'core-5g'}
     cfg = yaml.safe_load((out / 'proposed-controller.yaml').read_text())
     assert cfg['slo_seconds'] == .15
 
@@ -120,3 +120,27 @@ def test_adapter_install_saves_config_and_rolls_back_failed_rollout(tmp_path, mo
     assert not any('apply' in c for c in calls)
     first_patch = json.loads(next(c[-1] for c in calls if 'patch' in c))
     assert first_patch['metadata']['resourceVersion'] == '42'
+
+
+@pytest.mark.parametrize('flags,stabilization', [
+    (['--comparison', 'full', '--scale-down-stabilization-seconds', '300'], 300),
+    (['--comparison', 'scaling', '--scenario', 'scaler-staircase'], 60),
+])
+def test_asymmetric_hpa_plan(tmp_path, flags, stabilization):
+    out = tmp_path / 'asymmetric'
+    campaign.main([*flags, '--asymmetric-latency', '--plan-only', str(out)])
+    plan = yaml.safe_load((out / 'plan.yaml').read_text())
+    proposed = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())['spec']
+    baseline = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())['spec']
+    external = proposed['metrics'][0]['external']
+    assert external['target']['value'] == '150m'
+    assert baseline['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert proposed['behavior']['scaleDown']['stabilizationWindowSeconds'] == stabilization
+    name = external['metric']['name']
+    assert plan['rt_metric_name'] == name
+    adapter = yaml.safe_load((out / 'floor-adapter-configmap.yaml').read_text())
+    rules = yaml.safe_load(adapter['data']['config.yaml'])['externalRules']
+    query = next(rule['metricsQuery'] for rule in rules if rule['name']['as'] == name)
+    assert '(120 / 30' in query
+    assert '- 0.15, 0)' in query
+    assert 'ue_request_window_complete' not in query

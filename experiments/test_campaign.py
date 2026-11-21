@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tarfile
 import types
+from urllib.error import HTTPError
 
 import pytest
 import yaml
@@ -13,10 +14,87 @@ from experiments import campaign
 from benchmark.client import parse_schedule
 
 
+@pytest.mark.parametrize(('status_codes', 'expected', 'elapsed'), [
+    ([503, 200], 200, 0.5),
+    ([401], 401, 0.0),
+    ([503] * 41, 503, 20.0),
+])
+def test_envoy_preflight_retries_only_transient_unavailable(monkeypatch, status_codes, expected, elapsed):
+    now = [0.0]
+    replies = iter(status_codes)
+    monkeypatch.setattr(campaign.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(campaign.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def probe(request, timeout):
+        assert request.get_header('X-mec-preflight') == 'core'
+        code = next(replies)
+        headers = {'X-MEC-Route': 'core'}
+        body = io.BytesIO(b'readiness response')
+        if code != 200:
+            raise HTTPError(request.full_url, code, '', headers, body)
+        body.status = code
+        body.headers = headers
+        return body
+
+    monkeypatch.setattr(campaign, 'urlopen', probe)
+    status, headers, _ = campaign._default_envoy_preflight_probe(
+        'http://localhost/ready', headers={'X-MEC-Preflight': 'core'},
+    )
+    assert status == expected
+    assert headers['x-mec-route'] == 'core'
+    assert now[0] == elapsed
+
+
 def test_workload_service_accepts_cluster_wide_routing():
     documents = yaml.safe_load_all((campaign.ROOT / 'apps/face-detection/manifest.yaml').read_text())
     service = next(document for document in documents if document['kind'] == 'Service')
     campaign.check_service_routing(service)
+
+
+def test_fixed_vertical_mobility_plan_counts_all_nine_pods_without_hpa(tmp_path):
+    output = tmp_path / 'mobility'
+    campaign.main([
+        '--config', 'experiments/campaign-vertical.yaml',
+        '--scenario', 'mobility9', '--comparison', 'placement', '--vertical-mode', 'four-arm',
+        '--site-anchors', '--fixed-replicas', '9', '--no-hpa',
+        '--phase-schedule', '18:6:6:6,18:14:2:2,18:2:14:2,18:2:2:14',
+        '--plan-only', str(output),
+    ])
+    plan = yaml.safe_load((output / 'plan.yaml').read_text())
+    assert plan['hpa_managed_bounds_by_arm'] is None
+    for arm, method, mode in campaign.FOUR_ARM_SPECS:
+        spec = plan['arm_budgets'][arm]
+        assert spec['initial_total_replicas'] == spec['min_replicas'] == spec['max_replicas'] == 9
+        deployment = next(yaml.safe_load_all((output / arm / f'{method}-workload.yaml').read_text()))
+        assert deployment['spec']['replicas'] == (6 if mode == 'local-only' else 3)
+        assert not list((output / arm).glob('*-hpa.yaml'))
+
+
+def test_joint_plan_limits_only_response_time_hpa_scale_down(tmp_path):
+    output = tmp_path / 'joint'
+    campaign.main([
+        '--config', 'experiments/campaign-vertical.yaml',
+        '--scenario', 'mobility9', '--comparison', 'full', '--vertical-mode', 'four-arm',
+        '--site-anchors', '--latency-floor-ms', '125', '--asymmetric-latency',
+        '--proposed-scale-down-period-seconds', '15', '--scale-down-stabilization-seconds', '60',
+        '--plan-only', str(output),
+    ])
+    adapter = yaml.safe_load((output / 'floor-adapter-configmap.yaml').read_text())
+    rules = yaml.safe_load(adapter['data']['config.yaml'])['externalRules']
+    assert not any('site_scale_down' in r.get('name', {}).get('as', '') for r in rules)
+    for arm, method, _ in campaign.FOUR_ARM_SPECS:
+        spec = yaml.safe_load((output / arm / f'{method}-hpa.yaml').read_text())['spec']
+        if method == 'proposed':
+            assert spec['behavior']['scaleDown'] == {
+                'stabilizationWindowSeconds': 60,
+                'policies': [{'type': 'Pods', 'value': 1, 'periodSeconds': 15}],
+            }
+            assert len(spec['metrics']) == 1
+            assert spec['metrics'][0]['external']['metric']['name'] == 'ue_p90_asymmetric_125ms_target_150ms_seconds'
+            assert spec['metrics'][0]['external']['target'] == {'type': 'Value', 'value': '150m'}
+        else:
+            assert 'policies' not in spec['behavior']['scaleDown']
+            assert len(spec['metrics']) == 1
 
 
 @pytest.mark.parametrize('field,value', [
@@ -218,7 +296,8 @@ def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp
         assert '[1m]' in config['cpu_utilization_query']
         assert config['slo_seconds'] == .3
         assert config['max_replicas'] == 30
-        assert config['mobility_query'].endswith('/ 15')
+        assert config['mobility_query'] == campaign.UPF_PLACEMENT_QUERY
+        assert config['latency_query'] == 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
     assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
     assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 30
     assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
@@ -324,7 +403,7 @@ def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
     assert metadata['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
     assert metadata['prefer_close'] is True
     assert metadata['provenance']['site_anchors'] is True
-    assert metadata['site_anchor_nodes'] == {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
+    assert metadata['site_anchor_nodes'] == {'gnb-1': 'core-5g', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
     assert metadata['replica_bounds'] == {'min': 3, 'max': 16}
     assert metadata['initial_replicas'] == 3
     assert metadata['managed_replica_bounds'] == {'min': 1, 'max': 13}
@@ -376,7 +455,7 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled, edge_
     assert meta['hpa_targets']['baseline'] == meta['hpa_targets']['proposed']
     assert meta['workload_image_digest'] == meta['provenance']['workload_image'].split('@')[1]
     assert meta['provenance']['workload_image_digest'] == meta['workload_image_digest']
-    expected_nodes = ['gnb1', 'gnb-2', 'gnb-3'] if edge_only else ['gnb1', 'gnb-2', 'gnb-3', 'core-5g']
+    expected_nodes = ['gnb-2', 'gnb-3'] if edge_only else ['core-5g', 'gnb-2', 'gnb-3']
     for item in (meta, meta['provenance'], meta['campaign_settings']):
         assert item.get('edge_only', False) is edge_only
     if edge_only:
@@ -392,7 +471,7 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled, edge_
     baseline, proposed = [yaml.safe_load((plan / f'{method}-hpa.yaml').read_text())['spec']
                           for method in ('baseline', 'proposed')]
     assert baseline == proposed
-    assert (baseline['minReplicas'], baseline['maxReplicas']) == (1, 13)
+    assert (baseline['minReplicas'], baseline['maxReplicas']) == (1, 14 if edge_only else 13)
     metric = baseline['metrics'][0]['external']
     assert metric['metric']['name'] == 'ue_p90_excess_latency_125ms_seconds'
     assert metric['target']['value'] == '25m'
@@ -401,17 +480,17 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled, edge_
     original_container = original['spec']['template']['spec']['containers'][0]
     anchors = list(yaml.safe_load_all((plan / 'site-anchors.yaml').read_text()))
     assert {dep['spec']['template']['spec']['nodeSelector']['kubernetes.io/hostname']
-            for dep in anchors} == {'gnb1', 'gnb-2', 'gnb-3'}
+            for dep in anchors} == set(expected_nodes)
     workloads = []
     for method in ('baseline', 'proposed'):
         deployment, service = yaml.safe_load_all((plan / f'{method}-workload.yaml').read_text())
         assert service['spec']['trafficDistribution'] == 'PreferClose'
         controller = yaml.safe_load((plan / f'{method}-controller.yaml').read_text())
         assert controller['eligible_nodes'] == expected_nodes
-        assert controller['zero_locality_nodes'] == ([] if edge_only else ['core-5g'])
+        assert controller['zero_locality_nodes'] == []
         if edge_only:
             assert controller['cpu_utilization_query'].endswith(
-                'and on(node) node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}')
+                'and on(node) node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb-2|gnb-3"}')
         workloads.append(deployment)
     for deployment in workloads + anchors:
         spec = deployment['spec']['template']['spec']
@@ -431,6 +510,32 @@ def test_steep_placement_spill_plan(tmp_path, method_order, spill_enabled, edge_
             assert container['startupProbe']['httpGet']['path'] == '/health'
         else:
             assert container == original_container
+
+
+@pytest.mark.parametrize('routing_flags', [[], ['--prefer-close-routing-only']])
+def test_radio_only_gnb1_routes_to_core_and_excludes_radio_from_placement(tmp_path, routing_flags):
+    plan = tmp_path / 'plan'
+    campaign.main([
+        'radio_only_test', '--config', str(campaign.ROOT / 'experiments/campaign-mobility-core.yaml'),
+        '--scenario', 'mobility9', '--fixed-replicas', '3', '--deschedule-interval', '5',
+        '--plan-only', str(plan), *routing_flags,
+    ])
+    metadata = yaml.safe_load((plan / 'plan.yaml').read_text())
+    assert metadata['radio_only_nodes'] == ['gnb1']
+    assert metadata['application_ingress_nodes']['gnb-1'] == 'core-5g'
+    assert metadata['application_ingress_ips']['gnb-1'] == '10.34.211.140'
+    for method in ('baseline', 'proposed'):
+        deployment, service = yaml.safe_load_all((plan / f'{method}-workload.yaml').read_text())
+        pod_spec = deployment['spec']['template']['spec']
+        terms = pod_spec['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
+        assert {term['matchFields'][0]['values'][0] for term in terms} == {'core-5g', 'gnb-2', 'gnb-3'}
+        assert deployment['spec']['replicas'] == 3
+        assert service['spec'].get('trafficDistribution') == ('PreferClose' if routing_flags else None)
+        controller = yaml.safe_load((plan / f'{method}-controller.yaml').read_text())
+        assert set(controller['eligible_nodes']) == {'core-5g', 'gnb-2', 'gnb-3'}
+        assert controller['zero_locality_nodes'] == []
+        assert controller['mobility_query'] == campaign.UPF_PLACEMENT_QUERY
+        assert controller['prefer_close'] is (method == 'proposed')
 
 
 @pytest.mark.parametrize(('flags', 'error'), [
@@ -478,7 +583,7 @@ def test_edge_only_connectivity_probe_renders_one_node_per_match_term(monkeypatc
     affinity = deployment['spec']['template']['spec']['affinity']['nodeAffinity']
     assert affinity['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'] == [
         {'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [node]}]}
-        for node in ('gnb1', 'gnb-2', 'gnb-3')
+        for node in ('gnb-2', 'gnb-3')
     ]
 
 
@@ -493,7 +598,7 @@ def test_site_anchor_readiness_requires_an_anchor_on_each_site(monkeypatch):
         stdout=json.dumps({'items': [{'endpoints': endpoints}]})))
     campaign._wait_site_anchor_endpoints(app, timeout=0)
     endpoints[0]['targetRef']['name'] = f'{app}-managed-pod'
-    with pytest.raises(RuntimeError, match='missing ready site-anchor endpoints on gnb1'):
+    with pytest.raises(RuntimeError, match='missing ready site-anchor endpoints on core-5g'):
         campaign._wait_site_anchor_endpoints(app, timeout=0)
 
 
@@ -719,7 +824,7 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     run_root.mkdir()
     if site_anchors:
         monkeypatch.setattr(campaign, 'check_node_capacity', lambda node, *a: capacity_checks.append(node))
-        monkeypatch.setattr(campaign, '_wait_site_anchor_endpoints', lambda *a: None)
+        monkeypatch.setattr(campaign, '_wait_site_anchor_endpoints', lambda *a, **kw: None)
         campaign._campaign_manifest(run_root, True, settings['workload'], prefer_close=True, site_anchors=True,
                                     edge_only=edge_only)
     campaign.run_method(
@@ -745,7 +850,8 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
     assert cfg['prometheus_url'] == 'http://placement-prometheus.placement.svc:9090'
     assert cfg['mutate'] is True
     assert ('core-5g' in cfg['eligible_nodes']) is not edge_only
-    assert capacity_checks == (['gnb1', 'gnb-2', 'gnb-3'] if site_anchors else [])
+    anchor_sites = campaign._site_anchor_nodes(edge_only) if site_anchors else {}
+    assert capacity_checks == list(anchor_sites.values())
     assert 'scheduler bound pod=test' in (run_root / 'proposed' / 'controller.log').read_text()
     app = campaign.workload_identity(settings['workload'])
     scale_calls = [args for args in kube_calls if 'scale' in args]
@@ -754,7 +860,7 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
                                 '--current-replicas=0', '--replicas=1')]
         assert ('-n', campaign.NAMESPACE, 'rollout', 'status', f'deployment/{app}',
                 '--timeout=180s') not in kube_calls
-        for site in campaign.SITE_NODES:
+        for site in anchor_sites:
             assert ('-n', campaign.NAMESPACE, 'rollout', 'status', f'deployment/{app}-anchor-{site}',
                     '--timeout=180s') in kube_calls
     else:
@@ -800,9 +906,42 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
     assert cfg['deschedule_interval_seconds'] == 30
     original = yaml.safe_load((campaign.ROOT / 'config.yaml').read_text())
-    assert cfg['cpu_utilization_query'] == original['cpu_utilization_query']
+    assert cfg['cpu_utilization_query'] == original['cpu_utilization_query'].replace('gnb1|', 'core-5g|')
     cm = campaign._render_incluster_placement_configmap(cfg, cfg['manifest'])
-    assert yaml.safe_load(cm['data']['config.yaml'])['deschedule_interval_seconds'] == 30
+    cm_cfg = yaml.safe_load(cm['data']['config.yaml'])
+    assert cm_cfg['deschedule_interval_seconds'] == 30
+    for dead_key in campaign._GO_PLACEMENT_OMIT_KEYS:
+        assert dead_key not in cm_cfg
+    assert 'gpu_nodes' in cm_cfg
+    assert cm_cfg['resource_weights'] == {'cpu': 0.5, 'memory': 0.5, 'gpu': 0.0, 'vram': 0.0}
+
+
+def test_two_dim_resource_weights_match_legacy_four_dim_with_zero_gpu_vram():
+    """Verify 2D (cpu, memory) placement score equals legacy 4D score when gpu=vram=0."""
+    nodes = [
+        {'name': 'gnb1', 'cap': {'cpu': 8.0, 'memory': 16.0}, 'alloc': {'cpu': 3.0, 'memory': 6.0},
+         'arrival': 10.0, 'gpu_free': 0.0, 'vram_free': 0.0},
+        {'name': 'gnb-2', 'cap': {'cpu': 20.0, 'memory': 64.0}, 'alloc': {'cpu': 4.0, 'memory': 12.0},
+         'arrival': 25.0, 'gpu_free': 0.75, 'vram_free': 0.6},
+        {'name': 'gnb-3', 'cap': {'cpu': 20.0, 'memory': 64.0}, 'alloc': {'cpu': 2.0, 'memory': 8.0},
+         'arrival': 5.0, 'gpu_free': 0.9, 'vram_free': 0.85},
+    ]
+    locality_weight = 0.4
+    total_arrival = sum(n['arrival'] for n in nodes)
+    w_old = {'cpu': 0.5, 'memory': 0.5, 'gpu': 0.0, 'vram': 0.0}
+    w_new = {'cpu': 0.5, 'memory': 0.5}
+    for n in nodes:
+        h_cpu = max(0.0, (n['cap']['cpu'] - n['alloc']['cpu']) / n['cap']['cpu'])
+        h_mem = max(0.0, (n['cap']['memory'] - n['alloc']['memory']) / n['cap']['memory'])
+        loc = n['arrival'] / total_arrival
+        score_old = (1.0 - locality_weight) * (
+            w_old['cpu'] * h_cpu + w_old['memory'] * h_mem
+            + w_old['gpu'] * n['gpu_free'] + w_old['vram'] * n['vram_free']
+        ) + locality_weight * loc
+        score_new = (1.0 - locality_weight) * (
+            w_new['cpu'] * h_cpu + w_new['memory'] * h_mem
+        ) + locality_weight * loc
+        assert score_new == score_old
 
 
 def test_mobility9_reverse_direction_reverses_schedule_and_records_metadata(tmp_path):
@@ -964,10 +1103,11 @@ def test_staircase_plan_is_balanced_with_matched_bounded_hpas(tmp_path):
     assert plan['hpa_behavior_profile'] == 'bounded-staircase'
     hpas = [yaml.safe_load((out / f'{m}-hpa.yaml').read_text()) for m in ('baseline', 'proposed')]
     assert hpas[0]['spec']['behavior'] == hpas[1]['spec']['behavior']
-    assert hpas[0]['spec']['behavior']['scaleDown']['tolerance'] == .01
-    assert hpas[0]['spec']['behavior']['scaleUp']['policies'][0]['value'] == 4
-    assert hpas[1]['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
-    assert hpas[1]['spec']['metrics'][0]['external']['target']['value'] == '150m'
+    assert 'tolerance' not in hpas[0]['spec']['behavior']['scaleDown']
+    assert 'policies' not in hpas[0]['spec']['behavior']['scaleDown']
+    assert 'policies' not in hpas[0]['spec']['behavior']['scaleUp']
+    assert hpas[1]['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_excess_latency_120ms_seconds'
+    assert hpas[1]['spec']['metrics'][0]['external']['target']['value'] == '30m'
     for m in ('baseline', 'proposed'):
         dep = next(d for d in yaml.safe_load_all((out / f'{m}-workload.yaml').read_text()) if d['kind'] == 'Deployment')
         spec = dep['spec']['template']['spec']
@@ -1140,7 +1280,7 @@ def test_scaling_mode_skips_placement_controller_preflight_and_mutations(tmp_pat
         'inventory': 'inv.yaml', 'nr_ue': '/bin/nr-ue', 'token': 'tok', 'image': 'img',
         'telemetry_url': 'http://127.0.0.1/obs', 'site_node_ips': {'gnb-1': '10.0.0.1', 'gnb-2': '10.0.0.2', 'gnb-3': '10.0.0.3'},
         'schedule': campaign.SCALER_BALANCED_SCHEDULE, 'phase_duration': 60,
-        'phase_durations': [60.0] * 6 + [420.0], 'workload': 'face-detection',
+        'phase_durations': [60.0] * 6 + [420.0], 'workload': 'pedestrian-detection',
         'ue_host': 'ue', 'ue_project': '/ue',
         'staircase': bool(floor_ms), 'latency_floor_ms': floor_ms,
     }
@@ -1319,13 +1459,13 @@ def test_run_method_collects_filtered_events_even_on_failure(tmp_path, monkeypat
             return types.SimpleNamespace(stdout='')
         if args[:4] == ('-n', 'services', 'get', 'deployments,pods,hpa'):
             return types.SimpleNamespace(stdout=json.dumps({'items': [
-                {'metadata': {'name': 'mec-placement-face-detection-abc', 'uid': 'uid-cur-pod'}},
+                {'metadata': {'name': 'mec-placement-pedestrian-detection-abc', 'uid': 'uid-cur-pod'}},
             ]}))
         if args[:4] == ('-n', 'services', 'get', 'events'):
             return types.SimpleNamespace(stdout=json.dumps({'items': [
-                {'involvedObject': {'name': 'mec-placement-face-detection-old', 'uid': 'uid-old'}, 'lastTimestamp': old_iso},
-                {'involvedObject': {'name': 'mec-placement-face-detection-baseline', 'uid': 'uid-base-hpa'}, 'lastTimestamp': new_iso},
-                {'involvedObject': {'name': 'mec-placement-face-detection-abc', 'uid': 'uid-cur-pod'}, 'lastTimestamp': new_iso},
+                {'involvedObject': {'name': 'mec-placement-pedestrian-detection-old', 'uid': 'uid-old'}, 'lastTimestamp': old_iso},
+                {'involvedObject': {'name': 'mec-placement-pedestrian-detection-baseline', 'uid': 'uid-base-hpa'}, 'lastTimestamp': new_iso},
+                {'involvedObject': {'name': 'mec-placement-pedestrian-detection-abc', 'uid': 'uid-cur-pod'}, 'lastTimestamp': new_iso},
                 {'involvedObject': {'name': 'unrelated-pod', 'uid': 'uid-other'}, 'lastTimestamp': new_iso},
             ]}))
         raise AssertionError(f'unexpected kube call: {args}')
@@ -1361,7 +1501,7 @@ def test_run_method_collects_filtered_events_even_on_failure(tmp_path, monkeypat
         'inventory': 'inv.yaml', 'nr_ue': '/bin/nr-ue', 'token': 'tok', 'image': 'img',
         'telemetry_url': 'http://127.0.0.1/obs', 'site_node_ips': {'gnb-1': '10.0.0.1', 'gnb-2': '10.0.0.2', 'gnb-3': '10.0.0.3'},
         'schedule': campaign.SCALER_BALANCED_SCHEDULE, 'phase_duration': 60,
-        'workload': 'face-detection', 'ue_host': 'ue', 'ue_project': '/ue',
+        'workload': 'pedestrian-detection', 'ue_host': 'ue', 'ue_project': '/ue',
     }
     root = tmp_path / 'run'
     root.mkdir()
@@ -1372,3 +1512,44 @@ def test_run_method_collects_filtered_events_even_on_failure(tmp_path, monkeypat
         )
     events = json.loads((root / 'proposed' / 'workload-events.json').read_text())['items']
     assert [ev['involvedObject']['uid'] for ev in events] == ['uid-cur-pod']
+
+
+@pytest.mark.parametrize('routing,prefer_close', [('--cluster-wide', False), ('--prefer-close', True)])
+def test_fixed_mobility_plan_uses_pod_share_without_hpa(tmp_path, routing, prefer_close):
+    out = tmp_path / 'plan'
+    campaign.main(['--scenario', 'mobility9', '--comparison', 'placement', '--site-anchors',
+                   '--fixed-replicas', '6', '--no-hpa', '--pod-share-scoring', routing,
+                   '--deschedule-interval', '5', '--plan-only', str(out)])
+    plan = yaml.safe_load((out / 'plan.yaml').read_text())
+    controller = yaml.safe_load((out / 'proposed-controller.yaml').read_text())
+    assert plan['autoscaler'] == 'none'
+    assert plan['hpa_targets'] is None
+    assert plan['active_total_replica_bounds'] == {'min': 6, 'max': 6}
+    assert plan['prefer_close'] is prefer_close
+    assert controller['prefer_close'] is True
+    assert controller['deschedule_interval_seconds'] == 5
+    assert not list(out.glob('*-hpa.yaml'))
+    for method in ('baseline', 'proposed'):
+        resources = list(yaml.safe_load_all((out / f'{method}-workload.yaml').read_text()))
+        deployment = next(r for r in resources if r['kind'] == 'Deployment')
+        service = next(r for r in resources if r['kind'] == 'Service')
+        assert deployment['spec']['replicas'] == 3
+        assert (service['spec'].get('trafficDistribution') == 'PreferClose') is prefer_close
+
+
+def test_vertical_arm_manifest_preserves_shared_service_routing(tmp_path):
+    campaign._campaign_manifest(tmp_path, True, 'pedestrian-detection',
+                                prefer_close=True, site_anchors=True)
+    for arm_name in ('baseline-local', 'baseline-vertical'):
+        arm = tmp_path / arm_name
+        arm.mkdir()
+        config, _, hpa = campaign._method_configs(
+            arm, 'baseline', 150, 18, workload='pedestrian-detection',
+            site_anchors=True, no_hpa=True, base_manifest=tmp_path / 'workload.yaml',
+        )
+        documents = list(yaml.safe_load_all(Path(config['manifest']).read_text()))
+        service = next(doc for doc in documents if doc['kind'] == 'Service')
+        deployment = next(doc for doc in documents if doc['kind'] == 'Deployment')
+        campaign.check_service_routing(service, prefer_close=True)
+        assert deployment['spec']['replicas'] == 0
+        assert hpa is None

@@ -40,7 +40,7 @@ def test_raw_mode_slo_150_factor_095(tmp_path):
     out = tmp_path / 'plan_raw_095'
     campaign.main([
         '--comparison', 'scaling', '--scenario', 'scaler-staircase',
-        '--slo-ms', '150', '--rt-target-factor', '0.95', '--plan-only', str(out),
+        '--slo-ms', '150', '--rt-target-factor', '0.95', '--latency-floor-ms', '0', '--plan-only', str(out),
     ])
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     prop = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
@@ -67,7 +67,7 @@ def test_raw_mode_slo_150_factor_095(tmp_path):
     assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
     assert base['spec']['behavior'] == prop['spec']['behavior']
     assert base['spec']['minReplicas'] == prop['spec']['minReplicas'] == 3
-    assert base['spec']['maxReplicas'] == prop['spec']['maxReplicas'] == 24
+    assert base['spec']['maxReplicas'] == prop['spec']['maxReplicas'] == 18
 
 
 def test_floor_mode_slo_150_floor_130_factor_095(tmp_path):
@@ -236,6 +236,13 @@ def test_campaign_yaml_console_and_plot_slo_unchanged(tmp_path, monkeypatch, cap
     assert any('utils.plot_autoscaler' in map(str, c) and '--slo-ms' in c
                and float(c[c.index('--slo-ms') + 1]) == 150.0
                for c in commands)
+    assert any('utils.plot_slides' in map(str, c)
+               and '--output-dir' in c and c[c.index('--output-dir') + 1] == fake_root / 'results' / 'camp_095' / 'slides'
+               and '--slo-ms' in c and float(c[c.index('--slo-ms') + 1]) == 150.0
+               for c in commands)
+    assert any('utils.plot_overhead_slides' in map(str, c)
+               and fake_root / 'results' / 'camp_095' in c
+               for c in commands)
 
     out = capsys.readouterr().out
     if comparison == 'scaling':
@@ -341,7 +348,7 @@ def test_run_method_forwards_reporting_slo_to_summarize(tmp_path, monkeypatch):
 
     run_root = tmp_path / 'run'
     run_root.mkdir()
-    (run_root / 'workload.yaml').write_text(campaign.workload_manifest('face-detection').read_text())
+    (run_root / 'workload.yaml').write_text(campaign.workload_manifest('pedestrian-detection').read_text())
     campaign.run_method(
         settings, 'camp', run_root, 'proposed', delay=None, slo_ms=150, max_replicas=24,
         comparison='scaling', autoscaler='hpa', placement_engine='go',

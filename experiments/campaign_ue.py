@@ -1,5 +1,6 @@
 """Remote side of the campaign runner; invoked over SSH, not manually."""
 import argparse
+from ipaddress import ip_address, ip_network
 import json
 import os
 from pathlib import Path
@@ -48,6 +49,35 @@ def check(settings):
     subscribers = _load_config(settings['inventory'])
     if len(subscribers) < settings['max_ues']:
         raise ValueError('not enough reserved subscribers for the campaign')
+    if settings.get('gnb1_dnn'):
+        import yaml
+        subnet = ip_network(settings['gnb1_subnet'])
+        for index, (gnb1, *_) in enumerate(subscribers, start=1):
+            profile = yaml.safe_load(Path(gnb1['config']).read_text())
+            sessions = profile.get('sessions', [])
+            if (len(sessions) != 1 or sessions[0].get('apn') != settings['gnb1_dnn']
+                    or ip_address(gnb1['ip']) not in subnet):
+                raise ValueError(
+                    f"UE profile {index} must use DNN {settings['gnb1_dnn']} "
+                    f"and subnet {settings['gnb1_subnet']} on gNB1"
+                )
+    for site_idx, (dnn_key, subnet_key, label) in (
+        (1, ('gnb2_dnn', 'gnb2_subnet', 'gNB2')),
+        (2, ('gnb3_dnn', 'gnb3_subnet', 'gNB3')),
+    ):
+        if settings.get(dnn_key):
+            import yaml
+            subnet = ip_network(settings[subnet_key])
+            for index, entries in enumerate(subscribers, start=1):
+                entry = entries[site_idx]
+                profile = yaml.safe_load(Path(entry['config']).read_text())
+                sessions = profile.get('sessions', [])
+                if (len(sessions) != 1 or sessions[0].get('apn') != settings[dnn_key]
+                        or ip_address(entry['ip']) not in subnet):
+                    raise ValueError(
+                        f"UE profile {index} must use DNN {settings[dnn_key]} "
+                        f"and subnet {settings[subnet_key]} on {label}"
+                    )
     if not os.access(settings['nr_ue'], os.X_OK):
         raise ValueError('nr-ue executable is missing')
     if not Path(settings['token']).read_bytes().strip():
@@ -73,13 +103,14 @@ def check(settings):
 def run(settings):
     from utils.experiment import validate_site_urls
     validate_site_urls(settings['site_urls'])
-    campaign, method = settings['campaign'], settings['method']
+    campaign = settings['campaign']
+    arm = settings.get('output_name') or settings['method']
     root = Path('results') / campaign
     root.mkdir(parents=True, exist_ok=True)
-    output = root / method
+    output = root / arm
     if output.exists():
         raise FileExistsError(output)
-    args = [sys.executable, '-u', '-m', 'utils.experiment', '--armed',
+    args = [sys.executable, '-u', '-m', 'utils.experiment', '--armed', '--compact-response-log',
             '--site-urls', json.dumps(settings['site_urls']), '--image', settings['image'],
             '--ue-config', settings['inventory'], '--nr-ue', settings['nr_ue'],
             '--phase-schedule', settings['schedule'], '--phase-duration', str(settings['duration']),
@@ -90,7 +121,7 @@ def run(settings):
             '--output-dir', str(output)]
     if settings.get('phase_durations'):
         args.extend(['--phase-durations', ','.join(str(d) for d in settings['phase_durations'])])
-    path = marker(campaign, method)
+    path = marker(campaign, arm)
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     def terminate(signum, frame):
         if process.poll() is None:
@@ -100,7 +131,7 @@ def run(settings):
     try:
         with path.open('x') as stream:
             json.dump({'pid': process.pid, 'identity': identity(process.pid)}, stream)
-        with (root / f'{method}-runner.log').open('x') as log:
+        with (root / f'{arm}-runner.log').open('x') as log:
             for line in process.stdout:
                 log.write(line); log.flush()
                 print(line, end='', flush=True)
@@ -134,7 +165,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['check', 'probe', 'run', 'stop'])
     parser.add_argument('--campaign')
-    parser.add_argument('--method', choices=['baseline', 'proposed'])
+    parser.add_argument('--method', choices=['baseline', 'proposed', 'baseline-local', 'proposed-local', 'baseline-vertical', 'proposed-vertical'])
     args = parser.parse_args()
     if args.action == 'stop':
         stop(args.campaign, args.method)

@@ -34,7 +34,7 @@ if [[ "${1:-}" == rebuild ]]; then
 fi
 if [[ "${1:-}" == ramp ]]; then
   shift
-  exec .venv/bin/python -u -m experiments.campaign --comparison scaling --scenario scaler-staircase --latency-floor-ms 125 "$@"
+  exec .venv/bin/python -u -m experiments.campaign --comparison scaling --scenario scaler-staircase "$@"
 fi
 if [[ "${1:-}" == smoke ]]; then
   shift

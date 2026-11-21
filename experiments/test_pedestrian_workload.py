@@ -58,7 +58,7 @@ def test_plan_only_does_not_probe_network_or_touch_campaign_lock(tmp_path, monke
     output = tmp_path / 'offline'
     campaign.main(['--workload', 'pedestrian-detection', '--config',
                    str(campaign.ROOT / 'experiments/campaign-pedestrian.example.yaml'),
-                   '--slo-ms', '100', '--max-replicas', '10', '--plan-only', str(output)])
+                   '--slo-ms', '100', '--latency-floor-ms', '0', '--max-replicas', '10', '--plan-only', str(output)])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
     assert plan['calibrated'] is False
     assert plan['workload'] == 'pedestrian-detection'

@@ -25,7 +25,7 @@ def test_omitted_min_replicas_preserves_defaults(tmp_path):
     prop_dep = next(d for d in yaml.safe_load_all((out / 'proposed-workload.yaml').read_text())
                     if d and d.get('kind') == 'Deployment')
 
-    assert plan['replica_bounds'] == {'min': 3, 'max': 24}
+    assert plan['replica_bounds'] == {'min': 3, 'max': 18}
     assert plan['http_threads'] == 5
     assert base_hpa['spec']['minReplicas'] == 3
     assert prop_hpa['spec']['minReplicas'] == 3
@@ -57,8 +57,8 @@ def test_min_replicas_2_applies_to_both_methods_and_preserves_scaling_semantics(
 
     assert base_hpa['spec']['minReplicas'] == 2
     assert prop_hpa['spec']['minReplicas'] == 2
-    assert base_hpa['spec']['maxReplicas'] == 24
-    assert prop_hpa['spec']['maxReplicas'] == 24
+    assert base_hpa['spec']['maxReplicas'] == 18
+    assert prop_hpa['spec']['maxReplicas'] == 18
     assert base_dep['spec']['replicas'] == 2
     assert prop_dep['spec']['replicas'] == 2
     assert base_cfg['min_replicas'] == 2
@@ -69,7 +69,7 @@ def test_min_replicas_2_applies_to_both_methods_and_preserves_scaling_semantics(
     assert prop_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_excess_latency_130ms_seconds'
     assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '20m'
     assert base_hpa['spec']['behavior'] == prop_hpa['spec']['behavior']
-    assert plan['replica_bounds'] == {'min': 2, 'max': 24}
+    assert plan['replica_bounds'] == {'min': 2, 'max': 18}
     assert plan['rt_target_factor'] == 1.0
     assert plan['slo_ms'] == 150
     assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
@@ -103,8 +103,8 @@ def test_min_replicas_2_with_rt_target_factor_and_campaign_yaml(tmp_path, monkey
 
     camp_yaml = yaml.safe_load((fake_root / 'results' / 'camp_min2' / 'campaign.yaml').read_text())
     assert camp_yaml['min_replicas'] == 2
-    assert camp_yaml['max_replicas'] == 24
-    assert camp_yaml['replica_bounds'] == {'min': 2, 'max': 24}
+    assert camp_yaml['max_replicas'] == 18
+    assert camp_yaml['replica_bounds'] == {'min': 2, 'max': 18}
     assert camp_yaml['rt_target_factor'] == 0.95
     assert camp_yaml['effective_rt_metric_target_ms'] == 12.5
 
@@ -241,7 +241,7 @@ def test_run_method_aborts_before_traffic_when_initial_replicas_not_ready(tmp_pa
     })
     run_root = tmp_path / 'run'
     run_root.mkdir()
-    (run_root / 'workload.yaml').write_text(campaign.workload_manifest('face-detection').read_text())
+    (run_root / 'workload.yaml').write_text(campaign.workload_manifest('pedestrian-detection').read_text())
 
     with pytest.raises(RuntimeError, match='1/2 ready replicas'):
         campaign.run_method(

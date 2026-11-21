@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Phase 1 has three fixed site anchors and one managed pod after the seed.
-# Both arms use PreferClose and the same latency HPA (managed 1–13, total 4–16).
+# Both arms use PreferClose and the same latency HPA.
+# Edge-only has two anchors. Spill runs add a core anchor for the gNB1 ingress.
 set -euo pipefail
 cd "$(dirname "$0")"
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -61,8 +61,6 @@ run_campaign() {
   else
     echo 'Node CPU usage before the campaign'
     kubectl top nodes
-    echo 'gnb1 allocated resources before the campaign'
-    kubectl describe node gnb1 | sed -n '/^Allocated resources:/,/^Events:/p'
   fi
   bash experiments/run.sh "$name" "${common_flags[@]}" "${condition_flags[@]}" \
     --method-order "$order" "${plan_flags[@]}"

@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# Repeat of *_01 results (same configs) plus locality-weight 0.3 exploration.
+# Retry joint_floor125_02 from phase 1, then run the two remaining explorations.
 # Dry run (no cluster/UE access):  PLAN_ONLY=/tmp/plancheck bash run-experiments-repeat.sh
 set -euo pipefail
-cd /home/member/skripsi_yoga/5g-mec-controller
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 run() {
+  local campaign=$1
+  local -a plan_args=()
+  if [[ -n ${PLAN_ONLY:-} ]]; then
+    plan_args=(--plan-only "$PLAN_ONLY/$campaign-$RANDOM")
+  fi
   echo "=== $(date -u +%FT%TZ) START $*"
-  bash experiments/run.sh "$@" ${PLAN_ONLY:+--plan-only "$PLAN_ONLY/plan-$RANDOM"}
-  echo "=== $(date -u +%FT%TZ) DONE  $1"
+  bash experiments/run.sh "$@" "${plan_args[@]}"
+  echo "=== $(date -u +%FT%TZ) DONE  $campaign"
 }
 
-# Repeats of _01 (proposed-first to test method-order effect)
-run mobility_grace_02 --scenario mobility9 --fixed-replicas 3 \
-  --comparison full --cpu-hpa-target 80 --method-order proposed-first
-run ramp scaling_floor125_02 --cpu-hpa-target 80 --slo-ms 150 \
-  --max-replicas 12 --method-order proposed-first
+# Reuse the cleared campaign name with the original proposed-first settings.
 run joint_floor125_02 --comparison full --cpu-hpa-target 80 \
   --slo-ms 150 --latency-floor-ms 125 --max-replicas 12 --method-order proposed-first
 

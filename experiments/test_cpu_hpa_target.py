@@ -17,7 +17,7 @@ def test_custom_cpu_target_matches_manifest_and_metadata(tmp_path, comparison, t
     assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == target
     assert plan['cpu_hpa_target'] == plan['campaign_settings']['cpu_hpa_target'] == target
     assert plan['hpa_targets']['baseline']['target'] == target
-    assert proposed['spec']['metrics'][0]['external']['target']['value'] == '150m'
+    assert proposed['spec']['metrics'][0]['external']['target']['value'] == ('30m' if comparison == 'full' else '150m')
     if comparison == 'scaling':
         assert plan['node_restriction'] == 'core-5g'
         for method in ('baseline', 'proposed'):
