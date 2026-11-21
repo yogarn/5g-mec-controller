@@ -12,7 +12,7 @@ import (
 )
 
 func TestRankAndScoreCandidateNodeParity(t *testing.T) {
-	weights := map[string]float64{"cpu": 0.4, "memory": 0.4, "gpu": 0.1, "vram": 0.1}
+	weights := map[string]float64{"cpu": 0.5, "memory": 0.5}
 	nodes := []Node{
 		{
 			Name:           "small",
@@ -21,8 +21,6 @@ func TestRankAndScoreCandidateNodeParity(t *testing.T) {
 			CPUUtilization: 0.2,
 			ArrivalRate:    3,
 			Ready:          true,
-			GPUFree:        0.8,
-			VRAMFree:       0.5,
 		},
 		{
 			Name:           "large",
@@ -31,8 +29,6 @@ func TestRankAndScoreCandidateNodeParity(t *testing.T) {
 			CPUUtilization: 0.2,
 			ArrivalRate:    1,
 			Ready:          true,
-			GPUFree:        0.8,
-			VRAMFree:       0.5,
 		},
 		{
 			Name:           "saturated",
@@ -51,9 +47,21 @@ func TestRankAndScoreCandidateNodeParity(t *testing.T) {
 	if _, ok := scores["saturated"]; ok {
 		t.Fatalf("expected saturated node to be filtered out")
 	}
-	wantSmall := 0.6*(0.4*0.75+0.4*0.625+0.1*0.8+0.1*0.5) + 0.4*(3.0/14.0)
+	wantSmall := 0.6*(0.5*0.75+0.5*0.625) + 0.4*(3.0/14.0)
 	if math.Abs(scores["small"]-wantSmall) > 1e-9 {
 		t.Fatalf("small score = %.9f, want %.9f", scores["small"], wantSmall)
+	}
+
+	// Verify 2D weights produce identical scores to legacy 4D weights with gpu=vram=0.
+	legacyWeights := map[string]float64{"cpu": 0.5, "memory": 0.5, "gpu": 0.0, "vram": 0.0}
+	legacyScores, err := RankNodes(nodes, req, 0.8, 0.4, legacyWeights)
+	if err != nil {
+		t.Fatalf("RankNodes with legacy 4D weights failed: %v", err)
+	}
+	for name, score := range scores {
+		if legacyScores[name] != score {
+			t.Fatalf("score mismatch for %s: 2D=%.12f legacy4D=%.12f", name, score, legacyScores[name])
+		}
 	}
 
 	best, candidates, err := ScoreCandidateNode(nodes, req, 0.8, 0.4, weights, "", nil)
@@ -312,5 +320,73 @@ func TestPreferCloseDemandMinusPodShare(t *testing.T) {
 	}
 	if math.Abs((raw["a"]-adjusted["a"])-.4) > 1e-9 || raw["b"] != adjusted["b"] {
 		t.Fatalf("pod share adjustment incorrect: raw=%v adjusted=%v", raw, adjusted)
+	}
+}
+
+func TestSelectDescheduleCandidateRequiresMinimumImprovement(t *testing.T) {
+	capacity := map[string]float64{"cpu": 10, "memory": 10}
+	nodes := []Node{
+		{Name: "source", Capacity: capacity, Allocated: map[string]float64{"cpu": 2.3, "memory": 2.3}, Ready: true},
+		{Name: "destination", Capacity: capacity, Allocated: map[string]float64{"cpu": 2, "memory": 2}, Ready: true},
+	}
+	requests := map[string]float64{"cpu": 0.1, "memory": 0.1}
+	for _, tc := range []struct {
+		name       string
+		count      int
+		allocation float64
+		wantMove   bool
+	}{
+		{name: "weak gain with one pod", count: 1, allocation: 2.3},
+		{name: "weak gain with two pods", count: 2, allocation: 2.3},
+		{name: "strong gain with one pod", count: 1, allocation: 3, wantMove: true},
+		{name: "strong gain with two pods", count: 2, allocation: 3, wantMove: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes[0].Allocated["cpu"] = tc.allocation
+			nodes[0].Allocated["memory"] = tc.allocation
+			candidate, err := SelectDescheduleCandidate(nodes, requests, map[string]int{"source": tc.count},
+				0.8, 0, config.DefaultResourceWeights(), nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (candidate != nil) != tc.wantMove {
+				t.Fatalf("want move %v, got %+v", tc.wantMove, candidate)
+			}
+		})
+	}
+}
+
+func TestSelectDescheduleCandidatePreferCloseSkipsBounceBack(t *testing.T) {
+	weights := config.DefaultResourceWeights()
+	// Mirrors the smoke-run state at 10:21:17: gnb-2 has 4 pods and 70% stale traffic,
+	// gnb-3 has 1 pod and 22% rising traffic. Without PreferClose pod shares, gnb-2
+	// looks better than gnb-3, but after removing gnb-3's pod the scheduler sees
+	// podShares={gnb-2: 0.8, gnb-3: 0.0} and puts the replacement right back on gnb-3.
+	nodes := []Node{
+		{Name: "gnb1", Capacity: map[string]float64{"cpu": 8, "memory": 16}, Allocated: map[string]float64{"cpu": 4, "memory": 8}, CPUUtilization: 0.2, ArrivalRate: 8, Ready: true},
+		{Name: "gnb-2", Capacity: map[string]float64{"cpu": 20, "memory": 64}, Allocated: map[string]float64{"cpu": 3, "memory": 8}, CPUUtilization: 0.2, ArrivalRate: 70, Ready: true},
+		{Name: "gnb-3", Capacity: map[string]float64{"cpu": 20, "memory": 64}, Allocated: map[string]float64{"cpu": 2, "memory": 8}, CPUUtilization: 0.2, ArrivalRate: 22, Ready: true},
+	}
+	counts := map[string]int{"gnb1": 0, "gnb-2": 4, "gnb-3": 1}
+	req := map[string]float64{"cpu": 0.5, "memory": 0.25}
+
+	cand, err := SelectDescheduleCandidate(nodes, req, counts, 0.8, 0.4, weights, nil, true)
+	if err != nil {
+		t.Fatalf("SelectDescheduleCandidate failed: %v", err)
+	}
+	if cand != nil {
+		t.Fatalf("expected nil candidate when PreferClose scheduler would re-place on source, got %+v", cand)
+	}
+
+	// Once traffic catches up to gnb-3 (83% vs 8%), PreferClose descheduler moves a pod from gnb-2 to gnb-3.
+	nodes[0].ArrivalRate = 2
+	nodes[1].ArrivalRate = 2
+	nodes[2].ArrivalRate = 20
+	cand, err = SelectDescheduleCandidate(nodes, req, counts, 0.8, 0.4, weights, nil, true)
+	if err != nil {
+		t.Fatalf("SelectDescheduleCandidate failed after shift: %v", err)
+	}
+	if cand == nil || cand.Source != "gnb-2" || cand.Destination != "gnb-3" || cand.Delta <= 0 {
+		t.Fatalf("expected gnb-2 -> gnb-3 move once traffic catches up, got %+v", cand)
 	}
 }

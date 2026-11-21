@@ -20,8 +20,6 @@ type Node struct {
 	CPUUtilization float64
 	ArrivalRate    float64
 	Ready          bool
-	GPUFree        float64
-	VRAMFree       float64
 }
 
 func cloneNodeWithDelta(node Node, requests map[string]float64) Node {
@@ -94,9 +92,6 @@ func RankNodes(nodes []Node, requests map[string]float64, saturation, localityWe
 		if !finiteNonNeg(n.ArrivalRate) {
 			return nil, fmt.Errorf("invalid arrival rate for node %s", n.Name)
 		}
-		if math.IsNaN(n.GPUFree) || n.GPUFree < 0 || n.GPUFree > 1 || math.IsNaN(n.VRAMFree) || n.VRAMFree < 0 || n.VRAMFree > 1 {
-			return nil, fmt.Errorf("invalid GPU/VRAM telemetry for node %s", n.Name)
-		}
 		for _, m := range []map[string]float64{n.Capacity, n.Allocated} {
 			for k, v := range m {
 				if !finiteNonNeg(v) {
@@ -127,9 +122,7 @@ func RankNodes(nodes []Node, requests map[string]float64, saturation, localityWe
 			}
 		}
 		resourceScore := weights["cpu"]*headroom["cpu"] +
-			weights["memory"]*headroom["memory"] +
-			weights["gpu"]*n.GPUFree +
-			weights["vram"]*n.VRAMFree
+			weights["memory"]*headroom["memory"]
 		locality := 0.0
 		if total > 0 {
 			locality = n.ArrivalRate / total
@@ -194,29 +187,57 @@ type DescheduleCandidate struct {
 	DestinationScore float64
 }
 
-// SelectDescheduleCandidate evaluates post-removal scheduling before selecting an eviction candidate,
-// guaranteeing that the freed source node would not immediately win re-scheduling.
-func SelectDescheduleCandidate(nodes []Node, requests map[string]float64, counts map[string]int, saturation, localityWeight float64, weights map[string]float64, allowed map[string]bool) (*DescheduleCandidate, error) {
+// SelectDescheduleCandidate predicts the replacement's placement before selecting an eviction.
+// PreferClose uses the remaining pod shares and keeps the draining pod's resource allocation.
+func SelectDescheduleCandidate(nodes []Node, requests map[string]float64, counts map[string]int, saturation, localityWeight float64, weights map[string]float64, allowed map[string]bool, preferClose ...bool) (*DescheduleCandidate, error) {
+	const minDescheduleScoreImprovement = 0.05
+	usePreferClose := len(preferClose) > 0 && preferClose[0]
 	ranked, err := RankNodes(nodes, requests, saturation, localityWeight, weights)
 	if err != nil {
 		return nil, err
 	}
 	var occupied []string
+	totalPods := 0
 	for name, count := range counts {
 		if count > 0 {
 			occupied = append(occupied, name)
+			totalPods += count
 		}
 	}
 	sort.Strings(occupied)
 
 	var best *DescheduleCandidate
 	for _, source := range occupied {
-		sourceScore, ok := ranked[source]
-		if !ok {
-			sourceScore = math.Inf(-1)
+		placementNodes := nodes
+		var postPodShares []map[string]float64
+		sourceScore := math.Inf(-1)
+		if usePreferClose {
+			shares := make(map[string]float64, len(counts))
+			for name, count := range counts {
+				if name == source {
+					count--
+				}
+				if count > 0 {
+					shares[name] = float64(count) / float64(totalPods)
+				}
+			}
+			postPodShares = []map[string]float64{shares}
+			// Compare the predicted destination with keeping the pod in place,
+			// using the same pod-share input for both placements.
+			stayScores, err := RankNodes(nodes, requests, saturation, localityWeight, weights, shares)
+			if err != nil {
+				return nil, err
+			}
+			if score, ok := stayScores[source]; ok {
+				sourceScore = score
+			}
+		} else {
+			placementNodes = SubtractNodeAllocation(nodes, source, requests)
+			if score, ok := ranked[source]; ok {
+				sourceScore = score
+			}
 		}
-		postRemoval := SubtractNodeAllocation(nodes, source, requests)
-		dest, postScores, err := ScoreCandidateNode(postRemoval, requests, saturation, localityWeight, weights, "", allowed)
+		dest, postScores, err := ScoreCandidateNode(placementNodes, requests, saturation, localityWeight, weights, "", allowed, postPodShares...)
 		if err != nil {
 			return nil, err
 		}
@@ -224,7 +245,7 @@ func SelectDescheduleCandidate(nodes []Node, requests map[string]float64, counts
 			continue
 		}
 		delta := postScores[dest] - sourceScore
-		if delta <= 0 {
+		if delta < minDescheduleScoreImprovement {
 			continue
 		}
 		if best == nil || delta > best.Delta ||

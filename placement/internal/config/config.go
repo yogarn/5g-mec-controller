@@ -16,11 +16,6 @@ type Settings struct {
 	Manifest                  string             `yaml:"manifest"`
 	Namespace                 string             `yaml:"namespace"`
 	PrometheusURL             string             `yaml:"prometheus_url"`
-	LatencyQuery              string             `yaml:"latency_query"`
-	SLOSeconds                float64            `yaml:"slo_seconds"`
-	MinReplicas               int                `yaml:"min_replicas"`
-	MaxReplicas               int                `yaml:"max_replicas"`
-	IntervalSeconds           float64            `yaml:"interval_seconds"`
 	Mode                      string             `yaml:"mode"`
 	Mutate                    bool               `yaml:"mutate"`
 	EligibleNodes             []string           `yaml:"eligible_nodes"`
@@ -29,38 +24,35 @@ type Settings struct {
 	CPUSaturation             float64            `yaml:"cpu_saturation"`
 	LocalityWeight            float64            `yaml:"locality_weight"`
 	PreferClose               bool               `yaml:"prefer_close"`
-	CooldownSeconds           float64            `yaml:"cooldown_seconds"`
 	MaxMetricAgeSeconds       float64            `yaml:"max_metric_age_seconds"`
-	ScaleDownSeconds          float64            `yaml:"scale_down_seconds"`
 	ResourceWeights           map[string]float64 `yaml:"resource_weights"`
-	GPUNodes                  []string           `yaml:"gpu_nodes"`
-	GPUUtilizationQuery       string             `yaml:"gpu_utilization_query"`
-	VRAMUtilizationQuery      string             `yaml:"vram_utilization_query"`
 	ZeroLocalityNodes         []string           `yaml:"zero_locality_nodes"`
 	DescheduleIntervalSeconds float64            `yaml:"deschedule_interval_seconds"`
 	SchedulerName             string             `yaml:"scheduler_name"`
 	SchedulerIntervalSeconds  float64            `yaml:"scheduler_interval_seconds"`
 }
 
-// DefaultResourceWeights matches controller/policy.py DEFAULT_RESOURCE_WEIGHTS.
+// DefaultResourceWeights defines the 2D (CPU, memory) resource headroom weights.
 func DefaultResourceWeights() map[string]float64 {
 	return map[string]float64{
 		"cpu":    0.5,
 		"memory": 0.5,
-		"gpu":    0.0,
-		"vram":   0.0,
 	}
 }
 
-// ValidateResourceWeights checks that cpu, memory, gpu, and vram weights are finite, non-negative, and sum to 1.
+// ValidateResourceWeights checks that cpu and memory weights are finite, non-negative, and sum to 1.
+// Legacy 4D configs that also include gpu and vram keys are accepted (gpu/vram are ignored by scoring).
 func ValidateResourceWeights(weights map[string]float64) error {
-	expected := map[string]bool{"cpu": true, "memory": true, "gpu": true, "vram": true}
-	if len(weights) != len(expected) {
-		return fmt.Errorf("resource_weights must contain cpu, memory, gpu, and vram keys")
+	if _, ok := weights["cpu"]; !ok {
+		return fmt.Errorf("resource_weights must contain cpu and memory keys")
 	}
+	if _, ok := weights["memory"]; !ok {
+		return fmt.Errorf("resource_weights must contain cpu and memory keys")
+	}
+	allowed := map[string]bool{"cpu": true, "memory": true, "gpu": true, "vram": true}
 	sum := 0.0
 	for k, v := range weights {
-		if !expected[k] {
+		if !allowed[k] {
 			return fmt.Errorf("unknown resource_weight key %q", k)
 		}
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
@@ -92,14 +84,15 @@ func LoadSettings(path string) (*Settings, error) {
 		return nil, fmt.Errorf("configuration must be a mapping")
 	}
 	allowed := map[string]bool{
-		"manifest": true, "namespace": true, "prometheus_url": true, "latency_query": true,
-		"slo_seconds": true, "min_replicas": true, "max_replicas": true, "interval_seconds": true,
+		"manifest": true, "namespace": true, "prometheus_url": true,
 		"mode": true, "mutate": true, "eligible_nodes": true, "cpu_utilization_query": true,
 		"mobility_query": true, "cpu_saturation": true, "locality_weight": true, "prefer_close": true,
-		"cooldown_seconds": true, "max_metric_age_seconds": true, "scale_down_seconds": true,
-		"resource_weights": true, "gpu_nodes": true, "gpu_utilization_query": true,
-		"vram_utilization_query": true, "zero_locality_nodes": true,
+		"max_metric_age_seconds": true, "resource_weights": true, "zero_locality_nodes": true,
 		"deschedule_interval_seconds": true, "scheduler_name": true, "scheduler_interval_seconds": true,
+		// Legacy keys accepted and ignored for backward compatibility with older ConfigMaps:
+		"latency_query": true, "slo_seconds": true, "min_replicas": true, "max_replicas": true,
+		"interval_seconds": true, "cooldown_seconds": true, "scale_down_seconds": true,
+		"gpu_nodes": true, "gpu_utilization_query": true, "vram_utilization_query": true,
 	}
 	for k := range rawMap {
 		if !allowed[k] {
@@ -108,13 +101,10 @@ func LoadSettings(path string) (*Settings, error) {
 	}
 
 	s := &Settings{
-		IntervalSeconds:           15,
 		CPUSaturation:             0.8,
 		LocalityWeight:            0.4,
-		CooldownSeconds:           120,
-		MaxMetricAgeSeconds:       120,
-		ScaleDownSeconds:          300,
-		DescheduleIntervalSeconds: 120,
+		MaxMetricAgeSeconds:       30,
+		DescheduleIntervalSeconds: 30,
 		SchedulerName:             "mec-placement-scheduler",
 		SchedulerIntervalSeconds:  1.0,
 		ResourceWeights:           DefaultResourceWeights(),
@@ -168,24 +158,9 @@ func LoadSettings(path string) (*Settings, error) {
 	if len(s.EligibleNodes) > 0 && len(s.ZeroLocalityNodes) == len(s.EligibleNodes) {
 		return nil, fmt.Errorf("at least one eligible node must require locality telemetry")
 	}
-	gpuSet := make(map[string]bool, len(s.GPUNodes))
-	for _, n := range s.GPUNodes {
-		if strings.TrimSpace(n) == "" || gpuSet[n] || !eligibleSet[n] {
-			return nil, fmt.Errorf("gpu_nodes must be a unique subset of eligible_nodes")
-		}
-		gpuSet[n] = true
-	}
 	if s.Mode == "mobility-aware" {
 		if len(s.EligibleNodes) == 0 || strings.TrimSpace(s.CPUUtilizationQuery) == "" || strings.TrimSpace(s.MobilityQuery) == "" {
 			return nil, fmt.Errorf("mobility-aware mode requires eligible_nodes, cpu_utilization_query, and mobility_query")
-		}
-		if _, ok := rawMap["gpu_nodes"]; !ok {
-			return nil, fmt.Errorf("mobility-aware mode requires an explicit gpu_nodes inventory")
-		}
-		if len(s.GPUNodes) > 0 && (s.ResourceWeights["gpu"] > 0 || s.ResourceWeights["vram"] > 0) {
-			if strings.TrimSpace(s.GPUUtilizationQuery) == "" || strings.TrimSpace(s.VRAMUtilizationQuery) == "" {
-				return nil, fmt.Errorf("GPU-capable nodes with GPU/VRAM weights require GPU and VRAM queries")
-			}
 		}
 	}
 	return s, nil

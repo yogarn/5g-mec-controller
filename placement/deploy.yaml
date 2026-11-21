@@ -53,29 +53,16 @@ data:
     manifest: /etc/placement/manifest.yaml
     namespace: services
     prometheus_url: "http://placement-prometheus.placement.svc:9090"
-    latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
-    slo_seconds: 0.5
-    min_replicas: 1
-    max_replicas: 100
-    interval_seconds: 15
-    scale_down_seconds: 300
-    max_metric_age_seconds: 120
-    cooldown_seconds: 120
     mode: mobility-aware
     mutate: true
     scheduler_name: mec-placement-scheduler
-    scheduler_interval_seconds: 1.0
-    deschedule_interval_seconds: 120
-    cpu_saturation: 0.8
-    locality_weight: 0.4
-    eligible_nodes: [gnb1, gnb-2, gnb-3, core-5g]
-    zero_locality_nodes: [core-5g]
+    deschedule_interval_seconds: 30
+    prefer_close: true
+    eligible_nodes: [gnb1, gnb-2, gnb-3]
+    # Kept until placement-controller image is rebuilt (legacy binary requires gpu_nodes).
     gpu_nodes: [gnb-2, gnb-3]
-    resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
-    cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3|core-5g"}[2m]))'
-    mobility_query: 'ue_request_node_window_attempts{job="ue-telemetry",node=~"gnb1|gnb-2|gnb-3"} / 15'
-    gpu_utilization_query: 'avg by (node) (DCGM_FI_DEV_GPU_UTIL{node=~"gnb-2|gnb-3"} / 100)'
-    vram_utilization_query: 'sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) / (sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) + sum by (node) (DCGM_FI_DEV_FB_FREE{node=~"gnb-2|gnb-3"}))'
+    cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}[1m]))'
+    mobility_query: 'ue_request_upf_placement_window_attempts{job="ue-telemetry-placement",node=~"gnb1|gnb-2|gnb-3"} / 5'
   manifest.yaml: |
     apiVersion: apps/v1
     kind: Deployment
@@ -106,7 +93,7 @@ spec:
       containers:
         - name: placement-controller
           # Timing-instrumented release built from source commit 74c8752.
-          image: 10.34.211.140:30500/placement-controller@sha256:e4d86ab17e653f2e0bcb361ed031ff922a9cef6301b7a95d9070e4dc3d2d69d9
+          image: 10.34.211.140:30500/placement-controller@sha256:a5b74f7d69945f41f5815df571e403a51425f4742625b3fd311c0b080abb9cfe
           imagePullPolicy: Always
           args:
             - --config=/etc/placement/config.yaml

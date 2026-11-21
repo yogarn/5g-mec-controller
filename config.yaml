@@ -1,54 +1,27 @@
-# Calibration below is historical; validate the new workload and proxy paths.
 # The manifest must contain exactly one apps/v1 Deployment. It is read, not applied.
 manifest: apps/pedestrian-detection/manifest.yaml
 prometheus_url: "http://10.34.211.140:30990"
 latency_query: 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
-# Collector p90 includes every measured attempt and requires a complete, nonempty window.
-# Calibration, 2026-11-13: one pod on gnb-2, 500m CPU limit, 512Mi memory
-# limit, 100m CPU / 128Mi memory requests. Client on core reached the UPF
-# Envoy directly, not through a UE. Fixed 547x365 JPEG; SHA-256:
-# 5b2e247d82ea373c50d8cd826abc4487634fe6e06b770e6d8278ab0476485e17
-# Current control objective: all-attempt p90 <=500ms, measured at the client.
-# The historical table below reports p95 and attainment as calibration diagnostics;
-# it does not define the current p90 objective.
-# Closed-loop clients; 5s warm-up and 15-20s measurement per tier.
-#
-# Concurrent clients | Successful requests/s | p95 client RT | SLO attainment
-#                  1 |                 21.0 |         73ms  | 100%
-#                  2 |            17.4-18.5 |    163-185ms  | 100%
-#                  3 |            15.3-15.5 |    275-291ms  | 100%
-#                  4 |                 10.7 |        532ms  | 91.1%
-#
-# All attempts returned HTTP 200. Levels 2 and 3 were repeated; 3 was the
-# highest tested passing concurrency, 4 failed, and 2 is a cautious starting
-# point. The 21 rps maximum observed is not a sustained capacity estimate.
-# Raw attempts: ssh://core/home/member/mec-face-calibration-14UkXB/
-#   attempts.jsonl and refinement.jsonl.
-#
-# The controller uses all-attempt p90;
-# fast failures can lower p90, so monitor failures separately.
-# Recalibrate and verify delivery coverage for the actual UE routes and workload.
-# Mutation is disabled until the SLO and metric coverage are validated.
-slo_seconds: 0.5
+# Collector p90 includes every measured attempt and is emitted whenever the sliding window is nonempty.
+# Fast failures can lower p90, so monitor failures separately.
+slo_seconds: 0.15
 min_replicas: 1
 max_replicas: 100
 interval_seconds: 15
-# Match the default HPA scale-down stabilization duration.
+# Legacy Python controller and non-suite HPA fallback. Go placement ignores
+# this field. The suite passes 60 s to the HPA renderer when scaling is enabled.
 scale_down_seconds: 300
 mode: mobility-aware
 mutate: false
-eligible_nodes: [gnb1, gnb-2, gnb-3, core-5g]
-# The UE collector reports the three gNB sites, not the core.
-zero_locality_nodes: [core-5g]
-cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3|core-5g"}[2m]))'
+eligible_nodes: [gnb1, gnb-2, gnb-3]
+zero_locality_nodes: []
+cpu_utilization_query: '1 - avg by (node) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle",node=~"gnb1|gnb-2|gnb-3"}[1m]))'
 # Request attempts are a traffic-share proxy, not observed UE mobility or handovers.
-mobility_query: 'ue_request_node_window_attempts{job="ue-telemetry",node=~"gnb1|gnb-2|gnb-3"} / 15'
+mobility_query: 'ue_request_upf_placement_window_attempts{job="ue-telemetry-placement",node=~"gnb1|gnb-2|gnb-3"} / 5'
 locality_weight: 0.4
 # Periodic highest-positive-delta check; one removal-first replacement at a time.
-deschedule_interval_seconds: 120
+deschedule_interval_seconds: 30
 # CPU-only application: effective total weights are 30% CPU and 30% RAM.
+# Legacy gpu/vram keys and gpu_nodes remain for compatibility with the currently deployed Go binary and utils/config.py.
 resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
-# Only these nodes have NVIDIA GPUs; gnb1 is explicitly GPU-less.
 gpu_nodes: [gnb-2, gnb-3]
-gpu_utilization_query: 'avg by (node) (DCGM_FI_DEV_GPU_UTIL{node=~"gnb-2|gnb-3"} / 100)'
-vram_utilization_query: 'sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) / (sum by (node) (DCGM_FI_DEV_FB_USED{node=~"gnb-2|gnb-3"}) + sum by (node) (DCGM_FI_DEV_FB_FREE{node=~"gnb-2|gnb-3"}))'

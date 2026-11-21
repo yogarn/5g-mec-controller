@@ -23,7 +23,7 @@ spec:
               job: ue-telemetry
         target:
           type: Value
-          value: 500m
+          value: 150m
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 0

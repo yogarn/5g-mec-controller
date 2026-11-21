@@ -94,3 +94,60 @@ func TestDeployConfigMapLoadsCleanly(t *testing.T) {
 		t.Fatalf("unexpected identity (%q, %q) err=%v", ns, name, err)
 	}
 }
+
+func TestLoadSettingsAcceptsLegacyAndMinimalTwoDimConfigs(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	if err := os.WriteFile(manifestPath, []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n  namespace: services\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `
+manifest: ` + manifestPath + `
+prometheus_url: http://prom:9090
+mode: mobility-aware
+mutate: true
+eligible_nodes: [gnb1, gnb-2, gnb-3]
+cpu_utilization_query: cpu
+mobility_query: mob
+latency_query: lat
+slo_seconds: 0.15
+min_replicas: 1
+max_replicas: 12
+interval_seconds: 15
+cooldown_seconds: 120
+scale_down_seconds: 300
+gpu_nodes: [gnb-2, gnb-3]
+gpu_utilization_query: gpu
+vram_utilization_query: vram
+resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
+`
+	legacyPath := filepath.Join(dir, "legacy.yaml")
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSettings(legacyPath); err != nil {
+		t.Fatalf("legacy config rejected: %v", err)
+	}
+
+	minimal := `
+manifest: ` + manifestPath + `
+prometheus_url: http://prom:9090
+mode: mobility-aware
+mutate: true
+eligible_nodes: [gnb1, gnb-2, gnb-3]
+cpu_utilization_query: cpu
+mobility_query: mob
+resource_weights: {cpu: 0.5, memory: 0.5}
+`
+	minimalPath := filepath.Join(dir, "minimal.yaml")
+	if err := os.WriteFile(minimalPath, []byte(minimal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSettings(minimalPath)
+	if err != nil {
+		t.Fatalf("minimal 2D config rejected: %v", err)
+	}
+	if s.ResourceWeights["cpu"] != 0.5 || s.ResourceWeights["memory"] != 0.5 || len(s.ResourceWeights) != 2 {
+		t.Fatalf("unexpected 2D weights: %+v", s.ResourceWeights)
+	}
+}

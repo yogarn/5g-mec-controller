@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"sort"
 	"sync"
 	"time"
@@ -183,29 +182,6 @@ func (c *Controller) nodesSnapshot(ctx context.Context, extra map[string]inFligh
 		mobility[n] = 0.0
 	}
 
-	gpu := make(map[string]float64)
-	vram := make(map[string]float64)
-	if len(s.GPUNodes) > 0 && (s.ResourceWeights["gpu"] > 0 || s.ResourceWeights["vram"] > 0) {
-		for _, pair := range []struct {
-			query string
-			dest  map[string]float64
-		}{
-			{s.GPUUtilizationQuery, gpu},
-			{s.VRAMUtilizationQuery, vram},
-		} {
-			readings, err := c.Prometheus.PerNode(ctx, pair.query, s.GPUNodes)
-			if err != nil {
-				return nil, nil, err
-			}
-			for node, util := range readings {
-				if math.IsNaN(util) || math.IsInf(util, 0) || util < 0 || util > 1 {
-					return nil, nil, fmt.Errorf("invalid GPU or VRAM utilization %.4f for node %s", util, node)
-				}
-				pair.dest[node] = 1 - util
-			}
-		}
-	}
-
 	nodeList, err := c.Client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, nil, err
@@ -278,8 +254,6 @@ func (c *Controller) nodesSnapshot(ctx context.Context, extra map[string]inFligh
 			CPUUtilization: cpu[name],
 			ArrivalRate:    mobility[name],
 			Ready:          isNodeReady(kNode),
-			GPUFree:        gpu[name],
-			VRAMFree:       vram[name],
 		})
 	}
 	return nodes, eligibleKNodes, nil
@@ -368,19 +342,31 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 
 	var bound []BoundPodResult
 	var podShares map[string]float64
+	var podSharePerBinding float64
 	if c.Settings.PreferClose {
 		podShares = make(map[string]float64)
 		active := 0.0
 		for _, existing := range pods {
-			if existing.Spec.NodeName != "" && existing.DeletionTimestamp == nil {
-				podShares[existing.Spec.NodeName]++
-				active++
+			if existing.DeletionTimestamp != nil {
+				continue
+			}
+			active++
+			node := existing.Spec.NodeName
+			if node == "" {
+				node = extraSnapshot[string(existing.UID)].node
+			}
+			if node != "" {
+				podShares[node]++
 			}
 		}
-		if active > 0 {
-			for name := range podShares {
-				podShares[name] /= active
-			}
+		// Include desired replicas before the ReplicaSet creates the whole
+		// batch, so the first bound pods do not represent the entire fleet.
+		if dep.Spec.Replicas != nil {
+			active = max(active, float64(*dep.Spec.Replicas))
+		}
+		podSharePerBinding = 1 / active
+		for name := range podShares {
+			podShares[name] *= podSharePerBinding
 		}
 	}
 	for _, pod := range unscheduled {
@@ -410,6 +396,9 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 			c.Logger.Printf("scheduler dry-run pod=%s uid=%s node=%s score=%.6f scores=%v",
 				pod.Name, pod.UID, targetNode, scores[targetNode], scores)
 			nodes = policy.AddNodeAllocation(nodes, targetNode, reqs)
+			if podShares != nil {
+				podShares[targetNode] += podSharePerBinding
+			}
 			bound = append(bound, BoundPodResult{Pod: pod.Name, Node: targetNode})
 			continue
 		}
@@ -438,6 +427,9 @@ func (c *Controller) ReconcileScheduler(ctx context.Context) ([]BoundPodResult, 
 			c.mu.Unlock()
 		}
 		nodes = policy.AddNodeAllocation(nodes, targetNode, reqs)
+		if podShares != nil {
+			podShares[targetNode] += podSharePerBinding
+		}
 		bound = append(bound, BoundPodResult{Pod: pod.Name, Node: targetNode})
 		c.Logger.Printf("scheduler bound pod=%s uid=%s node=%s score=%.6f scores=%v",
 			pod.Name, pod.UID, targetNode, scores[targetNode], scores)
@@ -482,12 +474,19 @@ func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval b
 	if dep.Spec.Replicas != nil {
 		replicas = *dep.Spec.Replicas
 	}
+	activePods := make([]*corev1.Pod, 0, len(pods))
+	terminatingCount := 0
 	readyCount := 0
 	anyUnbound := false
 	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			terminatingCount++
+			continue
+		}
 		if pod.Spec.SchedulerName != c.Settings.SchedulerName {
 			return nil, nil
 		}
+		activePods = append(activePods, pod)
 		if pod.Spec.NodeName == "" {
 			anyUnbound = true
 		}
@@ -499,9 +498,9 @@ func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval b
 	inFlightCount := len(c.inFlightBindings)
 	c.mu.Unlock()
 
-	if replicas < 1 || int32(len(pods)) != replicas || inFlightCount > 0 || anyUnbound || int32(readyCount) != replicas {
-		c.Logger.Printf("descheduler deferred reason=pods-not-settled replicas=%d active=%d ready=%d in_flight=%d",
-			replicas, len(pods), readyCount, inFlightCount)
+	if replicas < 1 || int32(len(activePods)) != replicas || inFlightCount > 0 || anyUnbound || int32(readyCount) != replicas {
+		c.Logger.Printf("descheduler deferred reason=pods-not-settled replicas=%d active=%d terminating=%d ready=%d in_flight=%d",
+			replicas, len(activePods), terminatingCount, readyCount, inFlightCount)
 		return nil, nil
 	}
 
@@ -515,7 +514,7 @@ func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval b
 	for _, n := range c.Settings.EligibleNodes {
 		counts[n] = 0
 	}
-	for _, pod := range pods {
+	for _, pod := range activePods {
 		node := pod.Spec.NodeName
 		if _, ok := counts[node]; ok {
 			counts[node]++
@@ -548,14 +547,14 @@ func (c *Controller) reconcileDescheduler(ctx context.Context, enforceInterval b
 	}
 	policyStarted := time.Now()
 	candidate, err := policy.SelectDescheduleCandidate(
-		nodes, reqs, counts, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, allowed,
+		nodes, reqs, counts, c.Settings.CPUSaturation, c.Settings.LocalityWeight, c.Settings.ResourceWeights, allowed, c.Settings.PreferClose,
 	)
 	c.logDecisionTiming("descheduler_score", policyStarted, "")
 	if err != nil {
 		return nil, err
 	}
 	if candidate == nil {
-		c.Logger.Printf("descheduler noop reason=no-positive-delta counts=%v", counts)
+		c.Logger.Printf("descheduler noop reason=below-min-score-improvement counts=%v", counts)
 		return nil, nil
 	}
 
