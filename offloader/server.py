@@ -13,7 +13,6 @@ import yaml
 
 from offloader.k8s import KubernetesEndpointDiscoverer
 from offloader.policy import DEFAULT_SITE_NODES, OffloadConfig, SITES, VerticalOffloadPolicy
-from offloader.probe import LocalProbeWorker
 from offloader.xds import (
     CORE_EDS_SERVICE_NAME,
     XdsState,
@@ -126,16 +125,6 @@ class VerticalOffloadController:
             versions = self.xds.reset_routes()
         return {'reset': True, 'mode': active_mode, 'epoch': self.xds.epoch, 'desired_versions': versions}
 
-    def sites_requiring_probe(self) -> list[str]:
-        with self.lock:
-            if self.policy.config.mode != 'vertical':
-                return []
-            return [
-                site for site in SITES
-                if self.policy.states[site].desired_route == 'SPREAD'
-                or self.policy.states[site].active_route == 'SPREAD'
-            ]
-
     def _discover_ready_counts(self) -> tuple[dict[str, int], int]:
         if self.discoverer is not None:
             try:
@@ -198,22 +187,6 @@ def _resolve_admin_token(raw: dict) -> str:
     return token
 
 
-def _maybe_start_probe_worker(raw: dict, controller: VerticalOffloadController, admin_token: str) -> LocalProbeWorker | None:
-    probe_urls = raw.get('site_probe_urls') or {}
-    collector_obs_url = raw.get('collector_observations_url')
-    collector_token = os.environ.get('UE_TELEMETRY_TOKEN', '').strip() or admin_token
-    if not (probe_urls and collector_obs_url and collector_token):
-        return None
-    worker = LocalProbeWorker(
-        probe_urls, collector_obs_url, collector_token, controller.sites_requiring_probe,
-        probe_image_path=raw.get('probe_image_path'),
-        interval_seconds=float(raw.get('probe_interval_seconds', 1.0)),
-        timeout_seconds=float(raw.get('probe_timeout_seconds', 2.0)),
-    )
-    worker.start()
-    return worker
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Core-side vertical offloading controller and Envoy xDS server')
     parser.add_argument('--config', default='offloader/config.yaml', help='Path to offloader YAML config')
@@ -235,7 +208,6 @@ def main(argv=None):
     xds_server = start_xds_server(controller, host=raw.get('listen_host', '0.0.0.0'), port=int(raw.get('listen_port', 8085)))
     token = _resolve_admin_token(raw)
     admin_server = start_admin_server(controller, token, host=raw.get('admin_host', '0.0.0.0'), port=int(raw.get('admin_port', 8086)))
-    probe_worker = _maybe_start_probe_worker(raw, controller, token)
 
     stop_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
@@ -247,8 +219,6 @@ def main(argv=None):
             controller.poll_once()
             stop_event.wait(max(0.05, policy_cfg.poll_interval_seconds - (time.monotonic() - tick)))
     finally:
-        if probe_worker is not None:
-            probe_worker.stop()
         for srv in (admin_server, xds_server):
             srv.shutdown()
             srv.server_close()

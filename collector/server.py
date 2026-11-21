@@ -185,6 +185,30 @@ class Collector:
         )
 
 
+def _dispatch_get(collector: Collector, path: str) -> tuple[int, bytes, str]:
+    if path == '/health':
+        return 200, b'ok\n', 'text/plain; charset=utf-8'
+    if path == '/metrics':
+        return 200, collector.metrics().encode(), 'text/plain; version=0.0.4; charset=utf-8'
+    if path == '/metrics/placement':
+        return 200, collector.placement_metrics().encode(), 'text/plain; version=0.0.4; charset=utf-8'
+    if path == '/sessions':
+        return 200, (json.dumps(collector.sessions_snapshot(), sort_keys=True) + '\n').encode('utf-8'), 'application/json; charset=utf-8'
+    if path == '/offload/snapshot':
+        return 200, (json.dumps(collector.offload_snapshot(), sort_keys=True) + '\n').encode('utf-8'), 'application/json; charset=utf-8'
+    return 404, b'', 'text/plain; charset=utf-8'
+
+
+def _read_observation_body(handler) -> dict:
+    length = int(handler.headers.get('Content-Length', ''))
+    if length < 0 or length > 4096 or handler.headers.get('Transfer-Encoding'):
+        raise ValueError()
+    data = handler.rfile.read(length)
+    if len(data) != length:
+        raise ValueError()
+    return json.loads(data, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-finite JSON')))
+
+
 def make_handler(collector: Collector, token: str):
     """Build HTTP request handler exposing collector read endpoints and authenticated /observations."""
 
@@ -197,18 +221,7 @@ def make_handler(collector: Collector, token: str):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path == '/health':
-                self.reply(200, b'ok\n')
-            elif self.path == '/metrics':
-                self.reply(200, collector.metrics().encode(), 'text/plain; version=0.0.4; charset=utf-8')
-            elif self.path == '/metrics/placement':
-                self.reply(200, collector.placement_metrics().encode(), 'text/plain; version=0.0.4; charset=utf-8')
-            elif self.path == '/sessions':
-                self.reply(200, (json.dumps(collector.sessions_snapshot(), sort_keys=True) + '\n').encode('utf-8'), 'application/json; charset=utf-8')
-            elif self.path == '/offload/snapshot':
-                self.reply(200, (json.dumps(collector.offload_snapshot(), sort_keys=True) + '\n').encode('utf-8'), 'application/json; charset=utf-8')
-            else:
-                self.reply(404)
+            self.reply(*_dispatch_get(collector, self.path))
 
         def do_POST(self):
             if self.path != '/observations':
@@ -219,13 +232,7 @@ def make_handler(collector: Collector, token: str):
                 self.reply(401)
                 return
             try:
-                length = int(self.headers.get('Content-Length', ''))
-                if length < 0 or length > 4096 or self.headers.get('Transfer-Encoding'):
-                    raise ValueError()
-                data = self.rfile.read(length)
-                if len(data) != length:
-                    raise ValueError()
-                obs = json.loads(data, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-finite JSON')))
+                obs = _read_observation_body(self)
             except (ValueError, UnicodeError, OverflowError):
                 collector.reject()
                 self.reply(400)

@@ -1,23 +1,10 @@
 """State, configuration, and event dataclasses for the vertical offloading controller."""
 from dataclasses import dataclass, field
-import math
 
 SITES = ('gnb-1', 'gnb-2', 'gnb-3')
 ROUTES = ('LOCAL', 'SPREAD')
 MODES = ('local-only', 'vertical')
 DEFAULT_SITE_NODES = {'gnb-1': 'gnb1', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
-
-_POSITIVE_FLOAT_FIELDS = (
-    'poll_interval_seconds',
-    'collector_timeout_seconds',
-    'offload_p90_threshold_ms',
-    'breach_duration_seconds',
-    'min_dwell_seconds',
-    'route_switch_interval_seconds',
-    'stale_after_seconds',
-    'envoy_ack_timeout_seconds',
-)
-_POSITIVE_INT_FIELDS = ('min_samples', 'min_error_samples', 'min_fresh_updates')
 
 
 class RouteSwitchBusy(RuntimeError):
@@ -26,7 +13,7 @@ class RouteSwitchBusy(RuntimeError):
 
 @dataclass(frozen=True)
 class OffloadConfig:
-    """Validated vertical offloading parameters."""
+    """Vertical offloading parameters loaded from offloader/config.yaml."""
 
     mode: str = 'vertical'
     poll_interval_seconds: float = 1.0
@@ -45,17 +32,6 @@ class OffloadConfig:
     def __post_init__(self):
         if self.mode not in MODES:
             raise ValueError(f'mode must be one of {MODES}')
-        for name in _POSITIVE_FLOAT_FIELDS:
-            val = getattr(self, name)
-            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or val <= 0:
-                raise ValueError(f'{name} must be finite and positive')
-        for name in _POSITIVE_INT_FIELDS:
-            val = getattr(self, name)
-            if isinstance(val, bool) or not isinstance(val, int) or val < 1:
-                raise ValueError(f'{name} must be a positive integer')
-        val = self.offload_error_rate_threshold
-        if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or not 0.0 <= val <= 1.0:
-            raise ValueError('offload_error_rate_threshold must be in [0, 1]')
 
 
 @dataclass
@@ -142,12 +118,9 @@ class SiteState:
 
     def reset(self, *, active_route: str = 'LOCAL'):
         keep_local, keep_core = self.last_local_ready, self.last_core_ready
-        fresh = SiteState(site=self.site, active_route=active_route)
-        self.__dict__.update(fresh.__dict__)
-        self.last_local_ready = keep_local
-        self.last_core_ready = keep_core
-        self.last_status_note = 'reset'
-        self.last_decision_reason = 'reset'
+        self.__dict__.update(SiteState(site=self.site, active_route=active_route).__dict__)
+        self.last_local_ready, self.last_core_ready = keep_local, keep_core
+        self.last_status_note = self.last_decision_reason = 'reset'
 
     def make_event(
         self,

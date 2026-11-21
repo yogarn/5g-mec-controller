@@ -53,7 +53,6 @@ Serialisasi global: paling banyak satu perubahan rute/bobot dieksekusi per inter
 | `offloader/xds_resources.py` | Pembangun dokumen JSON Envoy v3 `RouteConfiguration` (RDS) dan `ClusterLoadAssignment` (EDS). | `build_route_configuration`, `build_invalid_route_configuration`, `build_cluster_load_assignment`, `route_config_name`, `local_eds_service_name`, `spread_eds_service_name` | `xds.py`, `server.py`, `test_offloader.py`, `test_equivalence.py` |
 | `offloader/xds_http.py` | Server HTTP terpisah untuk discovery Envoy (`/v3/discovery:*`) dan API admin ber-token (`/status`, `/events`, `/override`, `/mode`, `/reset`). | `make_xds_discovery_handler`, `make_admin_handler`, `start_xds_server`, `start_admin_server` | `xds.py`, `server.py`, `test_offloader.py`, `test_envoy_real.py` |
 | `offloader/k8s.py` | Penemuan Pod inferensi yang Running & Ready per node gNB dan Core via in-cluster K8s API atau `kubectl`. | `is_pod_ready`, `filter_pinned_endpoints`, `KubernetesEndpointDiscoverer` | `server.py`, `test_offloader.py` |
-| `offloader/probe.py` | Worker diagnostik latar belakang yang mengirim probe paksa-lokal (`X-MEC-Probe: local`) saat situs di `SPREAD` (bukan gerbang keputusan). | `LocalProbeWorker`, `send_local_probe`, `post_probe_observation`, `build_multipart_image` | `server.py` |
 | `offloader/budget.py` | Sumber kebenaran anggaran replika terpadu (edge anchor + Core fallback + replika dinamis). | `VerticalBudget`, `DEFAULT_MIN_REPLICAS`, `DEFAULT_MAX_REPLICAS`, `DEFAULT_EDGE_ANCHORS`, `DEFAULT_CORE_FALLBACK_REPLICAS` | `experiments/campaign.py`, `experiments/vertical.py`, `test_offloader.py` |
 
 ## Konstanta dan Kunci Konfigurasi (`offloader/config.yaml`)
@@ -79,5 +78,4 @@ Serialisasi global: paling banyak satu perubahan rute/bobot dieksekusi per inter
 | `listen_host` / `listen_port` | `'0.0.0.0'` / `8085` | Alamat dan port listener xDS discovery Envoy. |
 | `admin_host` / `admin_port` | `'0.0.0.0'` / `8086` | Alamat dan port listener API admin ber-token Bearer. |
 | `namespace`, `edge_app_label`, `core_app_label`, `container_port`, `core_node`, `site_nodes` | `services`, `mec-placement-pedestrian-detection`, `...-core`, `5000`, `core-5g`, `{gnb-1: gnb1, ...}` | Parameter penemuan Pod Kubernetes terpin per node. |
-| `collector_snapshot_url`, `collector_observations_url` | URL layanan collector | Endpoint pembacaan snapshot dan pengiriman observasi probe. |
-| `site_probe_urls`, `probe_interval_seconds`, `probe_timeout_seconds`, `probe_image_path` | URL Envoy tiap situs, `1.0`, `2.0`, path gambar | Konfigurasi worker probe diagnostik lokal. |
+| `collector_snapshot_url` | URL layanan collector | Endpoint pembacaan snapshot `/offload/snapshot`. |

@@ -1,6 +1,5 @@
 """Per-site vertical offloading state machine (LOCAL / weighted SPREAD with gradual retreat)."""
 from dataclasses import replace
-import math
 
 from offloader.entry import evaluate_local_entry
 from offloader.envoy_ack import check_ack_timeouts, record_eds_ack, record_nack, record_rds_ack
@@ -247,7 +246,7 @@ class VerticalOffloadPolicy:
             st.last_core_ratio, st.last_local_weight = 0.0, 1
         if (st.desired_route == 'SPREAD' and st.active_route == 'SPREAD'
                 and st.pending_weight_since is None and st.spread_confirmed_since is None
-                and isinstance(wall_now, (int, float)) and math.isfinite(wall_now)):
+                and wall_now is not None):
             st.spread_confirmed_since, st.spread_wait_seconds = wall_now, None
 
     def _evaluate_site(self, site: str, now: float, snapshot: dict | None, wall_now,
@@ -304,11 +303,11 @@ class VerticalOffloadPolicy:
         self._now = now
         wall_now = snapshot.get('generated_at') if isinstance(snapshot, dict) else None
         k_current = self.spread_count()
-        core_ready = max(0, int(core_ready_count))
+        core_ready = core_ready_count
         enter_cands, restore_cands, retreat_cands = [], [], []
 
         for site in SITES:
-            local_ready = max(0, int(local_ready_counts.get(site, 0)))
+            local_ready = local_ready_counts.get(site, 0)
             self._evaluate_site(
                 site, now, snapshot, wall_now, local_ready, core_ready, k_current,
                 collector_error, events, enter_cands, restore_cands, retreat_cands,

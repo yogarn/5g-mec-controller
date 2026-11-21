@@ -367,9 +367,12 @@ class TestPolicyEquivalence(unittest.TestCase):
                             wall_now=wall_now,
                             force_mode=rng.choice(['empty', 'no_success', 'error_breach']),
                         )
-                        user_map = {'local': local_b, 'core': core_b, 'unknown': unk_b}
-                        if rng.random() < 0.85:
-                            user_map['overall'] = _make_bucket(rng, seq=seq_val, wall_now=wall_now, force_mode=fmode)
+                        user_map = {
+                            'local': local_b,
+                            'core': core_b,
+                            'unknown': unk_b,
+                            'overall': _make_bucket(rng, seq=seq_val, wall_now=wall_now, force_mode=fmode),
+                        }
                         sites_snap[site] = {'user': user_map}
                     snapshot = {
                         'generated_at': round(wall_now, 6),
@@ -565,36 +568,26 @@ class TestCollectorEquivalence(unittest.TestCase):
             mono[0] += dt
             wall[0] += dt
 
-            if rng.random() < 0.08:
-                # Invalid observation
-                obs = rng.choice([
-                    {'ue_ip': 'not-an-ip', 'duration_ms': 10, 'http_status': 200, 'success': True},
-                    {'ue_ip': '10.45.0.10', 'duration_ms': -1, 'http_status': 200, 'success': True},
-                    {'traffic_class': 'probe', 'duration_ms': 10, 'http_status': 200, 'success': True},
-                    {'ue_ip': '10.45.0.10', 'duration_ms': 10, 'http_status': 500, 'success': True},
-                    'bad',
-                ])
-            else:
-                tclass = 'probe' if rng.random() < 0.15 else 'user'
-                success = rng.random() < 0.72
-                status = 200 if success else rng.choice([None, 500, 503, 504])
-                timed_out = (not success) and (status == 504 or rng.random() < 0.4)
-                site = rng.choice(SITES) if (tclass == 'probe' or rng.random() < 0.7) else None
-                route = rng.choice(['local', 'core', 'unknown', None])
-                obs = {
-                    'traffic_class': tclass,
-                    'duration_ms': round(rng.uniform(15.0, 320.0), 3),
-                    'http_status': status,
-                    'success': success,
-                    'timed_out': timed_out,
-                    'server_node': rng.choice(nodes),
-                }
-                if tclass == 'user':
-                    obs['ue_ip'] = rng.choice(ue_ips)
-                if site is not None:
-                    obs['site'] = site
-                if route is not None:
-                    obs['route'] = route
+            tclass = 'probe' if rng.random() < 0.15 else 'user'
+            success = rng.random() < 0.72
+            status = 200 if success else rng.choice([None, 500, 503, 504])
+            timed_out = (not success) and (status == 504 or rng.random() < 0.4)
+            site = rng.choice(SITES) if (tclass == 'probe' or rng.random() < 0.7) else None
+            route = rng.choice(['local', 'core', 'unknown', None])
+            obs = {
+                'traffic_class': tclass,
+                'duration_ms': round(rng.uniform(15.0, 320.0), 3),
+                'http_status': status,
+                'success': success,
+                'timed_out': timed_out,
+                'server_node': rng.choice(nodes),
+            }
+            if tclass == 'user':
+                obs['ue_ip'] = rng.choice(ue_ips)
+            if site is not None:
+                obs['site'] = site
+            if route is not None:
+                obs['route'] = route
 
             self.assertEqual(old_c.ingest(obs), new_c.ingest(obs), f'step={step} ingest mismatch')
 

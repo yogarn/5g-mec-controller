@@ -96,7 +96,7 @@ func TestDeployConfigMapLoadsCleanly(t *testing.T) {
 }
 
 func TestPodShareScoringConfig(t *testing.T) {
-	base := "manifest: workload.yaml\nprometheus_url: http://prom:9090\nmode: scaling-only\n"
+	base := "manifest: workload.yaml\nprometheus_url: http://prom:9090\nmode: mobility-aware\n"
 	for _, tc := range []struct {
 		name    string
 		options string
@@ -104,8 +104,6 @@ func TestPodShareScoringConfig(t *testing.T) {
 	}{
 		{name: "default"},
 		{name: "explicit", options: "pod_share_scoring: true\n", enabled: true},
-		{name: "legacy", options: "prefer_close: true\n", enabled: true},
-		{name: "explicit overrides legacy", options: "prefer_close: true\npod_share_scoring: false\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -123,40 +121,12 @@ func TestPodShareScoringConfig(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsAcceptsLegacyAndMinimalTwoDimConfigs(t *testing.T) {
+func TestLoadSettingsMinimalTwoDimConfig(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := filepath.Join(dir, "manifest.yaml")
 	if err := os.WriteFile(manifestPath, []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n  namespace: services\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	legacy := `
-manifest: ` + manifestPath + `
-prometheus_url: http://prom:9090
-mode: mobility-aware
-mutate: true
-eligible_nodes: [gnb1, gnb-2, gnb-3]
-cpu_utilization_query: cpu
-mobility_query: mob
-latency_query: lat
-slo_seconds: 0.15
-min_replicas: 1
-max_replicas: 12
-interval_seconds: 15
-cooldown_seconds: 120
-scale_down_seconds: 300
-gpu_nodes: [gnb-2, gnb-3]
-gpu_utilization_query: gpu
-vram_utilization_query: vram
-resource_weights: {cpu: 0.5, memory: 0.5, gpu: 0.0, vram: 0.0}
-`
-	legacyPath := filepath.Join(dir, "legacy.yaml")
-	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadSettings(legacyPath); err != nil {
-		t.Fatalf("legacy config rejected: %v", err)
-	}
-
 	minimal := `
 manifest: ` + manifestPath + `
 prometheus_url: http://prom:9090

@@ -7,8 +7,7 @@
 ## Alur Data
 
 ```text
-  benchmark/client.py (user)  --+
-  offloader/probe.py (probe)  --+--> POST /observations (Bearer token)
+  benchmark/client.py (user)  ----> POST /observations (Bearer token)
                                            |
                                            v
   Open5GS SMF/AMF --(1s poll)--> Collector (sliding-window deque + mapping)
@@ -32,7 +31,7 @@
 
 | Path | Metode | Masukan | Keluaran | Konsumen Aktif |
 | --- | --- | --- | --- | --- |
-| `/observations` | `POST` | Header `Authorization: Bearer <token>`, JSON observasi (`ue_ip`, `duration_ms`, `http_status`, `success`, opsional `site`, `route`, `server_node`, `timed_out`, `traffic_class`) | `202` diterima, `400` tidak valid, `401` token salah | `benchmark/client.py`, `offloader/probe.py` |
+| `/observations` | `POST` | Header `Authorization: Bearer <token>`, JSON observasi (`ue_ip`, `duration_ms`, `http_status`, `success`, opsional `site`, `route`, `server_node`, `timed_out`, `traffic_class`) | `202` diterima, `400` tidak valid, `401` token salah | `benchmark/client.py` |
 | `/offload/snapshot` | `GET` | — | JSON snapshot per situs (`user.{local,core,unknown,overall}`, `probe.local`, `generated_at`, `window_seconds`) | `offloader/server.py` |
 | `/metrics` | `GET` | — | Teks Prometheus (`ue_request_duration_p90_seconds`, `ue_site_route_*`, `ue_active_sessions`, counter ingest) | `telemetry/03-prometheus.yaml`, `autoscaler/` (HPA) |
 | `/metrics/placement` | `GET` | — | Teks Prometheus ringan (`ue_request_node_placement_window_attempts`, `ue_request_upf_placement_window_*`) | `telemetry/03-prometheus.yaml`, `placement/` (Go controller) |

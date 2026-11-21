@@ -3,6 +3,13 @@ from offloader.spread import bucket_stale, overall_user_bucket, post_ack_window,
 from offloader.state import DecisionEvent, SiteState
 
 
+def _record_overall_metrics(st: SiteState, overall: dict):
+    st.last_p90_ms = overall.get('p90_ms')
+    st.last_samples = int(overall.get('successes') or 0)
+    st.last_attempts = int(overall.get('attempts') or 0)
+    st.last_error_rate = overall.get('error_rate')
+
+
 def _precondition_hold_reason(st: SiteState, snapshot: dict, overall: dict,
                               local_ready: int, stale_after: float) -> str | None:
     """Return a hold reason if SPREAD telemetry cannot be evaluated yet, else None."""
@@ -17,7 +24,7 @@ def _precondition_hold_reason(st: SiteState, snapshot: dict, overall: dict,
     return None
 
 
-def _detect_spread_breach(overall: dict, cfg) -> tuple[bool, bool]:
+def _is_breaching(overall: dict, cfg) -> tuple[bool, bool]:
     """Return (p90_breach, error_breach) for a SPREAD site's overall user bucket."""
     p90_ms = overall.get('p90_ms')
     successes = int(overall.get('successes') or 0)
@@ -33,7 +40,7 @@ def _detect_spread_breach(overall: dict, cfg) -> tuple[bool, bool]:
     return p90_breach, error_breach
 
 
-def _advance_recovery(st: SiteState, now: float, seq: int) -> bool:
+def _is_fresh_recovery(st: SiteState, now: float, seq: int) -> bool:
     """Advance the fresh-sample recovery counter; return False if no new sample arrived."""
     if st.recovery_started_at is None:
         st.recovery_started_at = now
@@ -61,11 +68,10 @@ def _evaluate_spread_breach(policy, *, site: str, st: SiteState, now: float, ove
             reason = 'spread_retreat_error_breach' if error_breach and not p90_breach else 'spread_retreat_p90_breach'
             return {
                 'site': site, 'st': st, 'reason': reason,
-                # A level already judged healthy that now breaches goes one level further back.
                 'target_level': st.good_level if st.retreat_level > st.good_level else st.good_level - 1,
                 'core_ratio': spread_core_ratio(core_ready, local_ready, k_current, st.retreat_level, retreat_factor=retreat_factor),
-                'p90_ms': overall.get('p90_ms'), 'samples': int(overall.get('successes') or 0),
-                'attempts': int(overall.get('attempts') or 0), 'error_rate': overall.get('error_rate'),
+                'p90_ms': st.last_p90_ms, 'samples': st.last_samples,
+                'attempts': st.last_attempts, 'error_rate': st.last_error_rate,
                 'local_ready': local_ready, 'core_ready': core_ready,
             }
         st.last_status_note = 'spread_restore_pending'
@@ -77,67 +83,12 @@ def _evaluate_spread_breach(policy, *, site: str, st: SiteState, now: float, ove
     return None
 
 
-def evaluate_spread_retreat(
-    policy,
-    *,
-    site: str,
-    st: SiteState,
-    now: float,
-    snapshot: dict,
-    user_buckets: dict,
-    local_ready: int,
-    core_ready: int,
-    k_current: int,
-    retreat_factor: int,
-    retreat_floor: float,
-    events: list[DecisionEvent],
-) -> tuple[dict | None, dict | None]:
-    """Evaluate a SPREAD site and return (restore_candidate, retreat_candidate)."""
-    cfg = policy.config
-    overall = overall_user_bucket(user_buckets, cfg.stale_after_seconds)
-    st.last_p90_ms = overall.get('p90_ms')
-    st.last_samples = int(overall.get('successes') or 0)
-    st.last_attempts = int(overall.get('attempts') or 0)
-    st.last_error_rate = overall.get('error_rate')
-
-    hold = _precondition_hold_reason(st, snapshot, overall, local_ready, cfg.stale_after_seconds)
-    if hold is not None:
-        policy._clear_breach(st)
-        policy._clear_recovery(st)
-        policy._note_hold(events, st, site, hold, local_ready=local_ready, core_ready=core_ready)
-        return None, None
-
-    p90_breach, error_breach = _detect_spread_breach(overall, cfg)
-    if p90_breach or error_breach:
-        return _evaluate_spread_breach(
-            policy, site=site, st=st, now=now, overall=overall,
-            p90_breach=p90_breach, error_breach=error_breach,
-            local_ready=local_ready, core_ready=core_ready,
-            k_current=k_current, retreat_factor=retreat_factor, events=events,
-        ), None
-
-    policy._clear_breach(st)
-    if st.last_samples < cfg.min_samples or st.last_p90_ms is None:
-        policy._clear_recovery(st)
-        policy._note_hold(events, st, site, 'spread_insufficient_samples', local_ready=local_ready, core_ready=core_ready)
-        return None, None
-
-    if not _advance_recovery(st, now, int(overall.get('newest_sample_seq') or 0)):
-        return None, None
-    if st.recovery_fresh_updates < cfg.min_fresh_updates:
-        return None, None
-
-    if st.retreat_level > st.good_level:
-        st.good_level = st.retreat_level
-    if st.hold_until is not None and now < st.hold_until:
-        policy._note_hold(events, st, site, 'spread_retreat_hold', local_ready=local_ready, core_ready=core_ready)
-        return None, None
-    if not policy._dwell_satisfied(st, now):
-        return None, None
-
+def _pick_retreat_target(st: SiteState, site: str, local_ready: int, core_ready: int,
+                         k_current: int, retreat_factor: int, retreat_floor: float) -> dict:
+    """Build the next retreat step or complete-to-LOCAL candidate for a healthy SPREAD site."""
     next_level = st.retreat_level + 1
     next_ratio = spread_core_ratio(core_ready, local_ready, k_current, next_level, retreat_factor=retreat_factor)
-    return None, {
+    return {
         'site': site, 'st': st, 'action': 'complete' if next_ratio < retreat_floor else 'step',
         'next_level': next_level,
         'core_ratio': spread_core_ratio(core_ready, local_ready, k_current, st.retreat_level, retreat_factor=retreat_factor),
@@ -145,3 +96,39 @@ def evaluate_spread_retreat(
         'attempts': st.last_attempts, 'error_rate': st.last_error_rate,
         'local_ready': local_ready, 'core_ready': core_ready,
     }
+
+
+def evaluate_spread_retreat(policy, *, site: str, st: SiteState, now: float, snapshot: dict,
+                            user_buckets: dict, local_ready: int, core_ready: int, k_current: int,
+                            retreat_factor: int, retreat_floor: float,
+                            events: list[DecisionEvent]) -> tuple[dict | None, dict | None]:
+    """Evaluate a SPREAD site and return (restore_candidate, retreat_candidate)."""
+    cfg, overall = policy.config, overall_user_bucket(user_buckets)
+    _record_overall_metrics(st, overall)
+    hold = _precondition_hold_reason(st, snapshot, overall, local_ready, cfg.stale_after_seconds)
+    if hold is not None:
+        policy._clear_breach(st)
+        policy._clear_recovery(st)
+        policy._note_hold(events, st, site, hold, local_ready=local_ready, core_ready=core_ready)
+        return None, None
+    p90_breach, error_breach = _is_breaching(overall, cfg)
+    if p90_breach or error_breach:
+        return _evaluate_spread_breach(
+            policy, site=site, st=st, now=now, overall=overall, p90_breach=p90_breach, error_breach=error_breach,
+            local_ready=local_ready, core_ready=core_ready, k_current=k_current, retreat_factor=retreat_factor, events=events,
+        ), None
+    policy._clear_breach(st)
+    if st.last_samples < cfg.min_samples or st.last_p90_ms is None:
+        policy._clear_recovery(st)
+        policy._note_hold(events, st, site, 'spread_insufficient_samples', local_ready=local_ready, core_ready=core_ready)
+        return None, None
+    if not _is_fresh_recovery(st, now, int(overall.get('newest_sample_seq') or 0)) or st.recovery_fresh_updates < cfg.min_fresh_updates:
+        return None, None
+    if st.retreat_level > st.good_level:
+        st.good_level = st.retreat_level
+    if st.hold_until is not None and now < st.hold_until:
+        policy._note_hold(events, st, site, 'spread_retreat_hold', local_ready=local_ready, core_ready=core_ready)
+        return None, None
+    if not policy._dwell_satisfied(st, now):
+        return None, None
+    return None, _pick_retreat_target(st, site, local_ready, core_ready, k_current, retreat_factor, retreat_floor)
