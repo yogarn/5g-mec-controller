@@ -164,3 +164,31 @@ def test_attempt_records_server_timings_and_nulls_on_error_or_malformed_json():
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+@pytest.mark.parametrize('route', ['local', 'core', 'spread'])
+def test_attempt_records_every_known_route_label(route):
+    from urllib.parse import urlsplit
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('X-MEC-Route', route)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = client.attempt(urlsplit(f'http://127.0.0.1:{server.server_port}/x'), 'GET', None, {},
+                                '127.0.0.1', 2.0)
+        assert result['selected_route'] == route
+    finally:
+        server.shutdown()

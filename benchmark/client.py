@@ -182,7 +182,7 @@ def attempt(url, method, body, headers, source, timeout, *, response_contract='h
         content_type = response.getheader('Content-Type')
         ingress_site = _optional_str(response.getheader('X-MEC-Site'))
         raw_route = _optional_str(response.getheader('X-MEC-Route'))
-        if raw_route is not None and raw_route.lower() in ('local', 'core'):
+        if raw_route is not None and raw_route.lower() in ('local', 'core', 'spread'):
             selected_route = raw_route.lower()
         route_version = _optional_str(response.getheader('X-MEC-Route-Version'))
         raw_tc = _optional_str(response.getheader('X-MEC-Traffic-Class'))
