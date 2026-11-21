@@ -96,7 +96,7 @@ spec:
       serviceAccountName: vertical-offloader
       containers:
         - name: offloader
-          image: 10.34.211.140:30500/vertical-offloader:retreat-20261121T131229Z
+          image: 10.34.211.140:30500/vertical-offloader:fastretreat-20261121T133701Z
           imagePullPolicy: Always
           ports:
             - name: xds
