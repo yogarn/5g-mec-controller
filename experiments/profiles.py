@@ -31,6 +31,8 @@ FOUR_ARM_SPECS = (
 ARM_SELECTIONS = {
     'all': FOUR_ARM_SPECS,
     'vertical': tuple(spec for spec in FOUR_ARM_SPECS if spec[2] == 'vertical'),
+    # One arm per name; used by the demo profiles to show a single configuration live.
+    **{spec[0]: (spec,) for spec in FOUR_ARM_SPECS},
 }
 UPF_PLACEMENT_QUERY = (
     'ue_request_upf_placement_window_attempts{job="ue-telemetry-placement",node=~"core-5g|gnb-2|gnb-3"} / 5'
@@ -88,6 +90,9 @@ _VERTICAL_FULL = {
 }
 PROFILES = {
     'vertical-joint': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE},
+    # Demo: the real joint schedule (11 phases, about 30 minutes with setup) for ONE arm; see demo.sh.
+    **{f'demo-{spec[0]}': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE,
+                           'arms': spec[0]} for spec in FOUR_ARM_SPECS},
     'vertical-smoke': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_SMOKE_SCHEDULE,
                        'phase_duration': 60.0, 'arms': 'vertical'},
     'vertical-mobility': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,

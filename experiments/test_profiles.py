@@ -60,11 +60,22 @@ def test_mobility_profile_uses_24_ues_with_hotspot_at_most_18():
     assert max(max(p['gnb1_ues'], p['gnb2_ues'], p['gnb3_ues']) for p in phases[1:]) == 18
 
 
-def test_only_the_smoke_profile_selects_vertical_arms():
+def test_only_smoke_and_demo_profiles_select_arms():
     assert {n: p.get('arms', 'all') for n, p in campaign.PROFILES.items()} == {
         'vertical-joint': 'all', 'vertical-smoke': 'vertical',
         'vertical-mobility': 'all', 'scaling-staircase': 'all',
+        'demo-baseline-local': 'baseline-local', 'demo-proposed-local': 'proposed-local',
+        'demo-baseline-vertical': 'baseline-vertical', 'demo-proposed-vertical': 'proposed-vertical',
     }
     assert [a for a, _m, _v in campaign.ARM_SELECTIONS['vertical']] == ['baseline-vertical', 'proposed-vertical']
     assert [a for a, _m, _v in campaign.ARM_SELECTIONS['all']] == [
         'baseline-local', 'proposed-local', 'baseline-vertical', 'proposed-vertical']
+
+
+def test_demo_profiles_are_the_joint_profile_for_a_single_arm():
+    from experiments.profiles import ARM_SELECTIONS, FOUR_ARM_SPECS, PROFILES
+    for arm, _method, _mode in FOUR_ARM_SPECS:
+        demo = dict(PROFILES[f'demo-{arm}'])
+        assert demo.pop('arms') == arm
+        assert [spec[0] for spec in ARM_SELECTIONS[arm]] == [arm]
+        assert demo == {k: v for k, v in PROFILES['vertical-joint'].items() if k != 'arms'}
