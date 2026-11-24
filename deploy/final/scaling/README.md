@@ -89,6 +89,31 @@ for r in ue-telemetry-collector; do
 done
 ```
 
+Compare each rebuilt `latest` with the final-run image layer by layer. **Same top layer and same `created` time means the same bytes** (a fully `CACHED` build); a different top layer means a fresh build of the same source:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+python3 - <<'EOF'
+import json, urllib.request
+R = "http://localhost:30500/v2/"
+ACC = ("application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, "
+       "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
+def get(path):
+    return json.load(urllib.request.urlopen(urllib.request.Request(R + path, headers={"Accept": ACC})))
+def image(repo, ref):
+    m = get(f"{repo}/manifests/{ref}")
+    for x in m.get("manifests", []):
+        p = x.get("platform", {})
+        if p.get("architecture") == "amd64" and p.get("os") == "linux":
+            return get(f"{repo}/manifests/{x['digest']}")
+    return m
+for repo, final in [('ue-telemetry-collector', 'prune-20261121T152448Z')]:
+    for ref in ("latest", final):
+        m = image(repo, ref); cfg = get(f"{repo}/blobs/{m['config']['digest']}")
+        print(f"{repo:24} {ref[:26]:26} layers={len(m['layers'])} top-layer={cfg['rootfs']['diff_ids'][-1][7:19]} created={cfg.get('created', '')[:19]}")
+EOF
+```
+
 The `latest` digest must now differ from the one in the table and the newest `build-...` tag must be listed. Section B deploys these images; section B3 shows the digest each pod really runs.
 
 ### A4. Go back to the exact final-run images (only if you need them)

@@ -41,9 +41,9 @@ Same source does not mean same image: every `docker build` produces a new digest
 
 | image | built by you? | safe to rebuild? | why / what was checked |
 |---|---|---|---|
-| `vertical-offloader` | yes (A2) | **yes** | It makes the offloading decisions of the vertical arms, but its logic is identical: checked on core that every non-test `.py` file in the final-run image (`backoff-20261121T180558Z`) has the same SHA-256 as the file in this repo (17 files). Only the digest, the base image `python:3.12-slim` and the unpinned `pip install pyyaml` (config parsing only) can differ. |
-| `ue-telemetry-collector` | yes (A2) | **yes** | It computes the p90 the HPA reads. Checked on core: every non-test `.py` file in the final-run image (`prune-20261121T152448Z`) is identical to the repo (6 files). `PyYAML==6.0.2` is pinned; only the base image can move. |
-| `placement-controller` | yes (A2) | **yes** | It is the scheduler and descheduler of the proposed arms. A Go binary cannot be compared to its source directly, so identity rests on the timeline below: the image `sha256:1164526f...` is tag `prune-20261121T152448Z`, built 2026-11-21 15:25 UTC right after commit `fda7bfb`, and `git diff fda7bfb HEAD -- placement/` shows that **no Go source changed since**; only `deploy.yaml` (the image reference) differs. Checked: `go vet ./...` and `go test ./...` pass on the frozen source (config, controller and policy packages, in `golang:1.24-alpine`), and a local build from `placement/` starts and prints its flags; that shows the logic is sound, not that it is the same binary. Only the digest, the moving `golang:1.24-alpine` toolchain and the base image can differ; modules are pinned by `go.sum`. |
+| `vertical-offloader` | yes (A2) | **yes** | It makes the offloading decisions of the vertical arms, but its logic is identical: checked on core that every non-test `.py` file in the final-run image (`backoff-20261121T180558Z`) has the same SHA-256 as the file in this repo (17 files). Only the digest, the base image `python:3.12-slim` and the unpinned `pip install pyyaml` (config parsing only) can differ. Observed on core on 2026-11-24: the rebuild has PyYAML 6.0.4 (final-run image: 6.0.3) and Debian 13.8 (13.7); Python 3.12.16 is the same. |
+| `ue-telemetry-collector` | yes (A2) | **yes** | It computes the p90 the HPA reads. Checked on core: every non-test `.py` file in the final-run image (`prune-20261121T152448Z`) is identical to the repo (6 files). `PyYAML==6.0.2` is pinned; only the base image can move (observed on 2026-11-24: Debian 13.8 instead of 13.7, PyYAML and Python unchanged). |
+| `placement-controller` | yes (A2) | **yes** | It is the scheduler and descheduler of the proposed arms. A Go binary cannot be compared to its source directly, so identity rests on the timeline below: the image `sha256:1164526f...` is tag `prune-20261121T152448Z`, built 2026-11-21 15:25 UTC right after commit `fda7bfb`, and `git diff fda7bfb HEAD -- placement/` shows that **no Go source changed since**; only `deploy.yaml` (the image reference) differs. Checked: `go vet ./...` and `go test ./...` pass on the frozen source (config, controller and policy packages, in `golang:1.24-alpine`), and a local build from `placement/` starts and prints its flags; that shows the logic is sound, not that it is the same binary. Only the digest, the moving `golang:1.24-alpine` toolchain and the base image can differ; modules are pinned by `go.sum`. **Observed on core on 2026-11-24:** the rebuild reported every step `CACHED` (the build cache still held the layers of the original build), and the pushed `latest` has the same 13 layers, the same top layer and the same `created` time as the final-run image, i.e. it is the same binary; the manifest digest differs only because BuildKit now wraps it in an index with an attestation. On a machine or after a `docker builder prune` without that cache you get a fresh build of the same source instead. |
 | `envoyproxy/envoy:v1.31-latest` | no (upstream) | **do not re-pull it** | It sits on the request path and the tag is floating. The nodes run `sha256:caa5b411...`, which is also the digest recorded in the results; `imagePullPolicy: IfNotPresent` keeps it cached. A fresh pull could bring a newer 1.31.x. Pinning it (`envoyproxy/envoy@sha256:caa5b411be1633b90023592a34a7e010c933d6e60206c758f631485e53006865`) would remove that risk; the manifests do not do this yet. |
 | `pedestrian-detection` (the workload) | **no** | **no, keep the digest** | It is the system under test and the digest `sha256:5245d82f...` (tag `steep-spillover`) is recorded in the results. `requirements.txt` pins only 5 packages (Flask, gunicorn, numpy, Pillow, onnxruntime); their dependencies and the `python:3.11-slim` base are not pinned, so a rebuild can change inference time by a few ms, which goes straight into p90 and SLO violations. With `:latest` and `imagePullPolicy: IfNotPresent` each node would also keep whichever build it pulled first, so replicas on different nodes could silently run different images. A rebuild means a new tag and digest, every YAML with the old digest replaced, and the experiment rerun. |
 | Prometheus `v2.53.0`, prometheus-adapter `v0.12.0`, node-exporter `v1.8.1`, Grafana `11.1.0` | no (upstream) | n/a | Fixed version tags, pulled not built; nothing to do. |
@@ -116,6 +116,31 @@ for r in vertical-offloader ue-telemetry-collector placement-controller; do
   echo "$r latest = $(curl -s -I -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json' http://localhost:30500/v2/$r/manifests/latest | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')"
   curl -s http://localhost:30500/v2/$r/tags/list; echo
 done
+```
+
+Compare each rebuilt `latest` with the final-run image layer by layer. **Same top layer and same `created` time means the same bytes** (a fully `CACHED` build); a different top layer means a fresh build of the same source:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+python3 - <<'EOF'
+import json, urllib.request
+R = "http://localhost:30500/v2/"
+ACC = ("application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, "
+       "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
+def get(path):
+    return json.load(urllib.request.urlopen(urllib.request.Request(R + path, headers={"Accept": ACC})))
+def image(repo, ref):
+    m = get(f"{repo}/manifests/{ref}")
+    for x in m.get("manifests", []):
+        p = x.get("platform", {})
+        if p.get("architecture") == "amd64" and p.get("os") == "linux":
+            return get(f"{repo}/manifests/{x['digest']}")
+    return m
+for repo, final in [('vertical-offloader', 'backoff-20261121T180558Z'), ('ue-telemetry-collector', 'prune-20261121T152448Z'), ('placement-controller', 'prune-20261121T152448Z')]:
+    for ref in ("latest", final):
+        m = image(repo, ref); cfg = get(f"{repo}/blobs/{m['config']['digest']}")
+        print(f"{repo:24} {ref[:26]:26} layers={len(m['layers'])} top-layer={cfg['rootfs']['diff_ids'][-1][7:19]} created={cfg.get('created', '')[:19]}")
+EOF
 ```
 
 The `latest` digest must now differ from the one in the table and the newest `build-...` tag must be listed. Section B deploys these images; section B3 shows the digest each pod really runs.
