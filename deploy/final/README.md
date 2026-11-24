@@ -41,7 +41,8 @@ arm with every command written out; nothing says "same for the others".
   terminal on core, in any order. State shared between blocks lives in files (`/tmp/final-camp`,
   `/tmp/ue-payload.json`), not in shell variables.
 - Four terminals on core: **T1** commands, **T2** the 10 ms path delay (`tools/hold_tc_delay.py`; the plain `tc`/`ip`
-  commands it runs are written out in `tools/tc-delay-commands.md`),
+  commands it runs, with the line of `traffic_control.py` that runs each, are in `tools/tc-delay-commands.md`;
+  `tools/trace_tc_commands.py` prints them without touching the cluster),
   **T3** the offloader port-forward (joint and mobility only), **T4** monitoring.
 
 ## Before the first run

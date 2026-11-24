@@ -1,12 +1,97 @@
 # The `tc` commands behind `utils/traffic_control.py`
 
-There is no shell script for the inter-node delay. `TrafficDelay` (`utils/traffic_control.py`) builds these
-commands in Python and runs each one inside the `calico-node` pod of the node, with
-`kubectl -n kube-system exec <calico-node pod> -c calico-node -- <command>` (line 46). This page is the same
-sequence written as plain shell, for the day you implement it outside this repo. It was derived by reading the
-code, **not executed**; the Python version is the one the final runs used.
+There is no shell script for the inter-node delay. `TrafficDelay` (`utils/traffic_control.py`) builds each command
+in Python and runs it inside the `calico-node` pod of the node:
 
-The pieces are the standard iproute2 tools `tc` and `ip` (already in the `calico-node` container), nothing else.
+```python
+def _exec(self, node, *args, **kwargs):                       # utils/traffic_control.py, line 45
+    return command('kubectl', '-n', 'kube-system', 'exec', self.agents[node],
+                   '-c', 'calico-node', '--', *args, **kwargs)  # == kubectl -n kube-system exec <pod> -c calico-node -- <args>
+```
+
+Every `tc` / `ip` below is one such `_exec` call. The tools are the standard iproute2 binaries already in the
+`calico-node` container, nothing else.
+
+## The real commands, with the line that runs each one
+
+`tools/trace_tc_commands.py` runs the real `TrafficDelay.start()` and `close()` with `command()` replaced by a
+recorder, so **no cluster is touched** but every command is built by the real code. Run it yourself:
+
+```bash
+python3 deploy/final/tools/trace_tc_commands.py gnb1 10 --expand      # node, delay in ms
+```
+
+Captured for `gnb1`, 10 ms (the other nodes get the same sequence for their own interfaces; 136 exec calls in
+total, 34 per node). Interfaces are `eth0` (the NIC used to reach the other nodes) and `vxlan.calico`. In this
+capture clsact is absent so it is added; on the real cluster that line is skipped when clsact already exists.
+The IFB names (`mec` + 8 hex) change every run.
+
+```text
+[start] line  98 _agents_and_devices  ip -j -4 route get 10.0.0.2
+[start] line  98 _agents_and_devices  ip -j -4 route get 10.0.0.3
+[start] line  98 _agents_and_devices  ip -j -4 route get 10.0.0.4
+[start] line 104 _agents_and_devices  ip -j link show dev eth0
+[start] line 104 _agents_and_devices  ip -j link show dev vxlan.calico
+[start] line 153 start                tc -j qdisc show dev eth0
+[start] line 155 start                tc qdisc add dev eth0 clsact
+[start] line 144 _filter              tc filter show dev eth0 egress pref 49210
+[start] line 144 _filter              tc filter show dev eth0 egress pref 49211
+[start] line 159 start                ip link add mece5aa50b6 type ifb
+[start] line 162 start                ip link set mece5aa50b6 up
+[start] line 163 start                tc qdisc add dev mece5aa50b6 root handle 1: netem delay 10.0ms
+[start] line 165 start                tc filter add dev eth0 egress protocol ip pref 49210 handle 1 flower ip_proto tcp dst_ip 172.16.40.0/23 dst_port 5000 action mirred egress redirect dev mece5aa50b6
+[start] line 165 start                tc filter add dev eth0 egress protocol ip pref 49211 handle 1 flower ip_proto tcp src_ip 172.16.40.0/23 src_port 5000 action mirred egress redirect dev mece5aa50b6
+[start] line 153 start                tc -j qdisc show dev vxlan.calico
+[start] line 155 start                tc qdisc add dev vxlan.calico clsact
+[start] line 144 _filter              tc filter show dev vxlan.calico egress pref 49210
+[start] line 144 _filter              tc filter show dev vxlan.calico egress pref 49211
+[start] line 159 start                ip link add mec63e4e92a type ifb
+[start] line 162 start                ip link set mec63e4e92a up
+[start] line 163 start                tc qdisc add dev mec63e4e92a root handle 1: netem delay 10.0ms
+[start] line 165 start                tc filter add dev vxlan.calico egress protocol ip pref 49210 handle 1 flower ip_proto tcp dst_ip 172.16.40.0/23 dst_port 5000 action mirred egress redirect dev mec63e4e92a
+[start] line 165 start                tc filter add dev vxlan.calico egress protocol ip pref 49211 handle 1 flower ip_proto tcp src_ip 172.16.40.0/23 src_port 5000 action mirred egress redirect dev mec63e4e92a
+[start] line 188 check                sh -ec <health-check script, see --expand>
+            tc -j qdisc show dev mece5aa50b6
+            tc filter show dev eth0 egress pref 49210
+            tc filter show dev eth0 egress pref 49211
+            tc -j qdisc show dev mec63e4e92a
+            tc filter show dev vxlan.calico egress pref 49210
+            tc filter show dev vxlan.calico egress pref 49211
+[close] line 144 _filter              tc filter show dev vxlan.calico egress pref 49211
+[close] line 215 close                tc filter del dev vxlan.calico egress pref 49211 handle 1 flower
+[close] line 144 _filter              tc filter show dev vxlan.calico egress pref 49210
+[close] line 215 close                tc filter del dev vxlan.calico egress pref 49210 handle 1 flower
+[close] line 221 close                ip link del mec63e4e92a
+[close] line 144 _filter              tc filter show dev eth0 egress pref 49211
+[close] line 215 close                tc filter del dev eth0 egress pref 49211 handle 1 flower
+[close] line 144 _filter              tc filter show dev eth0 egress pref 49210
+[close] line 215 close                tc filter del dev eth0 egress pref 49210 handle 1 flower
+[close] line 221 close                ip link del mece5aa50b6
+--- 136 exec calls in total, 34 on gnb1
+```
+
+What each line number is (`utils/traffic_control.py`):
+
+| line | function | what it runs |
+|---|---|---|
+| 98 | `_agents_and_devices` | `ip -j -4 route get <peer IP>`: which NIC reaches each other node |
+| 104 | `_agents_and_devices` | `ip -j link show dev <IF>`: the interface exists |
+| 153 | `start` | `tc -j qdisc show dev <IF>`: is there a `clsact` already |
+| 155 | `start` | `tc qdisc add dev <IF> clsact` |
+| 144 | `_filter` | `tc filter show dev <IF> egress pref <N>`: the slot must be empty before install, and is re-read before delete |
+| 159 | `start` | `ip link add <IFB> type ifb` |
+| 162 | `start` | `ip link set <IFB> up` |
+| 163 | `start` | `tc qdisc add dev <IFB> root handle 1: netem delay 10.0ms` (note the float: `10.0ms`) |
+| 165 | `start` | `tc filter add dev <IF> egress protocol ip pref 49210 ... dst_ip` and again with `pref 49211 ... src_ip` |
+| 188 | `check` | one `sh -ec` per node running the six `tc ... show` queries (after install, then every 10 s) |
+| 215 | `close` | `tc filter del dev <IF> egress pref <N> handle 1 flower` (49211 first, then 49210) |
+| 221 | `close` | `ip link del <IFB>` |
+
+## Equivalent shell (hand-written from that trace)
+
+The rest of this page is the same sequence as plain shell. It is **not** the code that ran the experiments and
+has not been executed; where it differs from the trace, the trace wins (it uses `10.0ms`, runs the `tc -j qdisc
+show` and `filter show` checks, and re-reads each filter before deleting it).
 
 ## What it does
 
@@ -139,15 +224,3 @@ The Python version also refuses to delete a filter whose contents changed, and a
 IFBs behind; the next start then refuses to overwrite them. In that case list what is left with
 `tc filter show dev <IF> egress pref 49210` / `49211` and `ip -d link show type ifb` on each node and remove it by hand.
 
-## Where each command lives in the code
-
-| command | `utils/traffic_control.py` |
-|---|---|
-| `kubectl -n kube-system exec ... -c calico-node -- ...` | line 46 |
-| interface discovery (`ip -j -4 route get`, `ip -j link show`) | `_agents_and_devices`, line 72 (the `route get` is on line 98) |
-| `tc qdisc add dev IF clsact` | line 155, inside `start` (line 146) |
-| `ip link add IFB type ifb`, `ip link set IFB up` | lines 159 and 162 |
-| `tc qdisc add dev IFB root handle 1: netem delay` | line 163 |
-| `tc filter add ... flower ... mirred egress redirect` | line 165 |
-| verification (`tc -j qdisc show`, `tc filter show`) | `check`, line 176 |
-| `tc filter del ...`, `ip link del IFB` | `close`, line 202 (the commands are on lines 215 and 221) |
