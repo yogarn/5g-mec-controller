@@ -67,7 +67,7 @@ data:
         {
           "id": 201,
           "type": "stat",
-          "title": "p90 RT now (all sites, 15 s window)",
+          "title": "p90 RT now, successful requests only (all sites, 15 s window)",
           "datasource": {
             "type": "prometheus",
             "uid": "placement-prometheus"
@@ -112,15 +112,15 @@ data:
           },
           "targets": [
             {
-              "expr": "ue_request_attempt_duration_p90_seconds{job=\"ue-telemetry-live\"} * 1000",
-              "legendFormat": "p90"
+              "expr": "ue_request_duration_p90_seconds{job=\"ue-telemetry-live\"} * 1000",
+              "legendFormat": "p90 (successes)"
             }
           ]
         },
         {
           "id": 202,
           "type": "timeseries",
-          "title": "p90 response time, 15 s window (SLO 150 ms)",
+          "title": "p90 response time of successful requests, 15 s window (SLO 150 ms)",
           "datasource": {
             "type": "prometheus",
             "uid": "placement-prometheus"
@@ -161,8 +161,8 @@ data:
           },
           "targets": [
             {
-              "expr": "ue_request_attempt_duration_p90_seconds{job=\"ue-telemetry-live\"} * 1000",
-              "legendFormat": "all sites"
+              "expr": "ue_request_duration_p90_seconds{job=\"ue-telemetry-live\"} * 1000",
+              "legendFormat": "all sites (successes)"
             },
             {
               "expr": "ue_site_route_request_duration_p90_seconds{job=\"ue-telemetry-live\",traffic_class=\"user\"} * 1000",
@@ -260,7 +260,7 @@ data:
           },
           "gridPos": {
             "h": 6,
-            "w": 24,
+            "w": 8,
             "x": 0,
             "y": 17
           },
@@ -284,6 +284,118 @@ data:
             {
               "expr": "ue_site_route_window_attempts{job=\"ue-telemetry-live\",traffic_class=\"user\"}",
               "legendFormat": "{{site}} / {{route}}"
+            }
+          ]
+        },
+        {
+          "id": 206,
+          "type": "timeseries",
+          "title": "Successful vs failed requests, all sites (15 s window)",
+          "description": "Counts in the collector's 15 s window. Failed = attempts minus successes (errors and timeouts). The p90 above only covers the successful ones.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "placement-prometheus"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 8,
+            "y": 17
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "min": 0,
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 70,
+                "lineWidth": 1,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "showPoints": "never"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "successful"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "failed (errors + timeouts)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "expr": "ue_request_window_successes{job=\"ue-telemetry-live\"}",
+              "legendFormat": "successful"
+            },
+            {
+              "expr": "ue_request_window_attempts{job=\"ue-telemetry-live\"} - ue_request_window_successes{job=\"ue-telemetry-live\"}",
+              "legendFormat": "failed (errors + timeouts)"
+            }
+          ]
+        },
+        {
+          "id": 207,
+          "type": "timeseries",
+          "title": "Failed requests by site (15 s window): errors and timeouts",
+          "description": "Per-site counters from the collector. A site with every request failing has no successful p90, so its line disappears from the p90 graph; this panel shows it.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "placement-prometheus"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 16,
+            "y": 17
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "spanNulls": false,
+                "showPoints": "never"
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (site) (ue_site_route_window_errors{job=\"ue-telemetry-live\",traffic_class=\"user\"})",
+              "legendFormat": "errors {{site}}"
+            },
+            {
+              "expr": "sum by (site) (ue_site_route_window_timeouts{job=\"ue-telemetry-live\",traffic_class=\"user\"})",
+              "legendFormat": "timeouts {{site}}"
             }
           ]
         },
