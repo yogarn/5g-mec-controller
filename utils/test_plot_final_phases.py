@@ -180,18 +180,32 @@ def test_generate_all_plots_writes_png_and_csv(tmp_path):
     out_dir = final_dir / "plots"
 
     report = pfp.generate_all_plots(final_dir=final_dir, output_dir=out_dir)
-    assert len(report["files"]) == 3 * 4 * 2  # 3 scenarios x 4 plots x (png, csv)
+    assert len(report["files"]) == 3 * 6 * 2  # 3 scenarios x 6 plots x (png, csv)
 
     expected_rows = {"joint": 4 * n_joint, "mobility": 4 * n_mob, "scaling": 2 * n_scaling}
+    expected_phases = {"joint": n_joint, "mobility": n_mob, "scaling": n_scaling}
     for scenario, count in expected_rows.items():
-        for suffix in ("p90_response_time", "slo_violation_rate", "resource_usage", "pod_placement"):
-            for ext in (".png", ".csv"):
-                path = out_dir / f"{scenario}_{suffix}{ext}"
-                assert path.is_file() and path.stat().st_size > 0
+        for suffix in (
+            "p90_response_time", "slo_violation_rate", "slo_violation_with_requests",
+            "requests_per_phase", "resource_usage", "pod_placement",
+        ):
+            png_path = out_dir / f"{scenario}_{suffix}.png"
+            csv_path = out_dir / "csv" / f"{scenario}_{suffix}.csv"
+            assert png_path.is_file() and png_path.stat().st_size > 0
+            assert csv_path.is_file() and csv_path.stat().st_size > 0
+            assert not (out_dir / f"{scenario}_{suffix}.csv").exists()
             assert not (out_dir / f"{scenario}_{suffix}.svg").exists()
-            with (out_dir / f"{scenario}_{suffix}.csv").open(newline="", encoding="utf-8") as handle:
-                rows = list(csv.DictReader(handle))
-            assert len(rows) == count
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+            assert len(rows) == (expected_phases[scenario] if suffix == "requests_per_phase" else count)
+            if suffix == "pod_placement":
+                assert "gnb-1" in reader.fieldnames and "gnb-1_anchor" in reader.fieldnames
+                assert "gnb1" not in reader.fieldnames and "gnb1_anchor" not in reader.fieldnames
+            if suffix == "slo_violation_with_requests":
+                assert "scheduled_requests" in reader.fieldnames and "offered_rps" in reader.fieldnames
+            if suffix == "requests_per_phase":
+                assert "scheduled_requests" in reader.fieldnames and "gnb-1_requests" in reader.fieldnames
 
 
 def test_nearest_rank_p90_uses_ceil_0_9_n_of_successes(tmp_path):

@@ -19,4 +19,7 @@ cp -a "$offload_run"/baseline-vertical-runner.log "$offload_run"/proposed-vertic
 printf 'local arms from %s\noffload arms from %s\n' "$1" "$2" > "$final/MERGED-FROM.txt"
 .venv/bin/python -m utils.vertical_summary "$final" --slo-ms 150
 .venv/bin/python -m utils.plot_vertical "$final" "$final/plots" --slo-ms 150
+scenario=joint
+[[ $final == *mobility* ]] && scenario=mobility
+.venv/bin/python -m utils.plot_final_phases --run-dir "$final" --scenario "$scenario" --output-dir "$final/plots"
 echo "merged: $final"

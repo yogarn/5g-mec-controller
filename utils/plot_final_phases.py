@@ -23,6 +23,12 @@ TIMEOUT_COLOR = "#C00000"
 FIG_WIDTH = 7.2
 
 NODES = ("gnb1", "gnb-2", "gnb-3", "core-5g")
+NODE_LABELS = {
+    "gnb1": "gnb-1",
+    "gnb-2": "gnb-2",
+    "gnb-3": "gnb-3",
+    "core-5g": "core-5g",
+}
 NODE_COLORS = {
     "gnb1": "#0072B2",
     "gnb-2": "#E69F00",
@@ -83,9 +89,10 @@ RESOURCE_NOTE = (
     "CPU rate window is 45 s and can cross phase boundaries "
     "(averages of valid observations, not exact phase CPU consumption)."
 )
-POD_NOTE = (
-    "End-of-phase snapshot (~2 s before phase end); "
-    "hatched = static site anchors & core fallback pods, solid = dynamic pods; pending excluded."
+POD_NOTE = "End-of-phase snapshot (~2 s before phase end); pending excluded."
+POD_NOTE_ANCHORS = (
+    "End-of-phase snapshot (~2 s before phase end); pending excluded.\n"
+    "RAN only: 1 anchor per gNB; Vertical offloading: 1 anchor per gNB + 3 core-5g fallback pods."
 )
 
 RC_STYLE = {
@@ -199,16 +206,20 @@ def load_phase_metrics(run_dir, scenario_cfg):
                 "gnb1_ues": parse_int(row.get("gnb1_ues")),
                 "gnb2_ues": parse_int(row.get("gnb2_ues")),
                 "gnb3_ues": parse_int(row.get("gnb3_ues")),
+                "duration_s": parse_float(row.get("duration_s")),
+                "rps_per_ue": parse_float(row.get("rps_per_ue")),
+                "scheduled": parse_int(row.get("scheduled")),
                 "p90_ms": p90,
                 "slo_violation_pct": viol_pct,
             })
     else:
         for arm in arms:
             raw_rows, _ = read_csv_rows(run_dir / arm / "summary.csv")
-            p90_by_phase = nearest_rank_p90_by_phase(run_dir / arm / "requests.jsonl")
+            req_path = run_dir / arm / "requests.jsonl"
+            p90_by_phase = nearest_rank_p90_by_phase(req_path) if req_path.is_file() else None
             for row in raw_rows:
                 phase = row["phase"].strip()
-                p90 = p90_by_phase.get(phase, math.nan)
+                p90 = p90_by_phase.get(phase, math.nan) if p90_by_phase is not None else parse_float(row.get("latency_p90_ms"))
                 attainment = parse_float(row.get("slo_attainment_all_attempts"))
                 viol_pct = (1.0 - attainment) * 100.0 if not math.isnan(attainment) else math.nan
                 if math.isnan(p90):
@@ -222,6 +233,9 @@ def load_phase_metrics(run_dir, scenario_cfg):
                     "gnb1_ues": parse_int(row.get("gnb1_ues")),
                     "gnb2_ues": parse_int(row.get("gnb2_ues")),
                     "gnb3_ues": parse_int(row.get("gnb3_ues")),
+                    "duration_s": parse_float(row.get("generation_duration_s")),
+                    "rps_per_ue": parse_float(row.get("rps_per_ue")),
+                    "scheduled": parse_int(row.get("scheduled")),
                     "p90_ms": p90,
                     "slo_violation_pct": viol_pct,
                 })
@@ -231,11 +245,26 @@ def load_phase_metrics(run_dir, scenario_cfg):
     for row in rows:
         if row["phase"] not in phase_info:
             phases.append(row["phase"])
+            dur_s = row["duration_s"]
+            if dur_s is None or math.isnan(dur_s) or dur_s <= 0:
+                dur_s = 120.0
+            rps = row["rps_per_ue"]
+            if rps is None or math.isnan(rps) or rps <= 0:
+                if row["scheduled"] and row["workload_ue"] and dur_s > 0:
+                    rps = row["scheduled"] / (row["workload_ue"] * dur_s)
+                else:
+                    rps = 5.0
+            sched = row["scheduled"]
+            if sched is None and row["workload_ue"] is not None:
+                sched = int(round(row["workload_ue"] * rps * dur_s))
             phase_info[row["phase"]] = {
                 "workload_ue": row["workload_ue"],
                 "gnb1_ues": row["gnb1_ues"],
                 "gnb2_ues": row["gnb2_ues"],
                 "gnb3_ues": row["gnb3_ues"],
+                "duration_s": dur_s,
+                "rps_per_ue": rps,
+                "scheduled": sched,
             }
     return rows, phases, phase_info, missing
 
@@ -358,10 +387,12 @@ def load_pods(run_dir, arms, phases):
 
 
 def save_outputs(fig, out_dir, basename, fieldnames, csv_rows, note=None):
-    """Write 300-dpi PNG and exact plotted-values CSV."""
+    """Write 300-dpi PNG to out_dir and exact plotted-values CSV to out_dir/csv."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir = out_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / f"{basename}.png"
-    csv_path = out_dir / f"{basename}.csv"
+    csv_path = csv_dir / f"{basename}.csv"
 
     png_meta = {"Description": note} if note else None
     fig.savefig(png_path, dpi=300, metadata=png_meta)
@@ -408,7 +439,7 @@ def _style_phase_axis(ax, labels):
     positions = list(range(len(labels)))
     ax.set_xticks(positions)
     ax.set_xticklabels(labels)
-    ax.set_xlabel("Phase (Active UEs, gnb1:gnb-2:gnb-3)")
+    ax.set_xlabel("Phase (Active UEs, gnb-1:gnb-2:gnb-3)")
     ax.grid(axis="y", linestyle=":", alpha=0.6)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -422,13 +453,28 @@ def _format_log_y(ax):
     ax.yaxis.set_minor_formatter(NullFormatter())
 
 
-def plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir):
-    """Plot per-phase p90 response time (log y-axis) with 150 ms SLO line."""
+def plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir, *, all_p90=None):
+    """Plot per-phase p90 response time (log y-axis) with 150 ms SLO line.
+
+    When all_p90 is provided (computed from requests.jsonl with failed/timed-out
+    requests penalized at TIMEOUT_MS), plots the all-attempt penalized p90 and
+    adds the 10,000 ms timeout line when needed.
+    """
     labels = [phase_tick_label(p, phase_info[p]) for p in phases]
-    lookup = {(r["arm"], r["phase"]): r["p90_ms"] for r in metrics}
+    lookup = all_p90 if all_p90 is not None else {(r["arm"], r["phase"]): r["p90_ms"] for r in metrics}
     xs = list(range(len(phases)))
+    valid_vals = [
+        lookup.get((arm, p), math.nan)
+        for arm in cfg["arms"]
+        for p in phases
+    ]
+    valid_vals = [v for v in valid_vals if not math.isnan(v) and v > 0]
+    show_timeout = all_p90 is not None and max(valid_vals, default=SLO_MS) > 500.0
     ncol = 1 if len(cfg["arms"]) > 2 else 3
-    legend_rows = 5 if ncol == 1 else 1
+    if ncol == 1:
+        legend_rows = 6 if show_timeout else 5
+    else:
+        legend_rows = 2 if show_timeout else 1
 
     with plt.rc_context(RC_STYLE):
         fig, legend_ax, (ax,) = _make_figure(1, legend_rows, panel_height=3.2)
@@ -438,9 +484,17 @@ def plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir):
             ax.plot(xs, ys_plot, linewidth=1.7, markersize=4.5, label=cfg["labels"][arm], **ARM_STYLES[arm])
 
         ax.axhline(SLO_MS, color="#444444", linestyle=":", linewidth=1.4, label=f"SLO ({SLO_MS:g} ms)")
+        if show_timeout:
+            ax.axhline(TIMEOUT_MS, color=TIMEOUT_COLOR, linestyle=":", linewidth=1.6, label="Timeout (10,000 ms)")
+            ax.set_ylim(30, 18000)
         _format_log_y(ax)
         _style_phase_axis(ax, labels)
-        ax.set_ylabel("p90 Response Time (ms, log scale)")
+        if all_p90 is not None:
+            ax.set_xlabel(
+                "Phase (Active UEs, gnb-1:gnb-2:gnb-3)\n"
+                "All attempts; failed requests penalized at 10,000 ms timeout"
+            )
+        ax.set_ylabel("p90 Response Time (ms)")
         fig.suptitle("p90 Response Time per Phase", fontsize=11)
         _draw_legend(legend_ax, ax, ncol=ncol)
 
@@ -496,6 +550,410 @@ def plot_slo_violation(scenario, cfg, metrics, phases, phase_info, out_dir):
             fig, out_dir, f"{scenario}_slo_violation_rate",
             ["phase", "phase_label", "workload_ue", "arm", "slo_violation_pct"], csv_rows,
         )
+
+
+def _phase_scheduled_requests(info):
+    """Return (scheduled_requests, offered_rps, rps_per_ue, duration_s) for one phase."""
+    dur_s = info.get("duration_s") or 120.0
+    rps_per_ue = info.get("rps_per_ue") or 5.0
+    ue = info.get("workload_ue") or 0
+    sched = info.get("scheduled")
+    if sched is None:
+        sched = int(round(ue * rps_per_ue * dur_s))
+    offered_rps = ue * rps_per_ue
+    return sched, offered_rps, rps_per_ue, dur_s
+
+
+def _staircase_xy(vals, *, corner_radius=0.07, steps_per_corner=14):
+    """Build phase-spanning staircase coordinates from x=-0.5 to x=n-0.5 with softly rounded steps."""
+    n = len(vals)
+    if n == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    r = min(corner_radius, 0.45)
+    sx, sy = [-0.5], [float(vals[0])]
+    for i in range(n - 1):
+        v0, v1 = float(vals[i]), float(vals[i + 1])
+        xb = i + 0.5
+        if abs(v1 - v0) < 1e-9 or r <= 0:
+            sx.append(xb)
+            sy.append(v0)
+        else:
+            ts = np.linspace(0.0, 1.0, steps_per_corner)
+            xs_c = (xb - r) + 2.0 * r * ts
+            ys_c = v0 + (v1 - v0) * 0.5 * (1.0 - np.cos(np.pi * ts))
+            sx.extend(xs_c.tolist())
+            sy.extend(ys_c.tolist())
+    sx.append(n - 0.5)
+    sy.append(float(vals[-1]))
+    return np.array(sx, dtype=float), np.array(sy, dtype=float)
+
+
+def plot_slo_violation_with_requests(scenario, cfg, metrics, phases, phase_info, out_dir, *, slides_dir=None):
+    """Plot per-phase SLO violation rate (%) as grouped bars (left y) and unstacked per-gNB rounded staircase requests (right y)."""
+    arms = cfg["arms"]
+    labels = [phase_tick_label(p, phase_info[p]) for p in phases]
+    lookup = {(r["arm"], r["phase"]): r["slo_violation_pct"] for r in metrics}
+    xs = np.arange(len(phases))
+    width, offsets = _bar_offsets(len(arms))
+    rps_per_ue = _phase_scheduled_requests(phase_info[phases[0]])[2] if phases else 5.0
+    dur_s = _phase_scheduled_requests(phase_info[phases[0]])[3] if phases else 120.0
+    site_keys = (
+        ("gnb1", "gnb1_ues"),
+        ("gnb-2", "gnb2_ues"),
+        ("gnb-3", "gnb3_ues"),
+    )
+    site_reqs = {
+        node: [int(round((phase_info[p].get(ue_key) or 0) * rps_per_ue * dur_s)) for p in phases]
+        for node, ue_key in site_keys
+    }
+    req_counts = [_phase_scheduled_requests(phase_info[p])[0] for p in phases]
+    offered_rps = [_phase_scheduled_requests(phase_info[p])[1] for p in phases]
+    max_site_req = max((v for vals in site_reqs.values() for v in vals), default=1)
+
+    def _draw(arm_labels, rc, *, for_slides=False):
+        with plt.rc_context(rc):
+            if for_slides:
+                fig, ax = plt.subplots(1, 1, figsize=(10.8, 5.8), layout="constrained")
+                legend_ax = None
+                val_fs = 8.2
+            else:
+                legend_rows = len(arms) + 2 if len(arms) > 2 else 3
+                fig, legend_ax, (ax,) = _make_figure(1, legend_rows, panel_height=3.4)
+                val_fs = 7.0
+
+            ax2 = ax.twinx()
+            for node, _ in site_keys:
+                sx, sy = _staircase_xy(site_reqs[node])
+                ax2.fill_between(sx, 0, sy, color=NODE_COLORS[node], alpha=0.13, zorder=1)
+                ax2.plot(
+                    sx, sy, color=NODE_COLORS[node], alpha=0.60,
+                    linewidth=1.15, linestyle="-", zorder=1.5,
+                )
+
+            ax2.set_ylim(0, max_site_req * 1.22)
+            ax2.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+            ax2.set_ylabel(f"Requests Sent per gNB ({rps_per_ue:g} req/s/UE × {dur_s:g} s)", color="#4A5568")
+            ax2.tick_params(axis="y", colors="#4A5568")
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_color("#8A94A6")
+
+            ax.set_zorder(ax2.get_zorder() + 1)
+            ax.patch.set_visible(False)
+            for off, arm in zip(offsets, arms):
+                ys = [lookup.get((arm, p), math.nan) for p in phases]
+                st = BAR_STYLES[arm]
+                bars = ax.bar(
+                    xs + off, ys, width=width * 0.92,
+                    color=st["color"], edgecolor=st["edgecolor"], linewidth=0.7,
+                    hatch=st["hatch"], label=arm_labels[arm], zorder=3,
+                )
+                for bar, y in zip(bars, ys):
+                    if not math.isnan(y):
+                        txt = "0%" if y < 0.05 else f"{y:.1f}%"
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2.0, y + 1.4, txt,
+                            ha="center", va="bottom", fontsize=val_fs, color="#222222", rotation=90,
+                            zorder=4,
+                        )
+
+            ax.set_xlim(-0.5, len(phases) - 0.5)
+            ax.set_ylim(0, 112)
+            ax.set_yticks([0, 20, 40, 60, 80, 100])
+            _style_phase_axis(ax, labels)
+            ax.set_ylabel("SLO Violation Rate (%)")
+
+            bar_handles, bar_labels = ax.get_legend_handles_labels()
+            gnb_handles = [
+                Line2D([0], [0], color=NODE_COLORS[node], alpha=0.70, linewidth=1.6, linestyle="-",
+                       label=f"{NODE_LABELS[node]} requests sent")
+                for node, _ in site_keys
+            ]
+            all_handles = bar_handles + gnb_handles
+            all_labels = bar_labels + [h.get_label() for h in gnb_handles]
+            if for_slides:
+                ax.legend(
+                    all_handles, all_labels,
+                    loc="lower center", bbox_to_anchor=(0.5, 1.02),
+                    ncol=3, frameon=False, handlelength=2.4,
+                )
+                fig.suptitle(f"SLO Violation Rate & Requests Sent per gNB (SLO = {SLO_MS:g} ms)", fontsize=13.5)
+            else:
+                ncol = 1 if len(arms) > 2 else 2
+                legend_ax.legend(all_handles, all_labels, loc="center", ncol=ncol, frameon=False, handlelength=2.6)
+                fig.suptitle(f"SLO Violation Rate & Requests Sent per gNB (SLO = {SLO_MS:g} ms)", fontsize=11)
+            return fig
+
+    csv_rows = [
+        {
+            "phase": p,
+            "phase_label": phase_csv_label(p, phase_info[p]),
+            "workload_ue": phase_info[p]["workload_ue"],
+            "offered_rps": f"{offered_rps[idx]:.1f}",
+            "scheduled_requests": req_counts[idx],
+            "gnb-1_requests": site_reqs["gnb1"][idx],
+            "gnb-2_requests": site_reqs["gnb-2"][idx],
+            "gnb-3_requests": site_reqs["gnb-3"][idx],
+            "arm": arm,
+            "slo_violation_pct": fmt_csv(lookup.get((arm, p), math.nan)),
+        }
+        for arm in arms
+        for idx, p in enumerate(phases)
+    ]
+    fig = _draw(cfg["labels"], RC_STYLE, for_slides=False)
+    written = save_outputs(
+        fig, out_dir, f"{scenario}_slo_violation_with_requests",
+        [
+            "phase", "phase_label", "workload_ue", "offered_rps", "scheduled_requests",
+            "gnb-1_requests", "gnb-2_requests", "gnb-3_requests", "arm", "slo_violation_pct",
+        ],
+        csv_rows,
+    )
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_SHORT_LABELS, SLIDE_RC_STYLE, for_slides=True)
+        sp = Path(slides_dir) / "slo-violations-with-requests.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
+
+
+def plot_slo_violation_line_with_requests(scenario, cfg, metrics, phases, phase_info, out_dir, *, slides_dir=None):
+    """Plot per-phase SLO violation rate (%) as lines (left y) with unstacked per-gNB rounded staircase requests (right y)."""
+    arms = cfg["arms"]
+    labels = [phase_tick_label(p, phase_info[p]) for p in phases]
+    lookup = {(r["arm"], r["phase"]): r["slo_violation_pct"] for r in metrics}
+    xs = np.arange(len(phases))
+    rps_per_ue = _phase_scheduled_requests(phase_info[phases[0]])[2] if phases else 5.0
+    dur_s = _phase_scheduled_requests(phase_info[phases[0]])[3] if phases else 120.0
+    site_keys = (
+        ("gnb1", "gnb1_ues"),
+        ("gnb-2", "gnb2_ues"),
+        ("gnb-3", "gnb3_ues"),
+    )
+    site_reqs = {
+        node: [int(round((phase_info[p].get(ue_key) or 0) * rps_per_ue * dur_s)) for p in phases]
+        for node, ue_key in site_keys
+    }
+    req_counts = [_phase_scheduled_requests(phase_info[p])[0] for p in phases]
+    offered_rps = [_phase_scheduled_requests(phase_info[p])[1] for p in phases]
+    max_site_req = max((v for vals in site_reqs.values() for v in vals), default=1)
+
+    def _draw(arm_labels, rc, *, for_slides=False):
+        with plt.rc_context(rc):
+            if for_slides:
+                fig, ax = plt.subplots(1, 1, figsize=(10.8, 5.8), layout="constrained")
+                legend_ax = None
+                lw, ms = 2.1, 5.5
+            else:
+                ncol = 1 if len(arms) > 2 else 2
+                legend_rows = math.ceil((len(arms) + len(site_keys)) / ncol)
+                fig, legend_ax, (ax,) = _make_figure(1, legend_rows, panel_height=3.4)
+                lw, ms = 1.7, 4.5
+
+            ax2 = ax.twinx()
+            for node, _ in site_keys:
+                sx, sy = _staircase_xy(site_reqs[node])
+                ax2.fill_between(sx, 0, sy, color=NODE_COLORS[node], alpha=0.13, zorder=1)
+                ax2.plot(
+                    sx, sy, color=NODE_COLORS[node], alpha=0.60,
+                    linewidth=1.15, linestyle="-", zorder=1.5,
+                )
+            ax2.set_ylim(0, max_site_req * 1.22)
+            ax2.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+            ax2.set_ylabel(f"Requests Sent per gNB ({rps_per_ue:g} req/s/UE × {dur_s:g} s)", color="#4A5568")
+            ax2.tick_params(axis="y", colors="#4A5568")
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_color("#8A94A6")
+
+            ax.set_zorder(ax2.get_zorder() + 1)
+            ax.patch.set_visible(False)
+            for arm in arms:
+                ys = [lookup.get((arm, p), math.nan) for p in phases]
+                ax.plot(xs, ys, linewidth=lw, markersize=ms, label=arm_labels[arm], zorder=3, **ARM_STYLES[arm])
+
+            ax.set_xlim(-0.5, len(phases) - 0.5)
+            ax.set_ylim(-2, 105)
+            ax.set_yticks([0, 20, 40, 60, 80, 100])
+            _style_phase_axis(ax, labels)
+            ax.set_ylabel("SLO Violation Rate (%)")
+
+            h1, l1 = ax.get_legend_handles_labels()
+            gnb_handles = [
+                Line2D([0], [0], color=NODE_COLORS[node], alpha=0.70, linewidth=1.6, linestyle="-",
+                       label=f"{NODE_LABELS[node]} requests sent")
+                for node, _ in site_keys
+            ]
+            all_handles = h1 + gnb_handles
+            all_labels = l1 + [h.get_label() for h in gnb_handles]
+            if for_slides:
+                ax.legend(
+                    all_handles, all_labels,
+                    loc="lower center", bbox_to_anchor=(0.5, 1.02),
+                    ncol=3, frameon=False, handlelength=3.0,
+                )
+                fig.suptitle(f"SLO Violation Rate & Requests Sent per gNB (SLO = {SLO_MS:g} ms)", fontsize=13.5)
+            else:
+                ncol = 1 if len(arms) > 2 else 2
+                legend_ax.legend(all_handles, all_labels, loc="center", ncol=ncol, frameon=False, handlelength=3.4)
+                fig.suptitle(f"SLO Violation Rate & Requests Sent per gNB (SLO = {SLO_MS:g} ms)", fontsize=11)
+            return fig
+
+    csv_rows = [
+        {
+            "phase": p,
+            "phase_label": phase_csv_label(p, phase_info[p]),
+            "workload_ue": phase_info[p]["workload_ue"],
+            "offered_rps": f"{offered_rps[idx]:.1f}",
+            "scheduled_requests": req_counts[idx],
+            "gnb-1_requests": site_reqs["gnb1"][idx],
+            "gnb-2_requests": site_reqs["gnb-2"][idx],
+            "gnb-3_requests": site_reqs["gnb-3"][idx],
+            "arm": arm,
+            "slo_violation_pct": fmt_csv(lookup.get((arm, p), math.nan)),
+        }
+        for arm in arms
+        for idx, p in enumerate(phases)
+    ]
+    fig = _draw(cfg["labels"], RC_STYLE, for_slides=False)
+    written = save_outputs(
+        fig, out_dir, f"{scenario}_slo_violation_line_with_requests",
+        [
+            "phase", "phase_label", "workload_ue", "offered_rps", "scheduled_requests",
+            "gnb-1_requests", "gnb-2_requests", "gnb-3_requests", "arm", "slo_violation_pct",
+        ],
+        csv_rows,
+    )
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_SHORT_LABELS, SLIDE_RC_STYLE, for_slides=True)
+        sp = Path(slides_dir) / "slo-violations-line-with-requests.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
+
+
+def plot_requests_per_phase(scenario, cfg, phases, phase_info, out_dir, *, slides_dir=None):
+    """Plot unstacked requests sent per gNB per phase as rounded staircase plateaus, with per-gNB req/s on right y-axis."""
+    labels = [phase_tick_label(p, phase_info[p]) for p in phases]
+    rps_per_ue = _phase_scheduled_requests(phase_info[phases[0]])[2] if phases else 5.0
+    dur_s = _phase_scheduled_requests(phase_info[phases[0]])[3] if phases else 120.0
+    site_keys = (
+        ("gnb1", "gnb1_ues"),
+        ("gnb-2", "gnb2_ues"),
+        ("gnb-3", "gnb3_ues"),
+    )
+
+    site_reqs = {
+        node: [int(round((phase_info[p].get(ue_key) or 0) * rps_per_ue * dur_s)) for p in phases]
+        for node, ue_key in site_keys
+    }
+    totals = [_phase_scheduled_requests(phase_info[p])[0] for p in phases]
+    offered_rps = [_phase_scheduled_requests(phase_info[p])[1] for p in phases]
+    max_site_req = max((v for vals in site_reqs.values() for v in vals), default=1)
+
+    def _fmt_req(v):
+        if v >= 1000:
+            s = f"{v / 1000:.1f}k"
+            return s.replace(".0k", "k")
+        return str(v)
+
+    def _draw(rc, *, for_slides=False):
+        with plt.rc_context(rc):
+            if for_slides:
+                fig, ax = plt.subplots(1, 1, figsize=(10.5, 5.4), layout="constrained")
+                legend_ax = None
+                ann_fs = 8.5
+            else:
+                fig, legend_ax, (ax,) = _make_figure(1, legend_rows=1, panel_height=3.2)
+                ann_fs = 7.2
+
+            for i in range(1, len(phases)):
+                ax.axvline(i - 0.5, color="#CCCCCC", linestyle=":", linewidth=0.8, zorder=1)
+
+            for node, _ in site_keys:
+                sx, sy = _staircase_xy(site_reqs[node])
+                ax.fill_between(sx, 0, sy, color=NODE_COLORS[node], alpha=0.16, zorder=2)
+                ax.plot(
+                    sx, sy, color=NODE_COLORS[node], alpha=0.78,
+                    linewidth=1.35, linestyle="-", label=NODE_LABELS[node], zorder=3,
+                )
+
+            # Annotate distinct per-phase values cleanly above (or below if close to a higher line) each plateau
+            for i in range(len(phases)):
+                vals_at_i = sorted({site_reqs[node][i] for node, _ in site_keys if site_reqs[node][i] > 0})
+                for idx_v, v in enumerate(vals_at_i):
+                    close_above = (idx_v + 1 < len(vals_at_i)) and ((vals_at_i[idx_v + 1] - v) < max_site_req * 0.09)
+                    if close_above:
+                        ax.text(
+                            i, v - max_site_req * 0.020, _fmt_req(v),
+                            ha="center", va="top", fontsize=ann_fs, color="#222222", zorder=4,
+                        )
+                    else:
+                        ax.text(
+                            i, v + max_site_req * 0.020, _fmt_req(v),
+                            ha="center", va="bottom", fontsize=ann_fs, color="#222222", zorder=4,
+                        )
+
+            y_top = max_site_req * 1.20
+            ax.set_xlim(-0.5, len(phases) - 0.5)
+            ax.set_ylim(0, y_top)
+            ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+            _style_phase_axis(ax, labels)
+            ax.set_ylabel("Requests Sent per gNB")
+
+            ax2 = ax.twinx()
+            ax2.set_ylim(0, y_top / dur_s if dur_s > 0 else y_top)
+            ax2.yaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
+            ax2.set_ylabel("Offered Request Rate per gNB (req/s)", color="#4A5568")
+            ax2.tick_params(axis="y", colors="#4A5568")
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_color("#8A94A6")
+
+            title = f"Requests Sent per gNB per Phase ({rps_per_ue:g} req/s per UE, {dur_s:g} s/phase)"
+            if for_slides:
+                ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=3, frameon=False, handlelength=2.8)
+                fig.suptitle(title, fontsize=13.5)
+            else:
+                handles, leg_labels = ax.get_legend_handles_labels()
+                legend_ax.legend(handles, leg_labels, loc="center", ncol=3, frameon=False, handlelength=2.8)
+                fig.suptitle(title, fontsize=11)
+            return fig
+
+    csv_rows = [
+        {
+            "phase": p,
+            "phase_label": phase_csv_label(p, phase_info[p]),
+            "workload_ue": phase_info[p]["workload_ue"],
+            "rps_per_ue": f"{rps_per_ue:g}",
+            "duration_s": f"{dur_s:g}",
+            "offered_rps": f"{offered_rps[idx]:.1f}",
+            "scheduled_requests": totals[idx],
+            "gnb-1_requests": site_reqs["gnb1"][idx],
+            "gnb-2_requests": site_reqs["gnb-2"][idx],
+            "gnb-3_requests": site_reqs["gnb-3"][idx],
+        }
+        for idx, p in enumerate(phases)
+    ]
+    fig = _draw(RC_STYLE, for_slides=False)
+    written = save_outputs(
+        fig, out_dir, f"{scenario}_requests_per_phase",
+        [
+            "phase", "phase_label", "workload_ue", "rps_per_ue", "duration_s",
+            "offered_rps", "scheduled_requests",
+            "gnb-1_requests", "gnb-2_requests", "gnb-3_requests",
+        ],
+        csv_rows,
+    )
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_RC_STYLE, for_slides=True)
+        sp = Path(slides_dir) / "requests-per-phase.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
 
 
 def plot_resources(scenario, cfg, resources, phases, phase_info, out_dir):
@@ -556,11 +1014,7 @@ def plot_resources(scenario, cfg, resources, phases, phase_info, out_dir):
 
 
 def plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir):
-    """Plot end-of-phase stacked pod counts by node as small multiples per arm.
-
-    Within each node slice, static site anchors and vertical-offload core fallback
-    pods are drawn hatched (///) and dynamically scheduled pods are drawn solid.
-    """
+    """Plot end-of-phase stacked pod counts by node as small multiples per arm."""
     labels = [phase_tick_label(p, phase_info[p]) for p in phases]
     lookup = {(r["arm"], r["phase"]): r for r in pods}
     arms = cfg["arms"]
@@ -571,30 +1025,22 @@ def plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir):
         for p in phases
         for node in NODES
     )
-    legend_rows = 2 if has_anchors else 1
+    pod_note = POD_NOTE_ANCHORS if has_anchors else POD_NOTE
 
     with plt.rc_context(RC_STYLE):
-        fig, legend_ax, axes = _make_figure(len(arms), legend_rows=legend_rows, panel_height=1.9, sharey=True)
+        fig, legend_ax, axes = _make_figure(len(arms), legend_rows=1, panel_height=1.9, sharey=True)
 
         peak = 0
         for idx, (ax, arm) in enumerate(zip(axes, arms)):
             bottoms = [0] * len(phases)
             for node in NODES:
-                anchors = [lookup[(arm, p)].get(f"{node}_anchor", 0) for p in phases]
-                dynamics = [lookup[(arm, p)].get(f"{node}_dynamic", 0) for p in phases]
-                if any(a > 0 for a in anchors):
+                vals = [lookup[(arm, p)][node] or 0 for p in phases]
+                if any(v > 0 for v in vals):
                     ax.bar(
-                        xs, anchors, bottom=bottoms, width=0.66,
-                        color=NODE_COLORS[node], edgecolor="#333333", linewidth=0.5,
-                        hatch="///", alpha=0.82,
-                    )
-                    bottoms = [b + v for b, v in zip(bottoms, anchors)]
-                if any(d > 0 for d in dynamics):
-                    ax.bar(
-                        xs, dynamics, bottom=bottoms, width=0.66,
+                        xs, vals, bottom=bottoms, width=0.66,
                         color=NODE_COLORS[node],
                     )
-                    bottoms = [b + v for b, v in zip(bottoms, dynamics)]
+                    bottoms = [b + v for b, v in zip(bottoms, vals)]
             peak = max(peak, max(bottoms, default=0))
             for x, total, p in zip(xs, bottoms, phases):
                 pend = lookup[(arm, p)]["pending_pods"]
@@ -611,20 +1057,9 @@ def plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir):
         _style_phase_axis(axes[-1], labels)
 
         fig.suptitle("Pod Placement at End of Phase", fontsize=11)
-        node_handles = [Patch(facecolor=NODE_COLORS[n], label=n) for n in NODES]
-        if has_anchors:
-            style_handles = [
-                Patch(facecolor="#BBBBBB", edgecolor="#333333", hatch="///", alpha=0.82,
-                      label="Static anchor / core fallback"),
-                Patch(facecolor="#BBBBBB", edgecolor="none", label="Dynamic (scheduled / HPA)"),
-            ]
-            legend_ax.legend(
-                handles=node_handles + style_handles,
-                loc="center", ncol=4, frameon=False, handlelength=2.4, columnspacing=1.2,
-            )
-        else:
-            legend_ax.legend(handles=node_handles, loc="center", ncol=len(NODES), frameon=False, handlelength=2.4)
-        fig.supxlabel(POD_NOTE, fontsize=7.2, color="#444444")
+        node_handles = [Patch(facecolor=NODE_COLORS[n], label=NODE_LABELS[n]) for n in NODES]
+        legend_ax.legend(handles=node_handles, loc="center", ncol=len(NODES), frameon=False, handlelength=2.4)
+        fig.supxlabel(pod_note, fontsize=7.2, color="#444444")
 
         csv_rows = [
             {
@@ -632,11 +1067,11 @@ def plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir):
                 "phase_label": phase_csv_label(p, phase_info[p]),
                 "workload_ue": phase_info[p]["workload_ue"],
                 "arm": arm,
-                "gnb1": fmt_csv(lookup[(arm, p)]["gnb1"]),
+                "gnb-1": fmt_csv(lookup[(arm, p)]["gnb1"]),
                 "gnb-2": fmt_csv(lookup[(arm, p)]["gnb-2"]),
                 "gnb-3": fmt_csv(lookup[(arm, p)]["gnb-3"]),
                 "core-5g": fmt_csv(lookup[(arm, p)]["core-5g"]),
-                "gnb1_anchor": fmt_csv(lookup[(arm, p)].get("gnb1_anchor", 0)),
+                "gnb-1_anchor": fmt_csv(lookup[(arm, p)].get("gnb1_anchor", 0)),
                 "gnb-2_anchor": fmt_csv(lookup[(arm, p)].get("gnb-2_anchor", 0)),
                 "gnb-3_anchor": fmt_csv(lookup[(arm, p)].get("gnb-3_anchor", 0)),
                 "core-5g_anchor": fmt_csv(lookup[(arm, p)].get("core-5g_anchor", 0)),
@@ -650,12 +1085,257 @@ def plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir):
             fig, out_dir, f"{scenario}_pod_placement",
             [
                 "phase", "phase_label", "workload_ue", "arm",
-                *NODES, "gnb1_anchor", "gnb-2_anchor", "gnb-3_anchor", "core-5g_anchor",
+                *(NODE_LABELS[n] for n in NODES),
+                *(f"{NODE_LABELS[n]}_anchor" for n in NODES),
                 "pending_pods", "sample_age_seconds",
             ],
             csv_rows,
-            note=POD_NOTE,
+            note=pod_note,
         )
+
+
+def _compute_pod_efficiency_rows(scenario, cfg, pods, metrics, phases, phase_info, run_dir):
+    """Compute per-arm pod usage statistics, pod-minutes, SLO-met/pod-min, and spatial mismatch (TVD)."""
+    arms = cfg["arms"]
+    pod_lookup = {(r["arm"], r["phase"]): r for r in pods}
+    viol_lookup = {(r["arm"], r["phase"]): r["slo_violation_pct"] for r in metrics}
+    dur_s = _phase_scheduled_requests(phase_info[phases[0]])[3] if phases else 120.0
+    phase_min = dur_s / 60.0
+
+    rows = []
+    for arm in arms:
+        totals = []
+        tvds = []
+        viols = []
+        for p in phases:
+            pr = pod_lookup[(arm, p)]
+            g1 = pr["gnb1"] or 0
+            g2 = pr["gnb-2"] or 0
+            g3 = pr["gnb-3"] or 0
+            co = pr["core-5g"] or 0
+            totals.append(g1 + g2 + g3 + co)
+            viols.append(viol_lookup.get((arm, p), math.nan))
+
+            info = phase_info[p]
+            u1, u2, u3 = info.get("gnb1_ues") or 0, info.get("gnb2_ues") or 0, info.get("gnb3_ues") or 0
+            u_tot = u1 + u2 + u3
+            e_tot = g1 + g2 + g3
+            if u_tot > 0 and e_tot > 0:
+                d_share = np.array([u1, u2, u3], dtype=float) / u_tot
+                p_share = np.array([g1, g2, g3], dtype=float) / e_tot
+                tvds.append(float(0.5 * np.abs(p_share - d_share).sum()))
+
+        arr = np.array(totals, dtype=float)
+        pod_mins = float(arr.sum() * phase_min)
+
+        total_slo_met = 0
+        total_attempts = 0
+        sum_path = Path(run_dir) / arm / "summary.csv"
+        if sum_path.is_file():
+            with sum_path.open(newline="", encoding="utf-8") as handle:
+                for r in csv.DictReader(handle):
+                    if r["phase"].strip() in phase_info:
+                        total_slo_met += parse_int(r.get("slo_met_attempts")) or 0
+                        total_attempts += parse_int(r.get("attempts")) or 0
+        elif scenario != "scaling":
+            # Fallback from scheduled & violation rate if summary.csv absent in synthetic fixture
+            for p in phases:
+                sched = _phase_scheduled_requests(phase_info[p])[0]
+                v_pct = viol_lookup.get((arm, p), 0.0)
+                if not math.isnan(v_pct):
+                    total_attempts += sched
+                    total_slo_met += int(round(sched * (1.0 - v_pct / 100.0)))
+
+        overall_viol = (100.0 * (1.0 - total_slo_met / total_attempts)) if total_attempts > 0 else float(np.nanmean(viols))
+        eff = (total_slo_met / pod_mins) if pod_mins > 0 else math.nan
+        rows.append({
+            "arm": arm,
+            "arm_label": cfg["labels"][arm],
+            "short_label": SLIDE_SHORT_LABELS.get(arm, arm),
+            "mean_pods": float(arr.mean()) if len(arr) else math.nan,
+            "std_pods": float(arr.std()) if len(arr) else math.nan,
+            "min_pods": int(arr.min()) if len(arr) else 0,
+            "max_pods": int(arr.max()) if len(arr) else 0,
+            "total_pod_minutes": pod_mins,
+            "total_slo_met_requests": total_slo_met,
+            "slo_met_per_pod_min": eff,
+            "mean_spatial_tvd": float(np.mean(tvds)) if tvds else math.nan,
+            "std_spatial_tvd": float(np.std(tvds)) if tvds else math.nan,
+            "overall_slo_violation_pct": overall_viol,
+        })
+    return rows
+
+
+def plot_pod_efficiency(scenario, cfg, pods, metrics, phases, phase_info, run_dir, out_dir, *, slides_dir=None):
+    """Plot pod allocation summary (Mean ± SD replicas per phase)."""
+    rows = _compute_pod_efficiency_rows(scenario, cfg, pods, metrics, phases, phase_info, run_dir)
+    xs = np.arange(len(rows))
+    compact_ticks = {
+        "baseline-local": "Baseline\nRAN Only",
+        "proposed-local": "Proposed\nRAN Only",
+        "baseline-vertical": "Baseline\nOffload",
+        "proposed-vertical": "Proposed\nOffload",
+        "baseline": "Baseline\nCPU HPA",
+        "proposed": "Proposed\nSLO HPA",
+    }
+    short_ticks = [compact_ticks.get(r["arm"], r["short_label"].replace(" (", "\n(")) for r in rows]
+
+    def _draw(rc, figsize, title_fs, val_fs):
+        with plt.rc_context(rc):
+            fig, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
+            colors = [BAR_STYLES[r["arm"]]["color"] for r in rows]
+            edges = [BAR_STYLES[r["arm"]]["edgecolor"] for r in rows]
+            hatches = [BAR_STYLES[r["arm"]]["hatch"] for r in rows]
+
+            means = [r["mean_pods"] for r in rows]
+            stds = [r["std_pods"] for r in rows]
+            bars = ax.bar(xs, means, yerr=stds, capsize=3.5, width=0.54,
+                          color=colors, edgecolor=edges, linewidth=0.8, zorder=3,
+                          error_kw=dict(ecolor="#333333", lw=1.1))
+            for bar, h in zip(bars, hatches):
+                if h:
+                    bar.set_hatch(h)
+            top = max((m + s for m, s in zip(means, stds)), default=1.0)
+            for x, r in zip(xs, rows):
+                y_pos = r["mean_pods"] + r["std_pods"] + top * 0.04
+                ax.text(x, y_pos, f"{r['mean_pods']:.1f} ± {r['std_pods']:.1f}",
+                        ha="center", va="bottom", fontsize=val_fs, color="#222222", fontweight="bold")
+            ax.set_ylim(0, top * 1.24)
+            ax.set_ylabel("Allocated Replicas (Pods)")
+            ax.set_xticks(xs)
+            ax.set_xticklabels(short_ticks, fontsize=val_fs)
+            ax.grid(axis="y", linestyle=":", alpha=0.55, zorder=0)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            fig.suptitle("Allocated Replicas per Phase (Mean ± SD)", fontsize=title_fs)
+            return fig
+
+    csv_fields = [
+        "arm", "arm_label", "mean_pods", "std_pods", "min_pods", "max_pods",
+        "overall_slo_violation_pct",
+    ]
+    csv_rows = [
+        {
+            "arm": r["arm"],
+            "arm_label": r["arm_label"],
+            "mean_pods": fmt_csv(r["mean_pods"]),
+            "std_pods": fmt_csv(r["std_pods"]),
+            "min_pods": r["min_pods"],
+            "max_pods": r["max_pods"],
+            "overall_slo_violation_pct": fmt_csv(r["overall_slo_violation_pct"]),
+        }
+        for r in rows
+    ]
+    fig = _draw(RC_STYLE, (5.8 if len(rows) > 2 else 4.6, 4.0), 11.5, 8.2)
+    written = save_outputs(fig, out_dir, f"{scenario}_pod_efficiency", csv_fields, csv_rows)
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_RC_STYLE, (7.0 if len(rows) > 2 else 5.6, 4.6), 13.5, 9.5)
+        sp = Path(slides_dir) / "pod-efficiency.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
+
+
+def _pareto_frontier(points):
+    """Return non-dominated (min x, min y) points sorted by x."""
+    pts = sorted(points, key=lambda t: (t[0], t[1]))
+    frontier = []
+    best_y = math.inf
+    for x, y in pts:
+        if y < best_y - 1e-9:
+            frontier.append((x, y))
+            best_y = y
+    return frontier
+
+
+def plot_efficiency_tradeoff(scenario, cfg, pods, metrics, phases, phase_info, run_dir, out_dir, *, slides_dir=None):
+    """Plot Cost vs SLO Trade-off scatter (Mean Allocated Replicas vs Overall SLO Violation Rate %) with Pareto frontier."""
+    rows = _compute_pod_efficiency_rows(scenario, cfg, pods, metrics, phases, phase_info, run_dir)
+
+    def _draw(rc, figsize, title_fs, ann_fs, *, for_slides=False):
+        with plt.rc_context(rc):
+            fig, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
+            means = [r["mean_pods"] for r in rows]
+            viols = [r["overall_slo_violation_pct"] for r in rows]
+            x_min, x_max = min(means), max(means)
+            y_max = max(viols, default=10.0)
+            x_pad = max(0.8, (x_max - x_min) * 0.22)
+            y_pad = max(3.0, y_max * 0.18)
+
+            # Subtle Pareto frontier connecting non-dominated points (only when x varies)
+            if x_max > x_min:
+                frontier = _pareto_frontier(list(zip(means, viols)))
+                if len(frontier) >= 2:
+                    fx, fy = zip(*frontier)
+                    ax.plot(fx, fy, color="#718096", linestyle="--", linewidth=1.2, alpha=0.65,
+                            label="Pareto frontier", zorder=2)
+
+            for r in rows:
+                st = ARM_STYLES[r["arm"]]
+                leg_lbl = r["short_label"] if for_slides else r["arm_label"]
+                ax.scatter(
+                    r["mean_pods"], r["overall_slo_violation_pct"],
+                    s=52 if not for_slides else 68, color=st["color"], marker="o",
+                    edgecolors="#1A1A1A", linewidths=0.75, zorder=4,
+                    label=leg_lbl,
+                )
+                lbl = f"{r['mean_pods']:.1f} pods, {r['overall_slo_violation_pct']:.1f}%"
+                if x_max == x_min:
+                    dx, dy, ha, va = 10, 0, "left", "center"
+                elif scenario == "joint":
+                    offsets_joint = {
+                        "baseline-local": (10, -2, "left", "center"),
+                        "proposed-local": (-8, 10, "right", "bottom"),
+                        "baseline-vertical": (0, 12, "center", "bottom"),
+                        "proposed-vertical": (0, 12, "center", "bottom"),
+                    }
+                    dx, dy, ha, va = offsets_joint.get(r["arm"], (8, 8, "left", "bottom"))
+                else:
+                    dx = -10 if r["mean_pods"] >= x_min + 0.65 * (x_max - x_min) else 10
+                    ha = "right" if dx < 0 else "left"
+                    dy = 8 if r["overall_slo_violation_pct"] < y_max * 0.80 else -12
+                    va = "bottom" if dy > 0 else "top"
+                ax.annotate(
+                    lbl, (r["mean_pods"], r["overall_slo_violation_pct"]),
+                    xytext=(dx, dy), textcoords="offset points",
+                    ha=ha, va=va, fontsize=ann_fs, color="#333333", zorder=5,
+                )
+
+            ax.set_xlim(max(0.0, x_min - x_pad), x_max + x_pad * 1.1)
+            ax.set_ylim(-max(1.5, y_max * 0.08), y_max + y_pad)
+            ax.set_xlabel("Mean Allocated Replicas (Pods → more resource cost)")
+            ax.set_ylabel("Overall SLO Violation Rate (% → worse SLO)")
+            ax.grid(True, linestyle=":", alpha=0.5, zorder=0)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.text(
+                0.02, 0.03, "↙ Ideal (fewer pods, lower violation)",
+                transform=ax.transAxes, fontsize=ann_fs, color="#2B6CB0", style="italic",
+            )
+            ncol = 2 if (for_slides or len(rows) <= 2) else 1
+            ax.legend(
+                loc="lower center", bbox_to_anchor=(0.5, 1.02),
+                ncol=ncol, frameon=False, handlelength=2.2,
+            )
+            fig.suptitle("Resource Cost vs. SLO Violation Trade-off", fontsize=title_fs)
+            return fig
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png_path = out_dir / f"{scenario}_efficiency_tradeoff.png"
+    fig = _draw(RC_STYLE, (7.6, 5.2), 11.5, 7.6, for_slides=False)
+    fig.savefig(png_path, dpi=300)
+    plt.close(fig)
+    written = [png_path]
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_RC_STYLE, (9.6, 5.6), 13.5, 8.8, for_slides=True)
+        sp = Path(slides_dir) / "efficiency-tradeoff.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
 
 
 BAR_STYLES = {
@@ -795,8 +1475,8 @@ def plot_p90_bar(scenario, cfg, all_p90, phases, phase_info, out_dir, *, slides_
             ax.yaxis.set_minor_formatter(NullFormatter())
             ax.set_xticks(xs)
             ax.set_xticklabels(labels)
-            ax.set_xlabel("Phase (Active UEs, gnb1:gnb-2:gnb-3)\nAll attempts; failed requests penalized at 10,000 ms timeout")
-            ax.set_ylabel("p90 Response Time (ms, log scale)")
+            ax.set_xlabel("Phase (Active UEs, gnb-1:gnb-2:gnb-3)\nAll attempts; failed requests penalized at 10,000 ms timeout")
+            ax.set_ylabel("p90 Response Time (ms)")
             ax.grid(axis="y", which="major", linestyle=":", alpha=0.55, zorder=0)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -819,6 +1499,286 @@ def plot_p90_bar(scenario, cfg, all_p90, phases, phase_info, out_dir, *, slides_
         Path(slides_dir).mkdir(parents=True, exist_ok=True)
         sfig = _draw(SLIDE_SHORT_LABELS, (10.5, 5.6), SLIDE_RC_STYLE, 3, 14, 8.5)
         sp = Path(slides_dir) / "response-time-p90-bar.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
+
+
+def plot_p90_bar_with_requests(scenario, cfg, all_p90, phases, phase_info, out_dir, *, slides_dir=None):
+    """Plot per-phase all-attempt p90 bars (left log y) with unstacked per-gNB rounded staircase requests (right y)."""
+    arms = cfg["arms"]
+    labels = [phase_tick_label(p, phase_info[p]) for p in phases]
+    xs = np.arange(len(phases))
+    width, offsets = _bar_offsets(len(arms))
+    rps_per_ue = _phase_scheduled_requests(phase_info[phases[0]])[2] if phases else 5.0
+    dur_s = _phase_scheduled_requests(phase_info[phases[0]])[3] if phases else 120.0
+    site_keys = (
+        ("gnb1", "gnb1_ues"),
+        ("gnb-2", "gnb2_ues"),
+        ("gnb-3", "gnb3_ues"),
+    )
+    site_reqs = {
+        node: [int(round((phase_info[p].get(ue_key) or 0) * rps_per_ue * dur_s)) for p in phases]
+        for node, ue_key in site_keys
+    }
+    req_counts = [_phase_scheduled_requests(phase_info[p])[0] for p in phases]
+    offered_rps = [_phase_scheduled_requests(phase_info[p])[1] for p in phases]
+    max_site_req = max((v for vals in site_reqs.values() for v in vals), default=1)
+
+    def _fmt(v):
+        if math.isnan(v):
+            return ""
+        if v >= 9950:
+            return "10k"
+        if v >= 1000:
+            return f"{v / 1000:.1f}k"
+        return f"{v:.0f}"
+
+    def _draw(arm_labels, rc, *, for_slides=False):
+        valid_vals = [v for v in all_p90.values() if not math.isnan(v) and v > 0]
+        max_val = max(valid_vals, default=SLO_MS)
+        show_timeout = max_val > 500.0
+        with plt.rc_context(rc):
+            if for_slides:
+                fig, ax = plt.subplots(1, 1, figsize=(10.8, 5.9), layout="constrained")
+                legend_ax = None
+                val_fs = 8.2
+            else:
+                n_items = len(arms) + len(site_keys) + (2 if show_timeout else 1)
+                ncol = 1 if len(arms) > 2 else 2
+                legend_rows = math.ceil(n_items / ncol)
+                fig, legend_ax, (ax,) = _make_figure(1, legend_rows, panel_height=3.4)
+                val_fs = 7.0
+
+            ax2 = ax.twinx()
+            for node, _ in site_keys:
+                sx, sy = _staircase_xy(site_reqs[node])
+                ax2.fill_between(sx, 0, sy, color=NODE_COLORS[node], alpha=0.13, zorder=1)
+                ax2.plot(
+                    sx, sy, color=NODE_COLORS[node], alpha=0.60,
+                    linewidth=1.15, linestyle="-", zorder=1.5,
+                )
+            ax2.set_ylim(0, max_site_req * 1.22)
+            ax2.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+            ax2.set_ylabel(f"Requests Sent per gNB ({rps_per_ue:g} req/s/UE × {dur_s:g} s)", color="#4A5568")
+            ax2.tick_params(axis="y", colors="#4A5568")
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_color("#8A94A6")
+
+            ax.set_zorder(ax2.get_zorder() + 1)
+            ax.patch.set_visible(False)
+            for off, arm in zip(offsets, arms):
+                ys = [all_p90.get((arm, p), math.nan) for p in phases]
+                st = BAR_STYLES[arm]
+                bars = ax.bar(
+                    xs + off, ys, width=width * 0.92,
+                    color=st["color"], edgecolor=st["edgecolor"], linewidth=0.7,
+                    hatch=st["hatch"], label=arm_labels[arm], zorder=3,
+                )
+                for bar, y in zip(bars, ys):
+                    if not math.isnan(y) and y > 0:
+                        ax.text(
+                            bar.get_x() + bar.get_width() / 2.0, y * 1.12, _fmt(y),
+                            ha="center", va="bottom", fontsize=val_fs, color="#222222",
+                            rotation=90 if val_fs >= 7.5 else 0, zorder=4,
+                        )
+
+            ax.axhline(SLO_MS, color="#444444", linestyle=":", linewidth=1.7, label=f"SLO ({SLO_MS:g} ms)", zorder=4)
+            if show_timeout:
+                ax.axhline(TIMEOUT_MS, color=TIMEOUT_COLOR, linestyle=":", linewidth=1.9, label="Timeout (10,000 ms)", zorder=4)
+                ax.set_ylim(30, 26000)
+            else:
+                ax.set_ylim(30, max(300, max_val * 1.8))
+            ax.set_yscale("log")
+            ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
+            ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+            ax.yaxis.set_minor_formatter(NullFormatter())
+            ax.set_xlim(-0.5, len(phases) - 0.5)
+            ax.set_xticks(xs)
+            ax.set_xticklabels(labels)
+            ax.set_xlabel("Phase (Active UEs, gnb-1:gnb-2:gnb-3)\nAll attempts; failed requests penalized at 10,000 ms timeout")
+            ax.set_ylabel("p90 Response Time (ms)")
+            ax.grid(axis="y", which="major", linestyle=":", alpha=0.55, zorder=0)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+            bar_handles, bar_labels = ax.get_legend_handles_labels()
+            gnb_handles = [
+                Line2D([0], [0], color=NODE_COLORS[node], alpha=0.70, linewidth=1.6, linestyle="-",
+                       label=f"{NODE_LABELS[node]} requests sent")
+                for node, _ in site_keys
+            ]
+            all_handles = bar_handles + gnb_handles
+            all_labels = bar_labels + [h.get_label() for h in gnb_handles]
+            if for_slides:
+                ax.legend(
+                    all_handles, all_labels,
+                    loc="lower center", bbox_to_anchor=(0.5, 1.02),
+                    ncol=3, frameon=False, handlelength=2.4,
+                )
+                fig.suptitle("p90 Response Time & Requests Sent per gNB", fontsize=13.5)
+            else:
+                ncol = 1 if len(arms) > 2 else 2
+                legend_ax.legend(all_handles, all_labels, loc="center", ncol=ncol, frameon=False, handlelength=2.6)
+                fig.suptitle("p90 Response Time & Requests Sent per gNB", fontsize=11)
+            return fig
+
+    csv_rows = [
+        {
+            "phase": p,
+            "phase_label": phase_csv_label(p, phase_info[p]),
+            "workload_ue": phase_info[p]["workload_ue"],
+            "offered_rps": f"{offered_rps[idx]:.1f}",
+            "scheduled_requests": req_counts[idx],
+            "gnb-1_requests": site_reqs["gnb1"][idx],
+            "gnb-2_requests": site_reqs["gnb-2"][idx],
+            "gnb-3_requests": site_reqs["gnb-3"][idx],
+            "arm": arm,
+            "all_attempt_p90_ms": fmt_csv(all_p90.get((arm, p), math.nan)),
+        }
+        for arm in arms
+        for idx, p in enumerate(phases)
+    ]
+    fig = _draw(cfg["labels"], RC_STYLE, for_slides=False)
+    written = save_outputs(
+        fig, out_dir, f"{scenario}_p90_bar_with_requests",
+        [
+            "phase", "phase_label", "workload_ue", "offered_rps", "scheduled_requests",
+            "gnb-1_requests", "gnb-2_requests", "gnb-3_requests", "arm", "all_attempt_p90_ms",
+        ],
+        csv_rows,
+    )
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_SHORT_LABELS, SLIDE_RC_STYLE, for_slides=True)
+        sp = Path(slides_dir) / "response-time-p90-with-requests.png"
+        sfig.savefig(sp, dpi=300)
+        plt.close(sfig)
+        written.append(sp)
+    return written
+
+
+def plot_p90_line_with_requests(scenario, cfg, all_p90, phases, phase_info, out_dir, *, slides_dir=None):
+    """Plot per-phase all-attempt p90 as lines (left log y) with unstacked per-gNB rounded staircase requests (right y)."""
+    arms = cfg["arms"]
+    labels = [phase_tick_label(p, phase_info[p]) for p in phases]
+    xs = np.arange(len(phases))
+    rps_per_ue = _phase_scheduled_requests(phase_info[phases[0]])[2] if phases else 5.0
+    dur_s = _phase_scheduled_requests(phase_info[phases[0]])[3] if phases else 120.0
+    site_keys = (
+        ("gnb1", "gnb1_ues"),
+        ("gnb-2", "gnb2_ues"),
+        ("gnb-3", "gnb3_ues"),
+    )
+    site_reqs = {
+        node: [int(round((phase_info[p].get(ue_key) or 0) * rps_per_ue * dur_s)) for p in phases]
+        for node, ue_key in site_keys
+    }
+    req_counts = [_phase_scheduled_requests(phase_info[p])[0] for p in phases]
+    offered_rps = [_phase_scheduled_requests(phase_info[p])[1] for p in phases]
+    max_site_req = max((v for vals in site_reqs.values() for v in vals), default=1)
+
+    def _draw(arm_labels, rc, *, for_slides=False):
+        valid_vals = [v for v in all_p90.values() if not math.isnan(v) and v > 0]
+        max_val = max(valid_vals, default=SLO_MS)
+        show_timeout = max_val > 500.0
+        with plt.rc_context(rc):
+            if for_slides:
+                fig, ax = plt.subplots(1, 1, figsize=(10.8, 5.9), layout="constrained")
+                legend_ax = None
+                lw, ms = 2.1, 5.5
+            else:
+                n_items = len(arms) + len(site_keys) + (2 if show_timeout else 1)
+                ncol = 1 if len(arms) > 2 else 2
+                legend_rows = math.ceil(n_items / ncol)
+                fig, legend_ax, (ax,) = _make_figure(1, legend_rows, panel_height=3.4)
+                lw, ms = 1.7, 4.5
+
+            ax2 = ax.twinx()
+            for node, _ in site_keys:
+                sx, sy = _staircase_xy(site_reqs[node])
+                ax2.fill_between(sx, 0, sy, color=NODE_COLORS[node], alpha=0.13, zorder=1)
+                ax2.plot(
+                    sx, sy, color=NODE_COLORS[node], alpha=0.60,
+                    linewidth=1.15, linestyle="-", zorder=1.5,
+                )
+            ax2.set_ylim(0, max_site_req * 1.22)
+            ax2.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+            ax2.set_ylabel(f"Requests Sent per gNB ({rps_per_ue:g} req/s/UE × {dur_s:g} s)", color="#4A5568")
+            ax2.tick_params(axis="y", colors="#4A5568")
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_color("#8A94A6")
+
+            ax.set_zorder(ax2.get_zorder() + 1)
+            ax.patch.set_visible(False)
+            for arm in arms:
+                ys = [all_p90.get((arm, p), math.nan) for p in phases]
+                ys_plot = [y if (not math.isnan(y) and y > 0) else math.nan for y in ys]
+                ax.plot(xs, ys_plot, linewidth=lw, markersize=ms, label=arm_labels[arm], zorder=3, **ARM_STYLES[arm])
+
+            ax.axhline(SLO_MS, color="#444444", linestyle=":", linewidth=1.6, label=f"SLO ({SLO_MS:g} ms)", zorder=4)
+            if show_timeout:
+                ax.axhline(TIMEOUT_MS, color=TIMEOUT_COLOR, linestyle=":", linewidth=1.8, label="Timeout (10,000 ms)", zorder=4)
+                ax.set_ylim(30, 18000)
+            else:
+                ax.set_ylim(30, max(300, max_val * 1.6))
+            _format_log_y(ax)
+            ax.set_xlim(-0.5, len(phases) - 0.5)
+            _style_phase_axis(ax, labels)
+            ax.set_xlabel("Phase (Active UEs, gnb-1:gnb-2:gnb-3)\nAll attempts; failed requests penalized at 10,000 ms timeout")
+            ax.set_ylabel("p90 Response Time (ms)")
+
+            h1, l1 = ax.get_legend_handles_labels()
+            gnb_handles = [
+                Line2D([0], [0], color=NODE_COLORS[node], alpha=0.70, linewidth=1.6, linestyle="-",
+                       label=f"{NODE_LABELS[node]} requests sent")
+                for node, _ in site_keys
+            ]
+            all_handles = h1 + gnb_handles
+            all_labels = l1 + [h.get_label() for h in gnb_handles]
+            if for_slides:
+                ax.legend(
+                    all_handles, all_labels,
+                    loc="lower center", bbox_to_anchor=(0.5, 1.02),
+                    ncol=3, frameon=False, handlelength=3.0,
+                )
+                fig.suptitle("p90 Response Time & Requests Sent per gNB", fontsize=13.5)
+            else:
+                ncol = 1 if len(arms) > 2 else 2
+                legend_ax.legend(all_handles, all_labels, loc="center", ncol=ncol, frameon=False, handlelength=3.4)
+                fig.suptitle("p90 Response Time & Requests Sent per gNB", fontsize=11)
+            return fig
+
+    csv_rows = [
+        {
+            "phase": p,
+            "phase_label": phase_csv_label(p, phase_info[p]),
+            "workload_ue": phase_info[p]["workload_ue"],
+            "offered_rps": f"{offered_rps[idx]:.1f}",
+            "scheduled_requests": req_counts[idx],
+            "gnb-1_requests": site_reqs["gnb1"][idx],
+            "gnb-2_requests": site_reqs["gnb-2"][idx],
+            "gnb-3_requests": site_reqs["gnb-3"][idx],
+            "arm": arm,
+            "all_attempt_p90_ms": fmt_csv(all_p90.get((arm, p), math.nan)),
+        }
+        for arm in arms
+        for idx, p in enumerate(phases)
+    ]
+    fig = _draw(cfg["labels"], RC_STYLE, for_slides=False)
+    written = save_outputs(
+        fig, out_dir, f"{scenario}_p90_response_time_with_requests",
+        [
+            "phase", "phase_label", "workload_ue", "offered_rps", "scheduled_requests",
+            "gnb-1_requests", "gnb-2_requests", "gnb-3_requests", "arm", "all_attempt_p90_ms",
+        ],
+        csv_rows,
+    )
+    if slides_dir is not None:
+        Path(slides_dir).mkdir(parents=True, exist_ok=True)
+        sfig = _draw(SLIDE_SHORT_LABELS, SLIDE_RC_STYLE, for_slides=True)
+        sp = Path(slides_dir) / "response-time-p90-line-with-requests.png"
         sfig.savefig(sp, dpi=300)
         plt.close(sfig)
         written.append(sp)
@@ -866,8 +1826,8 @@ def plot_latency_boxplot(scenario, cfg, durs_map, phases, phase_info, out_dir, *
             ax.set_xlim(-0.55, len(phases) - 0.45)
             ax.set_xticks(xs)
             ax.set_xticklabels(labels)
-            ax.set_xlabel("Phase (Active UEs, gnb1:gnb-2:gnb-3)\nBoxes: Q25–Q75 with median; whiskers: p5–p95 · All attempts (actual duration, incl. failures)")
-            ax.set_ylabel("Response Time (ms, log scale)")
+            ax.set_xlabel("Phase (Active UEs, gnb-1:gnb-2:gnb-3)\nBoxes: Q25–Q75 with median; whiskers: p5–p95 · All attempts (actual duration, incl. failures)")
+            ax.set_ylabel("Response Time (ms)")
             ax.grid(axis="y", which="major", linestyle=":", alpha=0.55, zorder=0)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -932,7 +1892,7 @@ def plot_slo_violation_bar(scenario, cfg, metrics, phases, phase_info, out_dir, 
             ax.set_yticks([0, 20, 40, 60, 80, 100])
             ax.set_xticks(xs)
             ax.set_xticklabels(labels)
-            ax.set_xlabel("Phase (Active UEs, gnb1:gnb-2:gnb-3)")
+            ax.set_xlabel("Phase (Active UEs, gnb-1:gnb-2:gnb-3)")
             ax.set_ylabel("SLO Violation Rate (%)")
             ax.grid(axis="y", linestyle=":", alpha=0.55, zorder=0)
             ax.spines["top"].set_visible(False)
@@ -1026,6 +1986,282 @@ def plot_goodput_and_failures(scenario, cfg, goodput, fail_pct, fail_cnt, attemp
     return written
 
 
+def _load_windowed_request_metrics(run_dir, arms, phases, *, window_s=15.0, core_node="core-5g"):
+    """Bin requests.jsonl into aligned fixed-width windows within each phase.
+
+    Returns (win_rows, phase_offload, phase_duration_s) or (None, None, None) if
+    requests.jsonl is missing for any arm.
+    """
+    phase_index = {p: i for i, p in enumerate(phases)}
+    win_rows = []
+    phase_offload = {}
+    phase_duration_s = 120.0
+
+    for arm in arms:
+        req_path = Path(run_dir) / arm / "requests.jsonl"
+        if not req_path.is_file():
+            return None, None, None
+        phase_starts = {}
+        phase_durs = {}
+        bin_pen = collections.defaultdict(list)
+        bin_succ = collections.Counter()
+        bin_core = collections.Counter()
+        ph_succ = collections.Counter()
+        ph_core = collections.Counter()
+        ph_att = collections.Counter()
+
+        with req_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                ev = r.get("event")
+                if ev == "phase_start":
+                    ph = r["phase"]
+                    phase_starts[ph] = float(r["start_time"])
+                    phase_durs[ph] = float(r.get("duration_s", 120.0))
+                elif ev == "request" and r.get("duration_ms") is not None:
+                    ph = r.get("phase")
+                    if ph not in phase_index or ph not in phase_starts:
+                        continue
+                    dur_s = phase_durs.get(ph, 120.0)
+                    phase_duration_s = dur_s
+                    n_bins = max(1, int(round(dur_s / window_s)))
+                    offset = float(r["start_time"]) - phase_starts[ph]
+                    b = min(n_bins - 1, max(0, int(offset // window_s)))
+                    pen = float(r["duration_ms"]) if r.get("success") else TIMEOUT_MS
+                    key = (ph, b)
+                    bin_pen[key].append(pen)
+                    ph_att[ph] += 1
+                    if r.get("success"):
+                        bin_succ[key] += 1
+                        ph_succ[ph] += 1
+                        if r.get("server_node") == core_node:
+                            bin_core[key] += 1
+                            ph_core[ph] += 1
+
+        n_bins = max(1, int(round(phase_duration_s / window_s)))
+        for p_idx, ph in enumerate(phases):
+            dur_s = phase_durs.get(ph, phase_duration_s)
+            succ = ph_succ[ph]
+            core = ph_core[ph]
+            phase_offload[(arm, ph)] = {
+                "attempts": ph_att[ph],
+                "successes": succ,
+                "core_served": core,
+                "core_pct": (100.0 * core / succ) if succ > 0 else 0.0,
+                "core_rps": core / dur_s if dur_s > 0 else 0.0,
+            }
+            for b in range(n_bins):
+                key = (ph, b)
+                arr = sorted(bin_pen[key])
+                p90 = arr[max(0, math.ceil(0.9 * len(arr)) - 1)] if arr else math.nan
+                s_cnt = bin_succ[key]
+                c_cnt = bin_core[key]
+                win_start = p_idx * phase_duration_s + b * window_s
+                win_rows.append({
+                    "arm": arm,
+                    "phase": ph,
+                    "phase_index": p_idx + 1,
+                    "window_index": b,
+                    "window_start_s": win_start,
+                    "window_mid_s": win_start + window_s / 2.0,
+                    "attempts": len(arr),
+                    "successes": s_cnt,
+                    "core_served": c_cnt,
+                    "core_pct": (100.0 * c_cnt / s_cnt) if s_cnt > 0 else 0.0,
+                    "core_rps": c_cnt / window_s,
+                    "p90_ms": p90,
+                })
+
+    return win_rows, phase_offload, phase_duration_s
+
+
+def _style_time_phase_axis(ax, phases, phase_info, phase_duration_s, *, show_labels=True, extra_note=None):
+    """Draw vertical phase boundaries and centered P1..Pn tick labels on an elapsed-time axis."""
+    total_s = len(phases) * phase_duration_s
+    for i in range(1, len(phases)):
+        ax.axvline(i * phase_duration_s, color="#BBBBBB", linestyle="--", linewidth=0.8, zorder=1)
+    ax.set_xlim(0, total_s)
+    centers = [(i + 0.5) * phase_duration_s for i in range(len(phases))]
+    ax.set_xticks(centers)
+    if show_labels:
+        ax.set_xticklabels([phase_tick_label(p, phase_info[p]) for p in phases])
+        xlabel = "Phase (Active UEs, gnb-1:gnb-2:gnb-3; 15 s windows per 120 s phase)"
+        if extra_note:
+            xlabel = f"{xlabel}\n{extra_note}"
+        ax.set_xlabel(xlabel)
+    else:
+        ax.tick_params(labelbottom=False)
+    ax.grid(axis="y", linestyle=":", alpha=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def plot_p90_15s(scenario, cfg, win_rows, phases, phase_info, phase_duration_s, out_dir, *,
+                 window_s=15.0, arms_filter=None, suffix="p90_15s"):
+    """Plot 15 s windowed all-attempt p90 response time across all phases."""
+    arms = list(arms_filter) if arms_filter is not None else list(cfg["arms"])
+    filtered_rows = [r for r in win_rows if r["arm"] in arms]
+    by_arm = collections.defaultdict(list)
+    for r in filtered_rows:
+        by_arm[r["arm"]].append(r)
+
+    valid_vals = [r["p90_ms"] for r in filtered_rows if not math.isnan(r["p90_ms"]) and r["p90_ms"] > 0]
+    show_timeout = max(valid_vals, default=SLO_MS) > 500.0
+    if arms_filter is not None:
+        ncol = 1
+        legend_rows = len(arms) + (2 if show_timeout else 1)
+    else:
+        ncol = 1 if len(arms) > 2 else 3
+        if ncol == 1:
+            legend_rows = 6 if show_timeout else 5
+        else:
+            legend_rows = 2 if show_timeout else 1
+
+    with plt.rc_context(RC_STYLE):
+        fig, legend_ax, (ax,) = _make_figure(1, legend_rows, panel_height=3.2)
+        for arm in arms:
+            rows = sorted(by_arm[arm], key=lambda r: r["window_mid_s"])
+            xs = [r["window_mid_s"] for r in rows]
+            ys = [r["p90_ms"] if (not math.isnan(r["p90_ms"]) and r["p90_ms"] > 0) else math.nan for r in rows]
+            ax.plot(xs, ys, linewidth=1.45, markersize=2.8, label=cfg["labels"][arm], **ARM_STYLES[arm])
+
+        ax.axhline(SLO_MS, color="#444444", linestyle=":", linewidth=1.4, label=f"SLO ({SLO_MS:g} ms)")
+        if show_timeout:
+            ax.axhline(TIMEOUT_MS, color=TIMEOUT_COLOR, linestyle=":", linewidth=1.6, label="Timeout (10,000 ms)")
+            ax.set_ylim(30, 18000)
+        _format_log_y(ax)
+        _style_time_phase_axis(
+            ax, phases, phase_info, phase_duration_s,
+            extra_note="All attempts; failed requests penalized at 10,000 ms timeout",
+        )
+        ax.set_ylabel("p90 Response Time (ms)")
+        fig.suptitle(f"p90 Response Time per {window_s:g} s Window", fontsize=11)
+        _draw_legend(legend_ax, ax, ncol=ncol)
+
+        csv_rows = [
+            {
+                "phase": r["phase"],
+                "phase_label": phase_csv_label(r["phase"], phase_info[r["phase"]]),
+                "window_start_s": f"{r['window_start_s']:.1f}",
+                "window_mid_s": f"{r['window_mid_s']:.1f}",
+                "arm": r["arm"],
+                "attempts": r["attempts"],
+                "p90_ms": fmt_csv(r["p90_ms"]),
+            }
+            for r in filtered_rows
+        ]
+        return save_outputs(
+            fig, out_dir, f"{scenario}_{suffix}",
+            ["phase", "phase_label", "window_start_s", "window_mid_s", "arm", "attempts", "p90_ms"],
+            csv_rows,
+        )
+
+
+def plot_core_offload_15s(scenario, cfg, win_rows, phases, phase_info, phase_duration_s, out_dir, *, window_s=15.0):
+    """Plot 15 s windowed Core-offloaded traffic share (%) for vertical arms."""
+    vert_arms = [a for a in cfg["arms"] if a.endswith("-vertical")]
+    if not vert_arms:
+        return []
+    by_arm = collections.defaultdict(list)
+    for r in win_rows:
+        if r["arm"] in vert_arms:
+            by_arm[r["arm"]].append(r)
+
+    with plt.rc_context(RC_STYLE):
+        fig, legend_ax, (ax_pct,) = _make_figure(1, legend_rows=len(vert_arms), panel_height=3.2)
+        for arm in vert_arms:
+            rows = sorted(by_arm[arm], key=lambda r: r["window_mid_s"])
+            xs = [r["window_mid_s"] for r in rows]
+            pcts = [r["core_pct"] for r in rows]
+            ax_pct.plot(xs, pcts, linewidth=1.5, markersize=2.8, label=cfg["labels"][arm], **ARM_STYLES[arm])
+
+        ax_pct.set_ylabel("Offloaded to Core (%)")
+        ax_pct.set_ylim(-3, 105)
+        _style_time_phase_axis(ax_pct, phases, phase_info, phase_duration_s, show_labels=True)
+
+        fig.suptitle(f"Traffic Offloaded to Core per {window_s:g} s Window", fontsize=11)
+        _draw_legend(legend_ax, ax_pct, ncol=1)
+
+        csv_rows = [
+            {
+                "phase": r["phase"],
+                "phase_label": phase_csv_label(r["phase"], phase_info[r["phase"]]),
+                "window_start_s": f"{r['window_start_s']:.1f}",
+                "window_mid_s": f"{r['window_mid_s']:.1f}",
+                "arm": r["arm"],
+                "successes": r["successes"],
+                "core_served_requests": r["core_served"],
+                "core_served_pct": fmt_csv(r["core_pct"]),
+            }
+            for r in win_rows if r["arm"] in vert_arms
+        ]
+        return save_outputs(
+            fig, out_dir, f"{scenario}_core_offload_15s",
+            [
+                "phase", "phase_label", "window_start_s", "window_mid_s", "arm",
+                "successes", "core_served_requests", "core_served_pct",
+            ],
+            csv_rows,
+        )
+
+
+def plot_core_offload_phase(scenario, cfg, phase_offload, phases, phase_info, out_dir):
+    """Plot per-phase Core-offloaded traffic share (%) for vertical arms."""
+    vert_arms = [a for a in cfg["arms"] if a.endswith("-vertical")]
+    if not vert_arms:
+        return []
+    labels = [phase_tick_label(p, phase_info[p]) for p in phases]
+    xs = np.arange(len(phases))
+    width, offsets = _bar_offsets(len(vert_arms))
+
+    with plt.rc_context(RC_STYLE):
+        fig, legend_ax, (ax_pct,) = _make_figure(1, legend_rows=len(vert_arms), panel_height=3.2)
+        for off, arm in zip(offsets, vert_arms):
+            st = BAR_STYLES[arm]
+            pcts = [phase_offload[(arm, p)]["core_pct"] for p in phases]
+            bars_pct = ax_pct.bar(
+                xs + off, pcts, width=width * 0.92,
+                color=st["color"], edgecolor=st["edgecolor"], linewidth=0.7,
+                label=cfg["labels"][arm], zorder=3,
+            )
+            for bar, y in zip(bars_pct, pcts):
+                txt = "0%" if y < 0.05 else f"{y:.1f}%"
+                ax_pct.text(bar.get_x() + bar.get_width() / 2.0, y + 1.5, txt,
+                            ha="center", va="bottom", fontsize=7.2, color="#222222")
+
+        ax_pct.set_ylabel("Offloaded to Core (%)")
+        ax_pct.set_ylim(0, 108)
+        ax_pct.set_yticks([0, 20, 40, 60, 80, 100])
+        _style_phase_axis(ax_pct, labels)
+
+        fig.suptitle("Traffic Offloaded to Core per Phase", fontsize=11)
+        _draw_legend(legend_ax, ax_pct, ncol=1)
+
+        csv_rows = [
+            {
+                "phase": p,
+                "phase_label": phase_csv_label(p, phase_info[p]),
+                "workload_ue": phase_info[p]["workload_ue"],
+                "arm": arm,
+                "successes": phase_offload[(arm, p)]["successes"],
+                "core_served_requests": phase_offload[(arm, p)]["core_served"],
+                "core_served_pct": fmt_csv(phase_offload[(arm, p)]["core_pct"]),
+            }
+            for arm in vert_arms
+            for p in phases
+        ]
+        return save_outputs(
+            fig, out_dir, f"{scenario}_core_offload_phase",
+            [
+                "phase", "phase_label", "workload_ue", "arm",
+                "successes", "core_served_requests", "core_served_pct",
+            ],
+            csv_rows,
+        )
+
+
 def generate_rich_plots(run_dir, scenario, out_dir, slides_dir=None):
     """Generate the full suite (standard 4 + p90 bar, boxplot, SLO bar, goodput/failures) for one run."""
     run_dir = Path(run_dir)
@@ -1036,17 +2272,51 @@ def generate_rich_plots(run_dir, scenario, out_dir, slides_dir=None):
     resources, r_missing, _ = load_resources(run_dir, cfg["arms"], phases)
     pods, p_missing, _ = load_pods(run_dir, cfg["arms"], phases)
 
+    durs_map, all_p90, _ = _load_request_distributions(run_dir, cfg["arms"], phases)
+
     files = []
-    files.extend(plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir))
+    files.extend(plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir, all_p90=all_p90))
     files.extend(plot_slo_violation(scenario, cfg, metrics, phases, phase_info, out_dir))
+    files.extend(plot_slo_violation_with_requests(
+        scenario, cfg, metrics, phases, phase_info, out_dir, slides_dir=slides_dir,
+    ))
+    files.extend(plot_slo_violation_line_with_requests(
+        scenario, cfg, metrics, phases, phase_info, out_dir, slides_dir=slides_dir,
+    ))
+    files.extend(plot_requests_per_phase(
+        scenario, cfg, phases, phase_info, out_dir, slides_dir=slides_dir,
+    ))
     files.extend(plot_resources(scenario, cfg, resources, phases, phase_info, out_dir))
     files.extend(plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir))
+    files.extend(plot_pod_efficiency(
+        scenario, cfg, pods, metrics, phases, phase_info, run_dir, out_dir, slides_dir=slides_dir,
+    ))
+    files.extend(plot_efficiency_tradeoff(
+        scenario, cfg, pods, metrics, phases, phase_info, run_dir, out_dir, slides_dir=slides_dir,
+    ))
     files.extend(plot_slo_violation_bar(scenario, cfg, metrics, phases, phase_info, out_dir, slides_dir=slides_dir))
 
-    durs_map, all_p90, _ = _load_request_distributions(run_dir, cfg["arms"], phases)
     if durs_map is not None:
         files.extend(plot_p90_bar(scenario, cfg, all_p90, phases, phase_info, out_dir, slides_dir=slides_dir))
+        files.extend(plot_p90_bar_with_requests(
+            scenario, cfg, all_p90, phases, phase_info, out_dir, slides_dir=slides_dir,
+        ))
+        files.extend(plot_p90_line_with_requests(
+            scenario, cfg, all_p90, phases, phase_info, out_dir, slides_dir=slides_dir,
+        ))
         files.extend(plot_latency_boxplot(scenario, cfg, durs_map, phases, phase_info, out_dir, slides_dir=slides_dir))
+
+    win_rows, phase_offload, phase_dur_s = _load_windowed_request_metrics(run_dir, cfg["arms"], phases)
+    if win_rows is not None:
+        files.extend(plot_p90_15s(scenario, cfg, win_rows, phases, phase_info, phase_dur_s, out_dir))
+        if cfg["source"] == "vertical":
+            vert_arms = [a for a in cfg["arms"] if a.endswith("-vertical")]
+            files.extend(plot_p90_15s(
+                scenario, cfg, win_rows, phases, phase_info, phase_dur_s, out_dir,
+                arms_filter=vert_arms, suffix="p90_offload_15s",
+            ))
+            files.extend(plot_core_offload_15s(scenario, cfg, win_rows, phases, phase_info, phase_dur_s, out_dir))
+            files.extend(plot_core_offload_phase(scenario, cfg, phase_offload, phases, phase_info, out_dir))
 
     gp, fp, fc, am = _load_goodput_and_failures(run_dir, cfg["arms"], phases)
     if gp is not None:
@@ -1071,8 +2341,12 @@ def generate_all_plots(final_dir=FINAL_DIR, output_dir=None):
         report["partial_resources"][scenario] = r_partial
         report["pending_nonzero"][scenario] = pending
 
-        report["files"].extend(plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir))
+        _, all_p90, _ = _load_request_distributions(run_dir, cfg["arms"], phases)
+
+        report["files"].extend(plot_p90(scenario, cfg, metrics, phases, phase_info, out_dir, all_p90=all_p90))
         report["files"].extend(plot_slo_violation(scenario, cfg, metrics, phases, phase_info, out_dir))
+        report["files"].extend(plot_slo_violation_with_requests(scenario, cfg, metrics, phases, phase_info, out_dir))
+        report["files"].extend(plot_requests_per_phase(scenario, cfg, phases, phase_info, out_dir))
         report["files"].extend(plot_resources(scenario, cfg, resources, phases, phase_info, out_dir))
         report["files"].extend(plot_pod_placement(scenario, cfg, pods, phases, phase_info, out_dir))
 
