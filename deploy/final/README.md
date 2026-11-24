@@ -40,7 +40,8 @@ arm with every command written out; nothing says "same for the others".
   (project directory, `KUBECONFIG`, `NS`, `APP`, `A`, `TOKEN`, `H`, `UE`), so any block can be pasted into any
   terminal on core, in any order. State shared between blocks lives in files (`/tmp/final-camp`,
   `/tmp/ue-payload.json`), not in shell variables.
-- Four terminals on core: **T1** commands, **T2** the 10 ms path delay (`tools/hold_tc_delay.py`),
+- Four terminals on core: **T1** commands, **T2** the 10 ms path delay (`tools/hold_tc_delay.py`; the plain `tc`/`ip`
+  commands it runs are written out in `tools/tc-delay-commands.md`),
   **T3** the offloader port-forward (joint and mobility only), **T4** monitoring.
 
 ## Before the first run
