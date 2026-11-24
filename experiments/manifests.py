@@ -35,6 +35,9 @@ from experiments.profiles import (
 )
 
 
+DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS = 45
+
+
 def _get_root():
     """Return campaign.ROOT when monkeypatched by tests, else repository ROOT."""
     mod = sys.modules.get('experiments.campaign')
@@ -170,11 +173,126 @@ def _latency_metric_name(floor_ms=0, unit='seconds', asymmetric_target_ms=None):
     return f'ue_p90_latency_{unit}'
 
 
-def _floor_adapter_config(floor_ms, configmap=None, unit='seconds', asymmetric_target_ms=None):
+def _format_decimal(value):
+    dec = Decimal(str(value)).normalize()
+    text = format(dec, 'f')
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return text
+
+
+def _pod_cpu_request_cores(deployment):
+    """Return total container CPU request in cores (Decimal) for a Deployment."""
+    containers = deployment['spec']['template']['spec'].get('containers') or []
+    if not containers:
+        raise ValueError('Deployment has no containers')
+    total_milli = sum(_container_requests(c)[0] for c in containers)
+    if total_milli <= 0:
+        raise ValueError('Deployment CPU request must be positive')
+    return (Decimal(str(total_milli)) / Decimal('1000')).normalize()
+
+
+def _workload_deployment(workload='pedestrian-detection', manifest_path=None):
+    path = Path(manifest_path) if manifest_path is not None else workload_manifest(workload)
+    docs = [d for d in yaml.safe_load_all(path.read_text()) if d and d.get('kind') == 'Deployment']
+    if len(docs) != 1:
+        raise ValueError('application manifest requires exactly one Deployment')
+    return docs[0]
+
+
+def _workload_cpu_request_cores(workload='pedestrian-detection', manifest_path=None):
+    return _pod_cpu_request_cores(_workload_deployment(workload, manifest_path=manifest_path))
+
+
+def _workload_container_name(workload='pedestrian-detection', manifest_path=None):
+    containers = _workload_deployment(workload, manifest_path=manifest_path)['spec']['template']['spec'].get('containers') or []
+    if not containers or not containers[0].get('name'):
+        raise ValueError('Deployment requires a named container')
+    return containers[0]['name']
+
+
+def _core_backend_manifest():
+    return _get_root() / 'offloader' / 'core-backend.yaml'
+
+
+def verify_matching_pod_cpu_requests(dynamic_manifest, *, anchor_manifest=None, core_manifest=None):
+    """Verify dynamic, anchor, and core Deployments declare identical Pod CPU requests."""
+    dyn_dep = _workload_deployment(manifest_path=dynamic_manifest)
+    expected = _pod_cpu_request_cores(dyn_dep)
+    checks = []
+    if anchor_manifest is not None:
+        anchor_docs = [
+            d for d in yaml.safe_load_all(Path(anchor_manifest).read_text())
+            if d and d.get('kind') == 'Deployment'
+        ]
+        if not anchor_docs:
+            raise ValueError(f'no anchor Deployments found in {anchor_manifest}')
+        for doc in anchor_docs:
+            checks.append((doc['metadata']['name'], _pod_cpu_request_cores(doc)))
+    if core_manifest is not None:
+        core_dep = _workload_deployment(manifest_path=core_manifest)
+        checks.append((core_dep['metadata']['name'], _pod_cpu_request_cores(core_dep)))
+    mismatches = [
+        f'{name} ({req} cores != {expected} cores)'
+        for name, req in checks
+        if req != expected
+    ]
+    if mismatches:
+        raise ValueError(
+            f'Pod CPU request mismatch against {dyn_dep["metadata"]["name"]} ({expected} cores): '
+            + ', '.join(mismatches)
+        )
+    return expected
+
+
+def _baseline_cpu_metric_name(n_fixed):
+    if type(n_fixed) is not int or n_fixed < 0:
+        raise ValueError('n_fixed must be a non-negative integer')
+    return f'mec_baseline_cpu_dynamic_replicas_fixed{n_fixed}'
+
+
+def _baseline_cpu_adapter_rule(
+    n_fixed,
+    *,
+    cpu_hpa_target=DEFAULT_CPU_HPA_TARGET,
+    pod_request_cores=Decimal('0.5'),
+    namespace=NAMESPACE,
+    container='pedestrian-detection',
+    pod_prefix='mec-placement-pedestrian-detection',
+    window_seconds=DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS,
+):
+    if type(n_fixed) is not int or n_fixed < 0:
+        raise ValueError('n_fixed must be a non-negative integer')
+    if type(cpu_hpa_target) is not int or cpu_hpa_target < 1:
+        raise ValueError('cpu_hpa_target must be a positive integer percent of CPU requests')
+    pod_req = Decimal(str(pod_request_cores))
+    if pod_req <= 0:
+        raise ValueError('pod_request_cores must be positive')
+    if type(window_seconds) is not int or window_seconds < 1:
+        raise ValueError('window_seconds must be a positive integer')
+    cpu_target = Decimal(str(cpu_hpa_target)) / Decimal('100')
+    metric_name = _baseline_cpu_metric_name(n_fixed)
+    expr = (
+        f'clamp_min((sum(rate(container_cpu_usage_seconds_total{{'
+        f'job="kubelet-cadvisor",namespace="{namespace}",container="{container}",'
+        f'pod=~"{pod_prefix}.*"}}[{window_seconds}s])) or vector(0)) '
+        f'/ ({_format_decimal(cpu_target)} * {_format_decimal(pod_req)}) - {n_fixed}, 0)'
+    )
+    return {
+        'seriesQuery': 'up{job="kubelet-cadvisor"}',
+        'resources': {'namespaced': False},
+        'name': {'matches': '^up$', 'as': metric_name},
+        'metricsQuery': expr,
+    }
+
+
+def _floor_adapter_config(floor_ms, configmap=None, unit='seconds', asymmetric_target_ms=None,
+                          baseline_cpu_rules=None):
     """Append a latency-scaling rule, preserving the raw metric and unrelated rules."""
     if unit not in ('seconds', 'milliseconds'):
         raise ValueError(f'unsupported latency metric unit: {unit}')
-    if type(floor_ms) is not int or floor_ms < 0 or (floor_ms == 0 and unit != 'milliseconds'):
+    has_latency_rule = bool(floor_ms) or unit == 'milliseconds'
+    if type(floor_ms) is not int or floor_ms < 0 or (not has_latency_rule and not baseline_cpu_rules):
         raise ValueError('adapter floor must be a positive whole number of milliseconds')
     if configmap is None:
         docs = yaml.safe_load_all((_get_root() / 'telemetry/05-prometheus-adapter.yaml').read_text())
@@ -185,25 +303,36 @@ def _floor_adapter_config(floor_ms, configmap=None, unit='seconds', asymmetric_t
               'metadata': {'name': 'prometheus-adapter-config', 'namespace': PLACEMENT_NAMESPACE},
               'data': dict(configmap['data'])}
     config = yaml.safe_load(result['data']['config.yaml'])
-    name = _latency_metric_name(floor_ms, unit=unit, asymmetric_target_ms=asymmetric_target_ms)
     rules = config.setdefault('externalRules', [])
-    rules[:] = [r for r in rules if r.get('name', {}).get('as') != name]
-    base_expr = 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
-    expr = f'clamp_min({base_expr} - {floor_ms / 1000:g}, 0)' if floor_ms else base_expr
-    if asymmetric_target_ms is not None:
-        target = Decimal(str(asymmetric_target_ms))
-        if not 0 < floor_ms < target:
-            raise ValueError('asymmetric latency scaling requires 0 < floor < target')
-        # Keep the expression continuous at the target and preserve the above-target ratio.
-        expr = f'{base_expr} + ({floor_ms} / {target - floor_ms:f}) * clamp_min({base_expr} - {target / 1000:f}, 0)'
-    if unit == 'milliseconds':
-        expr = f'({expr}) * 1000'
-    rules.append({
-        'seriesQuery': base_expr,
-        'resources': {'namespaced': False},
-        'name': {'matches': '^ue_request_attempt_duration_p90_seconds$', 'as': name},
-        'metricsQuery': expr,
-    })
+    if has_latency_rule:
+        name = _latency_metric_name(floor_ms, unit=unit, asymmetric_target_ms=asymmetric_target_ms)
+        rules[:] = [
+            r for r in rules
+            if r.get('name', {}).get('as') != name
+            and (asymmetric_target_ms is not None or not str(r.get('name', {}).get('as') or '').startswith('ue_p90_asymmetric_'))
+        ]
+        base_expr = 'ue_request_attempt_duration_p90_seconds{job="ue-telemetry"}'
+        expr = f'clamp_min({base_expr} - {floor_ms / 1000:g}, 0)' if floor_ms else base_expr
+        if asymmetric_target_ms is not None:
+            target = Decimal(str(asymmetric_target_ms))
+            if not 0 < floor_ms < target:
+                raise ValueError('asymmetric latency scaling requires 0 < floor < target')
+            # Keep the expression continuous at the target and preserve the above-target ratio.
+            expr = f'{base_expr} + ({floor_ms} / {target - floor_ms:f}) * clamp_min({base_expr} - {target / 1000:f}, 0)'
+        if unit == 'milliseconds':
+            expr = f'({expr}) * 1000'
+        rules.append({
+            'seriesQuery': base_expr,
+            'resources': {'namespaced': False},
+            'name': {'matches': '^ue_request_attempt_duration_p90_seconds$', 'as': name},
+            'metricsQuery': expr,
+        })
+    if baseline_cpu_rules:
+        rules[:] = [
+            r for r in rules
+            if not str(r.get('name', {}).get('as') or '').startswith('mec_baseline_cpu_dynamic_replicas_fixed')
+        ]
+        rules.extend(deepcopy(baseline_cpu_rules))
     result['data']['config.yaml'] = yaml.safe_dump(config, sort_keys=False)
     return result
 
@@ -230,7 +359,8 @@ def _format_hpa_target(value_ms, unit='seconds'):
 
 def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, max_replicas, scale_down_seconds,
                 slo_ms=None, staircase=False, latency_floor_ms=0, rt_target_factor=AUTOSCALER_CONFIG['rt_target_factor'],
-                scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, asymmetric_latency=False):
+                scale_down_stabilization_seconds=None, scale_down_pods=None, scale_down_period_seconds=None, cpu_hpa_target=DEFAULT_CPU_HPA_TARGET, asymmetric_latency=False,
+                external_metric_name=None, external_average_value=None):
     hpa = yaml.safe_load((_get_root() / template_name).read_text())
     hpa['metadata']['name'] = hpa_name
     hpa['spec']['scaleTargetRef']['name'] = app_name
@@ -264,7 +394,18 @@ def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, ma
             hpa['spec']['behavior']['scaleDown']['policies'] = [
                 {'type': 'Pods', 'value': pods, 'periodSeconds': period}
             ]
-    if slo_ms is not None:
+    if external_metric_name is not None:
+        hpa['spec']['metrics'] = [{
+            'type': 'External',
+            'external': {
+                'metric': {'name': external_metric_name},
+                'target': {
+                    'type': 'AverageValue',
+                    'averageValue': str(external_average_value if external_average_value is not None else '1'),
+                },
+            },
+        }]
+    elif slo_ms is not None:
         metric = hpa['spec']['metrics'][0]['external']
         internal_target_dec = Decimal(str(slo_ms)) * Decimal(str(rt_target_factor))
         target_dec = internal_target_dec - latency_floor_ms if latency_floor_ms and not asymmetric_latency else internal_target_dec
@@ -545,6 +686,13 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     if no_hpa:
         return config, config_path, hpa_path
     if method == 'baseline' and comparison in ('full', 'scaling'):
+        external_metric_name = None
+        external_average_value = None
+        if comparison == 'full' and site_anchors:
+            n_fixed = (vertical_budget.fixed_replicas if vertical_budget is not None
+                       else len(_site_anchor_nodes(edge_only, site_nodes)))
+            external_metric_name = _baseline_cpu_metric_name(n_fixed)
+            external_average_value = '1'
         hpa_path = _render_hpa(
             'autoscaler/hpa-baseline.yaml', root / 'baseline-hpa.yaml',
             app_name + '-baseline', app_name,
@@ -553,6 +701,8 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
             scale_down_pods=scale_down_pods,
             scale_down_period_seconds=scale_down_period_seconds,
             cpu_hpa_target=cpu_hpa_target,
+            external_metric_name=external_metric_name,
+            external_average_value=external_average_value,
         )
     elif autoscaler == 'hpa' and (method == 'proposed' or comparison == 'placement'):
         effective_factor = rt_target_factor if method == 'proposed' else 1.0

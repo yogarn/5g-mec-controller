@@ -30,6 +30,7 @@ FOUR_ARM_SPECS = (
 # unaffected by offloader changes. Full runs always use 'all'.
 ARM_SELECTIONS = {
     'all': FOUR_ARM_SPECS,
+    'local': tuple(spec for spec in FOUR_ARM_SPECS if spec[2] == 'local-only'),
     'vertical': tuple(spec for spec in FOUR_ARM_SPECS if spec[2] == 'vertical'),
     # One arm per name; used by the demo profiles to show a single configuration live.
     **{spec[0]: (spec,) for spec in FOUR_ARM_SPECS},
@@ -39,7 +40,7 @@ UPF_PLACEMENT_QUERY = (
 )
 MOBILITY9_SCHEDULE = '9:7:1:1,9:5:3:1,9:3:5:1,9:1:7:1,9:1:5:3,9:1:3:5,9:1:1:7'
 SCALER_BALANCED_SCHEDULE = '3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1'
-SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3))
+SCALER_STAIRCASE_SCHEDULE = ','.join(f'{n}:{n//3}:{n//3}:{n//3}' for n in (3, 9, 15, 21, 24, 12, 3))
 SCALER_SCENARIOS = ('scaler-balanced', 'scaler-staircase')
 AUTOSCALER_CONFIG = load_autoscaler_config()
 SCALER_NODE = 'core-5g'
@@ -60,18 +61,21 @@ SCALER_PHASE_SECONDS = DEFAULT_PHASE_SECONDS
 
 # Named experiment profiles. The run scripts only select a profile; every experiment constant lives here.
 # Smoke and the full joint run share all settings except the schedule and phase length.
-VERTICAL_JOINT_SCHEDULE = '3:1:1:1,6:3:2:1,9:6:2:1,12:6:4:2,15:6:6:3,18:5:8:5,24:4:12:8,24:2:16:6,18:2:8:8,15:1:5:9,3:1:1:1'
+# Joint schedule (total:gnb1:gnb2:gnb3). Focused 7-phase gnb-2 hotspot ramp (1->6->12->18->22 UEs on gnb-2, peak 24 UEs total)
+# with gnb-1 and gnb-3 held at 1 UE during the ramp so baseline CPU HPA cannot over-provision gnb-2 by accident, followed by
+# a partial rebalance onto gnb-3 (12:1:5:6) for the descheduler and cooldown (3:1:1:1).
+VERTICAL_JOINT_SCHEDULE = '3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1'
 VERTICAL_SMOKE_SCHEDULE = '3:1:1:1,6:4:1:1,3:1:1:1'
-# 24 UEs (the reserved subscribers); hotspot is at most 18 UEs because nine fixed replicas leave at most seven
-# pods at one site once the other two sites keep one anchor each.
-VERTICAL_MOBILITY_SCHEDULE = '24:10:7:7,24:2:18:4,24:2:15:7,24:2:11:11,24:2:7:15,24:2:4:18'
+# 24 UEs (the reserved subscribers); 9 fixed replicas give baseline-local 3:3:3 (saturating above ~16-17 UEs/site)
+# while proposed-local can concentrate up to 7 pods on the hot site (1:7:1 / 1:1:7).
+# Symmetric sweep: gnb-1 holds 1 UE throughout; hotspot builds on gnb-2 to 22 UEs and sweeps across to gnb-3 (22 UEs).
+VERTICAL_MOBILITY_SCHEDULE = '24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22'
 _VERTICAL_COMMON = {
     'config': 'experiments/campaign-vertical.yaml',
     'vertical_mode': 'four-arm',
     'scenario': 'mobility9',
     'phase_duration': 120.0,
     'rps_per_ue': 5.0,
-    'max_in_flight_per_ue': 8,
     'slo_ms': 150.0,
     'tc_ms': 10.0,
     'pod_share_scoring': True,
@@ -82,24 +86,32 @@ _VERTICAL_COMMON = {
     'site_anchors': True,
 }
 _VERTICAL_FULL = {
+    'scenario': 'joint',
     'comparison': 'full',
     'cpu_hpa_target': 80,
     'scale_down_stabilization_seconds': 60,
-    'asymmetric_latency': True,
+    'asymmetric_latency': False,
     'proposed_scale_down_period_seconds': 15,
 }
 PROFILES = {
     'vertical-joint': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE},
-    # Demo: the real joint schedule (11 phases, about 30 minutes with setup) for ONE arm; see demo.sh.
+    # Demo: the final joint schedule (7 phases x 120 s, 14 min of traffic plus setup) for ONE arm; see demo.sh.
     **{f'demo-{spec[0]}': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE,
                            'arms': spec[0]} for spec in FOUR_ARM_SPECS},
-    # The two offloading arms of the joint run with the full schedule (the local arms do not use the offloader).
+    # The two local-only arms (baseline-local, proposed-local) of the joint run with the default schedule.
+    'vertical-joint-local': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE,
+                             'arms': 'local'},
+    # The two offloading arms of the joint run with the default schedule (the local arms do not use the offloader).
     'vertical-joint-vertical': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE,
                                 'arms': 'vertical'},
     'vertical-smoke': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_SMOKE_SCHEDULE,
                        'phase_duration': 60.0, 'arms': 'vertical'},
     'vertical-mobility': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,
                           'phase_schedule': VERTICAL_MOBILITY_SCHEDULE},
+    'vertical-mobility-local': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,
+                                'phase_schedule': VERTICAL_MOBILITY_SCHEDULE, 'arms': 'local'},
+    'vertical-mobility-vertical': {**_VERTICAL_COMMON, 'comparison': 'placement', 'fixed_replicas': 9, 'no_hpa': True,
+                                   'phase_schedule': VERTICAL_MOBILITY_SCHEDULE, 'arms': 'vertical'},
     'scaling-staircase': {
         'config': 'experiments/campaign-mobility-core.yaml',
         'workload': 'pedestrian-detection',
@@ -115,7 +127,6 @@ PROFILES = {
         'scale_down_stabilization_seconds': 60,
         'phase_duration': 120.0,
         'rps_per_ue': 5.0,
-        'max_in_flight_per_ue': 8,
         'tc_ms': 10.0,
     },
 }

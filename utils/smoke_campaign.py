@@ -46,7 +46,6 @@ def build_campaign_args(args):
              '--phase-transition', 'continuous', '--config', str(args.config),
              '--slo-ms', str(args.slo_ms), '--tc-ms', str(args.tc_ms),
              '--rps-per-ue', str(args.rps_per_ue),
-             '--max-in-flight-per-ue', str(args.max_in_flight_per_ue),
              '--method-order', args.method_order]
     if args.profile == 'mobility':
         flags += ['--fixed-replicas', str(args.replicas)]
@@ -226,7 +225,6 @@ def main(argv=None):
     parser.add_argument('--slo-ms', type=float, default=150)
     parser.add_argument('--tc-ms', type=float, default=10)
     parser.add_argument('--rps-per-ue', type=float, default=5)
-    parser.add_argument('--max-in-flight-per-ue', type=int, default=8)
     parser.add_argument('--latency-floor-ms', type=int, default=None,
                         help='override the campaign latency floor in ms (0 uses raw RT/SLO)')
     parser.add_argument('--method-order', choices=('baseline-first', 'proposed-first', 'random'), default='baseline-first')
@@ -246,7 +244,7 @@ def main(argv=None):
         parser.error('use a fresh campaign name with letters, digits, hyphens or underscores')
     if any(not math.isfinite(v) or v <= 0 for v in (args.slo_ms, args.tc_ms, args.rps_per_ue)):
         parser.error('SLO, TC delay, and RPS must be finite and positive')
-    if min(args.replicas, args.min_replicas, args.max_replicas, args.max_in_flight_per_ue) < 1:
+    if min(args.replicas, args.min_replicas, args.max_replicas) < 1:
         parser.error('replica counts and maximum in-flight requests must be positive')
     if args.max_replicas < args.min_replicas:
         parser.error('max replicas must be at least min replicas')

@@ -72,8 +72,8 @@ def test_min_replicas_2_applies_to_both_methods_and_preserves_scaling_semantics(
     assert plan['replica_bounds'] == {'min': 2, 'max': 18}
     assert plan['rt_target_factor'] == 1.0
     assert plan['slo_ms'] == 150
-    assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
-    assert plan['phase_durations_s'] == [120.0] * 13
+    assert plan['pacing'] == {'rps_per_ue': 5.0}
+    assert plan['phase_durations_s'] == [120.0] * 7
 
 
 def test_min_replicas_2_with_rt_target_factor_and_campaign_yaml(tmp_path, monkeypatch):

@@ -5,10 +5,12 @@ import time
 
 from utils.ue_lifecycle import plan_assignments
 
+SAFETY_ABORT_IN_FLIGHT_PER_UE = 200
+
 
 def run_continuous_phases(phases, durations, lifecycle, images, assignments, urls,
-                          rps, max_in_flight, dispatch, emit, publisher_factory=None,
-                          initial_probe=None):
+                          rps, dispatch, emit, publisher_factory=None,
+                          initial_probe=None, *, safety_in_flight_limit=SAFETY_ABORT_IN_FLIGHT_PER_UE):
     plans, offsets = [], [0.0]
     previous = {}
     for phase, duration in zip(phases, durations):
@@ -63,7 +65,7 @@ def run_continuous_phases(phases, durations, lifecycle, images, assignments, url
 
     def check():
         if errors:
-            raise RuntimeError('continuous traffic worker failed') from errors[0]
+            raise RuntimeError(f'continuous traffic worker failed: {errors[0]}') from errors[0]
 
     def phase_start(pi):
         plan, phase = plans[pi], phases[pi]
@@ -73,8 +75,7 @@ def run_continuous_phases(phases, durations, lifecycle, images, assignments, url
                 'source_address': lifecycle.subscribers[i][plan[i]]['ip']}
                for i in order]
         emit({'event': 'phase_start', **phase, 'start_time': wall_start + offsets[pi],
-              'duration_s': durations[pi], 'rps_per_ue': rps,
-              'max_in_flight_per_ue': max_in_flight, 'ues': ues,
+              'duration_s': durations[pi], 'rps_per_ue': rps, 'ues': ues,
               'phase_transition': 'continuous',
               'switching': 'continuous-unaffected; moving UEs stop-and-reattach'})
         with condition:
@@ -120,7 +121,7 @@ def run_continuous_phases(phases, durations, lifecycle, images, assignments, url
 
     def scheduler(index):
         try:
-            with ThreadPoolExecutor(max_workers=max_in_flight) as pool:
+            with ThreadPoolExecutor(max_workers=safety_in_flight_limit) as pool:
                 futures = []
                 for pi, plan in enumerate(plans):
                     if index not in plan:
@@ -142,9 +143,14 @@ def run_continuous_phases(phases, durations, lifecycle, images, assignments, url
                             state = states[index]
                             session = state['session']
                             unavailable = session is None or session['site'] != plan[index]
-                            if unavailable or time.monotonic() > due + period * 0.25 or state['pending'] >= max_in_flight:
+                            if unavailable or time.monotonic() > due + period * 0.25:
                                 stat['missed'] += 1
                                 stat['transition_missed'] += int(unavailable)
+                            elif state['pending'] >= safety_in_flight_limit:
+                                raise RuntimeError(
+                                    f'open-loop safety abort: UE {index} reached {state["pending"]} '
+                                    f'in-flight requests (safety limit {safety_in_flight_limit})'
+                                )
                             else:
                                 state['pending'] += 1
                                 phase_pending[pi] += 1
@@ -184,7 +190,7 @@ def run_continuous_phases(phases, durations, lifecycle, images, assignments, url
                   'start_time': wall_start + offsets[pi], 'end_time': wall_start + offsets[pi + 1],
                   'drain_completed_time': time.time(),
                   'generation_duration_s': durations[pi], 'rps_per_ue': rps,
-                  'max_in_flight_per_ue': max_in_flight, 'attempts': totals['completed'],
+                  'attempts': totals['completed'],
                   'actual_start_rate': totals['started'] / durations[pi],
                   'request_coverage': totals['completed'] / totals['scheduled'] if totals['scheduled'] else None,
                   'per_ue': per_ue})

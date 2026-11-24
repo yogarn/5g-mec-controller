@@ -75,13 +75,15 @@ def test_joint_plan_limits_only_response_time_hpa_scale_down(tmp_path):
     campaign.main([
         '--config', 'experiments/campaign-vertical.yaml',
         '--scenario', 'mobility9', '--comparison', 'full', '--vertical-mode', 'four-arm',
-        '--site-anchors', '--latency-floor-ms', '125', '--asymmetric-latency',
+        '--site-anchors', '--latency-floor-ms', '120',
         '--proposed-scale-down-period-seconds', '15', '--scale-down-stabilization-seconds', '60',
         '--plan-only', str(output),
     ])
     adapter = yaml.safe_load((output / 'floor-adapter-configmap.yaml').read_text())
     rules = yaml.safe_load(adapter['data']['config.yaml'])['externalRules']
     assert not any('site_scale_down' in r.get('name', {}).get('as', '') for r in rules)
+    assert not any(str(r.get('name', {}).get('as', '')).startswith('ue_p90_asymmetric_') for r in rules)
+    assert any(r.get('name', {}).get('as') == 'ue_p90_excess_latency_120ms_seconds' for r in rules)
     for arm, method, _ in campaign.FOUR_ARM_SPECS:
         spec = yaml.safe_load((output / arm / f'{method}-hpa.yaml').read_text())['spec']
         if method == 'proposed':
@@ -90,8 +92,8 @@ def test_joint_plan_limits_only_response_time_hpa_scale_down(tmp_path):
                 'policies': [{'type': 'Pods', 'value': 1, 'periodSeconds': 15}],
             }
             assert len(spec['metrics']) == 1
-            assert spec['metrics'][0]['external']['metric']['name'] == 'ue_p90_asymmetric_125ms_target_150ms_seconds'
-            assert spec['metrics'][0]['external']['target'] == {'type': 'Value', 'value': '150m'}
+            assert spec['metrics'][0]['external']['metric']['name'] == 'ue_p90_excess_latency_120ms_seconds'
+            assert spec['metrics'][0]['external']['target'] == {'type': 'Value', 'value': '30m'}
         else:
             assert 'policies' not in spec['behavior']['scaleDown']
             assert len(spec['metrics']) == 1
@@ -253,7 +255,6 @@ def test_joint_campaign_has_symmetric_load_and_left_to_right_hotspot():
     totals = [p['workload_ue'] for p in phases]
     assert totals == [3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3]
     assert totals == list(reversed(totals))
-    assert totals == [p['workload_ue'] for p in parse_schedule(campaign.SCALER_STAIRCASE_SCHEDULE)]
     assert all(sum(c) == n for c, n in zip(counts, totals))
     # The dominant site moves right, with ties at the transition phases.
     dominant_sites = [c.index(max(c)) for c in counts[1:-1]]
@@ -400,7 +401,7 @@ def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
     assert metadata['method_order'] == [method_order.split('-')[0],
                                         'proposed' if method_order == 'baseline-first' else 'baseline']
     assert metadata['phase_durations_s'] == [120] * 10
-    assert metadata['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
+    assert metadata['pacing'] == {'rps_per_ue': 5.0}
     assert metadata['prefer_close'] is True
     assert metadata['provenance']['site_anchors'] is True
     assert metadata['site_anchor_nodes'] == {'gnb-1': 'core-5g', 'gnb-2': 'gnb-2', 'gnb-3': 'gnb-3'}
@@ -431,7 +432,13 @@ def test_steep_plan_schedule_and_site_anchor_budget(tmp_path, method_order):
         assert config['pod_share_scoring'] is True
         assert config['locality_weight'] == 0.4
     baseline = yaml.safe_load((plan / 'baseline-hpa.yaml').read_text())
-    assert baseline['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert baseline['spec']['metrics'] == [{
+        'type': 'External',
+        'external': {
+            'metric': {'name': 'mec_baseline_cpu_dynamic_replicas_fixed3'},
+            'target': {'type': 'AverageValue', 'averageValue': '1'},
+        },
+    }]
     proposed = yaml.safe_load((plan / 'proposed-hpa.yaml').read_text())
     assert proposed['spec']['metrics'][0]['external']['target']['value'] == '25m'
 
@@ -832,7 +839,9 @@ def test_incluster_go_with_hpa_applies_manifests_without_host_controller_process
         min_replicas=3 if site_anchors else None,
     )
 
-    assert not any('controller' in ' '.join(map(str, c)) for c in spawned)
+    # Match the module name after -m, not the full command line: the checkout path itself may contain 'controller'.
+    modules = [str(c[c.index('-m') + 1]) for c in spawned if '-m' in c]
+    assert modules and not any('controller' in m for m in modules)
     cm_file = run_root / 'proposed' / 'placement-configmap.yaml'
     assert any(args[:2] == ('apply', '-f') and str(cm_file) in args for args in kube_calls)
     assert any(args[:4] == ('-n', 'placement', 'rollout', 'restart') for args in kube_calls)
@@ -922,7 +931,7 @@ def test_mobility9_reverse_direction_reverses_schedule_and_records_metadata(tmp_
     campaign.main([
         '--scenario', 'mobility9', '--mobility-direction', 'reverse',
         '--fixed-replicas', '6', '--phase-duration', '90',
-        '--rps-per-ue', '4', '--max-in-flight-per-ue', '6',
+        '--rps-per-ue', '4',
         '--plan-only', str(output),
     ])
     plan = yaml.safe_load((output / 'plan.yaml').read_text())
@@ -934,7 +943,7 @@ def test_mobility9_reverse_direction_reverses_schedule_and_records_metadata(tmp_
     assert plan['phase_durations_s'] == [90.0] * 7
     assert plan['fixed_replicas'] == 6
     assert plan['replica_bounds'] == {'min': 6, 'max': 6}
-    assert plan['pacing'] == {'rps_per_ue': 4.0, 'max_in_flight_per_ue': 6}
+    assert plan['pacing'] == {'rps_per_ue': 4.0}
     parsed = campaign.parse_schedule(plan['schedule'])
     assert len(parsed) == 7
     assert all(p['workload_ue'] == 9 and (p['gnb1_ues'] + p['gnb2_ues'] + p['gnb3_ues']) == 9 for p in parsed)
@@ -956,7 +965,7 @@ def test_mobility9_long_run_extends_phases_with_fixed_budget_and_normal_timers(t
     assert plan['slo_ms'] == 150
     assert plan['tc_ms'] == 10
     assert plan['replica_bounds'] == {'min': 9, 'max': 9}
-    assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
+    assert plan['pacing'] == {'rps_per_ue': 5.0}
     cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
     assert cfg['deschedule_interval_seconds'] == 30
     for method in ('baseline', 'proposed'):
@@ -1034,28 +1043,23 @@ def test_arrival_rate_settings_propagate_across_standard_and_mobility9_plans(tmp
     campaign.main(['--plan-only', str(std_out)])
     std_plan = yaml.safe_load((std_out / 'plan.yaml').read_text())
     assert std_plan['campaign_settings']['rps_per_ue'] == 5.0
-    assert std_plan['campaign_settings']['max_in_flight_per_ue'] == 8
     remote_std = campaign.remote_settings(std_plan['campaign_settings'])
     assert remote_std['rps_per_ue'] == 5.0
-    assert remote_std['max_in_flight_per_ue'] == 8
 
     mob_out = tmp_path / 'mob'
     campaign.main(['--scenario', 'mobility9', '--fixed-replicas', '6',
-                   '--rps-per-ue', '3.5', '--max-in-flight-per-ue', '4',
+                   '--rps-per-ue', '3.5',
                    '--plan-only', str(mob_out)])
     mob_plan = yaml.safe_load((mob_out / 'plan.yaml').read_text())
     assert mob_plan['campaign_settings']['rps_per_ue'] == 3.5
-    assert mob_plan['campaign_settings']['max_in_flight_per_ue'] == 4
     remote_mob = campaign.remote_settings(mob_plan['campaign_settings'])
     assert remote_mob['rps_per_ue'] == 3.5
-    assert remote_mob['max_in_flight_per_ue'] == 4
 
 
 @pytest.mark.parametrize('flags', [
     ['--rps-per-ue', '0'],
     ['--rps-per-ue', '-1'],
     ['--rps-per-ue', 'nan'],
-    ['--max-in-flight-per-ue', '0'],
 ])
 def test_invalid_arrival_rate_flags_rejected(flags, monkeypatch):
     monkeypatch.setattr(campaign, 'prerequisites', lambda _: pytest.fail('cluster accessed'))
@@ -1070,9 +1074,9 @@ def test_staircase_plan_is_balanced_with_matched_bounded_hpas(tmp_path):
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     assert plan['comparison'] == 'scaling'
     steps = [list(map(int, s.split(':'))) for s in plan['schedule'].split(',')]
-    assert [s[0] for s in steps] == [3, 6, 9, 12, 15, 18, 24, 18, 15, 12, 9, 6, 3]
+    assert [s[0] for s in steps] == [3, 9, 15, 21, 24, 12, 3]
     assert all(s[1:] == [s[0] // 3] * 3 for s in steps)
-    assert plan['phase_durations_s'] == [120.0] * 12 + [600.0]
+    assert plan['phase_durations_s'] == [120.0] * 6 + [600.0]
     assert plan['hpa_behavior_profile'] == 'bounded-staircase'
     hpas = [yaml.safe_load((out / f'{m}-hpa.yaml').read_text()) for m in ('baseline', 'proposed')]
     assert hpas[0]['spec']['behavior'] == hpas[1]['spec']['behavior']
@@ -1139,7 +1143,7 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert plan['final_hold_seconds'] == 0
     assert plan['node_restriction'] == 'core-5g'
     assert plan['replica_bounds'] == {'min': 3, 'max': 24}
-    assert plan['pacing'] == {'rps_per_ue': 5.0, 'max_in_flight_per_ue': 8}
+    assert plan['pacing'] == {'rps_per_ue': 5.0}
     assert plan['hpa_targets'] == {
         'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
         'proposed': {'type': 'latency_p90_ms', 'target': 150},
@@ -1158,7 +1162,7 @@ def test_scaler_balanced_final_hold_and_overrides(tmp_path):
     out = tmp_path / 'scaler_hold'
     campaign.main([
         '--comparison', 'scaling', '--scenario', 'scaler-balanced', '--final-hold',
-        '--max-replicas', '12', '--tc-ms', '15', '--rps-per-ue', '4', '--max-in-flight-per-ue', '6',
+        '--max-replicas', '12', '--tc-ms', '15', '--rps-per-ue', '4',
         '--plan-only', str(out),
     ])
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
@@ -1166,7 +1170,7 @@ def test_scaler_balanced_final_hold_and_overrides(tmp_path):
     assert plan['final_hold_seconds'] == 360
     assert plan['replica_bounds'] == {'min': 3, 'max': 12}
     assert plan['tc_ms'] == 15.0
-    assert plan['pacing'] == {'rps_per_ue': 4.0, 'max_in_flight_per_ue': 6}
+    assert plan['pacing'] == {'rps_per_ue': 4.0}
     assert yaml.safe_load((out / 'baseline-hpa.yaml').read_text())['spec']['maxReplicas'] == 12
     assert yaml.safe_load((out / 'proposed-hpa.yaml').read_text())['spec']['maxReplicas'] == 12
 

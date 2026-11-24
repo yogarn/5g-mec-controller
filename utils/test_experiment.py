@@ -291,7 +291,7 @@ def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
     settings = {'campaign': 'campaign', 'method': 'hpa', 'site_urls': site_urls,
                 'image': 'image.jpg', 'inventory': 'ue.yaml', 'nr_ue': '/bin/nr-ue',
                 'schedule': '1:1:0:0', 'duration': 1,
-                'rps_per_ue': 7.5, 'max_in_flight_per_ue': 6,
+                'rps_per_ue': 7.5,
                 'telemetry_url': 'http://collector/observations', 'token': 'token'}
     captured = []
     def capture(args, **kwargs):
@@ -305,7 +305,7 @@ def test_campaign_ue_forwards_site_urls(tmp_path, monkeypatch):
     assert '--url' not in captured
     assert '--compact-response-log' in captured
     assert captured[captured.index('--rps-per-ue') + 1] == '7.5'
-    assert captured[captured.index('--max-in-flight-per-ue') + 1] == '6'
+    assert '--max-in-flight-per-ue' not in captured
     assert captured[captured.index('--telemetry-url') + 1] == settings['telemetry_url']
     assert captured[captured.index('--telemetry-token-file') + 1] == settings['token']
 
@@ -349,7 +349,7 @@ def test_fixed_rate_pacing_independent_of_response_duration():
     t = threading.Thread(target=releaser, daemon=True)
     t.start()
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.6, 5.0, 4,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.6, 5.0,
         dispatch_fn, emit, lambda _g: 'http://x/detect', _fake_images(), [0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -363,72 +363,34 @@ def test_fixed_rate_pacing_independent_of_response_duration():
     assert len([r for r in emitted if r['event'] == 'request']) == 3
 
 
-def test_fixed_rate_bounded_concurrency_and_missed_slots_without_catchup():
+def test_fixed_rate_safety_abort_triggers_at_in_flight_limit():
     clock = [0.0]
-    clock_lock = threading.Lock()
     gate = threading.Event()
-    reached_08 = threading.Event()
-    drained_before_08 = threading.Event()
-    active = 0
-    peak_active = 0
-    dispatched_offsets = []
 
     def monotonic_fn():
-        with clock_lock:
-            return clock[0]
+        return clock[0]
 
     def wait_fn(dt):
-        with clock_lock:
-            clock[0] += dt
-            cur = clock[0]
-        if cur >= 0.79:
-            reached_08.set()
-            drained_before_08.wait(timeout=2)
+        clock[0] += dt
         return False
 
     def dispatch_fn(group, source, ue_index, image):
-        nonlocal active, peak_active
-        with clock_lock:
-            active += 1
-            peak_active = max(peak_active, active)
-            dispatched_offsets.append(round(clock[0], 6))
         gate.wait(timeout=2)
-        with clock_lock:
-            active -= 1
         return {'success': True, 'http_status': 200, 'error': None, 'duration_ms': 100.0,
                 'start_time': 1.0, 'end_time': 1.1}
 
-    def release_later():
-        reached_08.wait(timeout=2)
-        while True:
-            with clock_lock:
-                if active == 2:
-                    break
-            time.sleep(0.001)
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=r'open-loop safety abort: UE 0 reached 2 in-flight requests \(safety limit 2\)',
+        ):
+            experiment.run_fixed_rate_phase(
+                'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0,
+                dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
+                monotonic_fn=monotonic_fn, wait_fn=wait_fn, safety_in_flight_limit=2,
+            )
+    finally:
         gate.set()
-        while True:
-            with clock_lock:
-                if active == 0:
-                    break
-            time.sleep(0.001)
-        drained_before_08.set()
-
-    t = threading.Thread(target=release_later, daemon=True)
-    t.start()
-    per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 2,
-        dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
-        monotonic_fn=monotonic_fn, wait_fn=wait_fn,
-    )
-    t.join(timeout=2)
-    assert peak_active == 2
-    # Slots: 0.0 (started), 0.2 (started), 0.4 (missed), 0.6 (missed), 0.8 (started after unblock, no catch-up burst)
-    assert per_ue[0]['scheduled'] == 5
-    assert per_ue[0]['started'] == 3
-    assert per_ue[0]['completed'] == 3
-    assert per_ue[0]['missed'] == 2
-    assert dispatched_offsets[0] == 0.0 and dispatched_offsets[1] == 0.2
-    assert dispatched_offsets[2] == 0.8
 
 
 def test_fixed_rate_scheduling_lag_skips_without_catchup_burst():
@@ -454,7 +416,7 @@ def test_fixed_rate_scheduling_lag_skips_without_catchup_burst():
                 'start_time': 1.0, 'end_time': 1.001}
 
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 4,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0,
         dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -486,7 +448,7 @@ def test_fixed_rate_staggered_starts_across_ues():
 
     selected = [('gnb-1', '10.0.0.1', 0), ('gnb-2', '10.0.0.2', 1), ('gnb-3', '10.0.0.3', 2)]
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', selected, 0.4, 5.0, 4,
+        'phase_01', selected, 0.4, 5.0,
         dispatch_fn, emit, lambda _g: 'http://x/detect', _fake_images(), [0, 0, 0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -523,7 +485,7 @@ def test_fixed_rate_phase_end_drains_in_flight_before_returning():
     t = threading.Thread(target=release_after_phase_end, daemon=True)
     t.start()
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.2, 5.0, 2,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.2, 5.0,
         dispatch_fn, emitted.append, lambda _g: 'http://x/detect', _fake_images(), [0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -546,7 +508,7 @@ def test_fixed_rate_cancellation_stops_without_waiting_for_phase_end():
 
     start = time.monotonic()
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 30.0, 5.0, 2,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 30.0, 5.0,
         dispatch_fn, lambda _r: None, lambda _g: 'http://x/detect', _fake_images(), [0],
         cancelled=cancelled,
     )
@@ -560,8 +522,6 @@ def test_fixed_rate_cancellation_stops_without_waiting_for_phase_end():
     {'rps_per_ue': 0},
     {'rps_per_ue': -5},
     {'rps_per_ue': float('nan')},
-    {'max_in_flight_per_ue': 0},
-    {'max_in_flight_per_ue': True},
 ])
 def test_invalid_rps_or_concurrency_rejected_before_results(tmp_path, kwargs):
     args = argparse.Namespace(url='http://127.0.0.1:30000/detect', site_urls=None,
@@ -612,7 +572,7 @@ def test_fixed_rate_expired_queued_tasks_count_as_missed(monkeypatch):
                 'start_time': 1.0, 'end_time': 1.001}
 
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 8,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0,
         dispatch_fn, emitted.append, lambda _g: 'http://x/detect', _fake_images(), [0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -675,7 +635,7 @@ def test_fixed_rate_slow_emit_does_not_bypass_worker_deadline():
     t = threading.Thread(target=advance_and_release, daemon=True)
     t.start()
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.30, 5.0, 4,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 0.30, 5.0,
         dispatch_fn, slow_emit, lambda _g: 'http://x/detect', _fake_images(), [0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -715,7 +675,7 @@ def test_fixed_rate_delayed_slot_039_skipped_without_compressed_follow_up():
                 'start_time': 1.0, 'end_time': 1.001}
 
     per_ue = experiment.run_fixed_rate_phase(
-        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0, 8,
+        'phase_01', [('gnb-1', '10.0.0.1', 0)], 1.0, 5.0,
         dispatch_fn, emitted.append, lambda _g: 'http://x/detect', _fake_images(), [0],
         monotonic_fn=monotonic_fn, wait_fn=wait_fn,
     )
@@ -736,7 +696,7 @@ def test_phase_durations_records_actual_final_hold_without_extra_phases(tmp_path
     def fake_attempt(url, method, body, headers, source, timeout, *, response_contract='http'):
         return {'success': True}
 
-    def fake_run_phase(phase_name, selected, phase_duration, rps_per_ue, max_in_flight_per_ue,
+    def fake_run_phase(phase_name, selected, phase_duration, rps_per_ue,
                        dispatch_fn, emit, url_for_group, images, assignments, cancelled=None):
         calls.append((phase_name, phase_duration))
         scheduled = int(round(phase_duration * rps_per_ue))
@@ -759,7 +719,7 @@ def test_phase_durations_records_actual_final_hold_without_extra_phases(tmp_path
         url='http://127.0.0.1/detect', image=str(image),
         ue_config='ue.yaml', nr_ue='/bin/nr-ue',
         phase_schedule='3:1:1:1,3:1:1:1', phase_duration=60.0,
-        phase_durations='60,420', rps_per_ue=5.0, max_in_flight_per_ue=8,
+        phase_durations='60,420', rps_per_ue=5.0,
         timeout=1, output_dir=str(tmp_path / 'run'), armed=True,
     )
     monkeypatch.setattr(experiment, 'OwnedUELifecycle', FakeUEs)

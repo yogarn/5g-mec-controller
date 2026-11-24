@@ -6,7 +6,7 @@ import time
 import pytest
 
 from benchmark.client import parse_schedule
-from utils.continuous_traffic import run_continuous_phases
+from utils.continuous_traffic import SAFETY_ABORT_IN_FLIGHT_PER_UE, run_continuous_phases
 from utils.summarize import summarize
 from utils.ue_lifecycle import ContinuousUELifecycle, plan_assignments
 
@@ -73,7 +73,7 @@ def test_unaffected_ue_sends_through_move_and_windows_reconcile(tmp_path):
     run_continuous_phases(phases, [0.6, 0.8], lifecycle,
                           [{'filename': 'image.jpg'}], [0, 0],
                           {f'gnb-{s}': f'http://site{s}/detect' for s in range(1, 4)},
-                          10, 2, dispatch, emit)
+                          10, dispatch, emit)
     assert lifecycle.moves == [0, 1, 1]
     move_start, move_end = lifecycle.intervals[0]
     assert any(source == '10.1.0.1' and move_start < when < move_end for source, when in calls)
@@ -110,7 +110,7 @@ def test_dispatch_failure_stops_all_pacers_and_closes_publishers():
     with pytest.raises(RuntimeError, match='worker failed'):
         run_continuous_phases(parse_schedule('1:1:0:0'), [0.3], lifecycle,
                               [{'filename': 'image.jpg'}], [0], {'gnb-1': 'http://site/detect'},
-                              10, 1, fail, lambda record: None, publisher_factory)
+                              10, fail, lambda record: None, publisher_factory)
     assert publishers and all(p.closed for p in publishers)
 
 
@@ -133,7 +133,7 @@ def test_inflight_requests_can_finish_after_next_phase_starts(tmp_path):
     run_continuous_phases(parse_schedule('2:2:0:0,2:1:1:0'), [0.5, 0.5], lifecycle,
                           [{'filename': 'image.jpg'}], [0, 0],
                           {'gnb-1': 'http://one/detect', 'gnb-2': 'http://two/detect'},
-                          5, 2, dispatch, records.append)
+                          5, dispatch, records.append)
     next_start = next(i for i, r in enumerate(records) if r['event'] == 'phase_start' and r['phase'] == 'phase_02')
     assert any(i > next_start and r['event'] == 'request' and r['phase'] == 'phase_01'
                for i, r in enumerate(records))
@@ -155,7 +155,7 @@ def test_removed_ue_stops_without_restarting_remaining_ues():
     run_continuous_phases(parse_schedule('3:1:1:1,2:1:1:0'), [0.2, 0.3], lifecycle,
                           [{'filename': 'image.jpg'}], [0, 0, 0],
                           {f'gnb-{i}': f'http://site{i}/detect' for i in (1, 2, 3)},
-                          10, 1, dispatch, records.append)
+                          10, dispatch, records.append)
     assert lifecycle.moves == [0, 1, 2, 2]
     assert not any(r['event'] == 'request' and r['phase'] == 'phase_02' and r['ue_index'] == 2 for r in records)
 
@@ -192,7 +192,7 @@ def test_moving_ue_drains_its_requests_while_stable_ue_continues():
     run_continuous_phases(parse_schedule('2:2:0:0,2:1:1:0'), [0.6, 0.8], lifecycle,
                           [{'filename': 'image.jpg'}], [0, 0],
                           {'gnb-1': 'http://one/detect', 'gnb-2': 'http://two/detect'},
-                          5, 2, dispatch, lambda record: None)
+                          5, dispatch, lambda record: None)
     start, end = lifecycle.intervals[0]
     assert any(source == '10.1.0.1' and start < when < end for source, when in calls)
 
@@ -258,9 +258,66 @@ def test_experiment_entrypoint_records_continuous_mode_and_separate_transitions(
     experiment.run(Namespace(
         phase_transition='continuous', phase_schedule='2:2:0:0,2:1:1:0',
         phase_duration=.3, phase_durations=None, armed=True, timeout=1,
-        rps_per_ue=10, max_in_flight_per_ue=1, url='http://site/detect',
+        rps_per_ue=10, url='http://site/detect',
         image=str(image), output_dir=str(output), ue_config='unused', nr_ue='/bin/true'))
     assert json.loads((output / 'run.json').read_text())['phase_transition'] == 'continuous'
     assert (output / 'ue-transitions.jsonl').exists()
     assert len(summarize(output / 'requests.jsonl', 150)) == 2
     assert instances[0].closed
+
+
+def test_open_loop_slow_replies_2s_at_5rps_never_skip_slots():
+    lifecycle = FakeLifecycle(delay=0)
+    records = []
+    lock = threading.Lock()
+    in_flight = 0
+    peak_in_flight = 0
+
+    def dispatch(url, image, source, publisher):
+        nonlocal in_flight, peak_in_flight
+        start = time.time()
+        with lock:
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+        time.sleep(2.0)
+        with lock:
+            in_flight -= 1
+        return dict(success=True, duration_ms=(time.time() - start) * 1000,
+                    http_status=200, error=None, start_time=start, end_time=time.time())
+
+    # 1 UE at 5 RPS for 2.4s -> 12 scheduled slots; with 2.0s reply time, peak concurrency > 8 (no cap).
+    run_continuous_phases(parse_schedule('1:1:0:0'), [2.4], lifecycle,
+                          [{'filename': 'image.jpg'}], [0],
+                          {'gnb-1': 'http://site1/detect'},
+                          5.0, dispatch, records.append)
+    end = next(r for r in records if r['event'] == 'phase_end')
+    assert peak_in_flight >= 9
+    assert end['scheduled'] == 12
+    assert end['completed'] == 12
+    assert end['missed'] == 0
+    assert end['request_coverage'] == 1.0
+
+
+def test_open_loop_safety_abort_triggers_at_limit():
+    assert SAFETY_ABORT_IN_FLIGHT_PER_UE == 200
+    lifecycle = FakeLifecycle(delay=0)
+    release = threading.Event()
+
+    def wedged_dispatch(url, image, source, publisher):
+        release.wait(timeout=5.0)
+        now = time.time()
+        return dict(success=True, duration_ms=10.0, http_status=200, error=None,
+                    start_time=now, end_time=now + 0.01)
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=r'open-loop safety abort: UE 0 reached 3 in-flight requests \(safety limit 3\)',
+        ):
+            run_continuous_phases(parse_schedule('1:1:0:0'), [2.0], lifecycle,
+                                  [{'filename': 'image.jpg'}], [0],
+                                  {'gnb-1': 'http://site1/detect'},
+                                  50.0, wedged_dispatch, lambda _r: None,
+                                  safety_in_flight_limit=3)
+    finally:
+        release.set()

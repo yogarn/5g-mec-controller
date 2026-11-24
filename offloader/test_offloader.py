@@ -1116,9 +1116,9 @@ def test_four_arm_budget_and_native_hpa_plan(tmp_path):
     assert [p4['arm_budgets'][arm]['initial_total_replicas'] for arm, _, _ in campaign.FOUR_ARM_SPECS] == [3, 3, 6, 6]
     assert p4['autoscaler'] == 'hpa'
     assert p4['hpa_targets']['baseline']['target'] == 80
-    assert p4['hpa_targets']['proposed']['type'] == 'asymmetric_latency_p90_ms'
-    assert p4['rt_metric_name'] == 'ue_p90_asymmetric_120ms_target_150ms_seconds'
-    assert p4['rt_hpa_target_value'] == '150m'
+    assert p4['hpa_targets']['proposed']['type'] == 'excess_latency_p90_ms'
+    assert p4['rt_metric_name'] == 'ue_p90_excess_latency_120ms_seconds'
+    assert p4['rt_hpa_target_value'] == '30m'
     assert p4['pod_share_scoring'] is True
     assert p4['deschedule_min_score_improvement'] == 0.05
     assert (plan_four / 'floor-adapter-configmap.yaml').is_file()
@@ -1404,6 +1404,7 @@ def test_cleanup_mid_transition_failure_ctrl_c_and_restore_error(tmp_path, monke
     monkeypatch.setattr(campaign, 'check_node_capacity', lambda *a, **k: None)
     monkeypatch.setattr(campaign, '_wait_initial_replicas_ready', lambda *a, **k: None)
     monkeypatch.setattr(campaign, '_wait_site_anchor_endpoints', lambda *a, **k: None)
+    monkeypatch.setattr(campaign, '_wait_external_metric_ready', lambda *a, **k: [{'value': '0'}])
     monkeypatch.setattr(campaign, 'check_service_routing', lambda *a, **k: None)
     monkeypatch.setattr(campaign, 'fetch_offloader_artifacts', lambda *a, **k: None)
     monkeypatch.setattr(campaign, 'get', lambda kind, name, ns=campaign.NAMESPACE: {'spec': {'ports': [{'nodePort': 30500}], 'replicas': 2}, 'status': {'readyReplicas': 1}})

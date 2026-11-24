@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live demo of one experiment arm with real UEs and the real 11-phase hotspot schedule (about 30 minutes).
+# Live demo of one experiment arm with real UEs and the final 7-phase joint schedule (7 x 120 s = 14 min of traffic, plus setup).
 #   ./demo.sh baseline-local | baseline-vertical | proposed-local | proposed-vertical   run one arm
 #   ./demo.sh status                                                                     live view (second terminal)
 #   ./demo.sh stop                                                                       stop the run and clean up

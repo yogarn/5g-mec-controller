@@ -6,7 +6,7 @@ profiles from experiments.profiles before applying explicit CLI overrides.
 import argparse
 from pathlib import Path
 
-from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
+from utils.experiment import DEFAULT_RPS_PER_UE
 
 from experiments.profiles import (
     ARM_SELECTIONS,
@@ -34,7 +34,7 @@ def _build_parser():
     parser.add_argument('campaign', nargs='?', help='new result name, for example run_2')
     parser.add_argument('--workload', choices=WORKLOADS, default=None,
                         help='workload to deploy and monitor (default: campaign config or pedestrian-detection)')
-    parser.add_argument('--scenario', choices=['mobility9', *SCALER_SCENARIOS],
+    parser.add_argument('--scenario', choices=['joint', 'mobility9', *SCALER_SCENARIOS],
                         help='mobility9: 9 UEs shifting across gNBs (7 phases); scaler-balanced: legacy steps; scaler-staircase: gradual balanced steps on core-5g')
     parser.add_argument('--mobility-direction', choices=('forward', 'reverse'), default=None,
                         help='mobility9 only: UE hotspot trajectory direction (forward or reverse; default: forward)')
@@ -104,8 +104,6 @@ def _build_parser():
                                   help='traffic seconds per phase (minimum 60; default: 120 for all full experiments; joint reads campaign config; 60 with --debug)')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE,
                         help='target request arrival rate per active UE in requests/second (default: 5)')
-    parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE,
-                        help='maximum concurrent in-flight requests per UE (default: 8)')
     parser.add_argument('--resource-weights', nargs=2, type=float,
                         metavar=('CPU', 'MEMORY'),
                         help='proposed resource-score weights, nonnegative and summing to 1')

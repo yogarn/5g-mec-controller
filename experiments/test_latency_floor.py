@@ -21,7 +21,7 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     assert plan['slo_ms'] == 150
     assert plan['latency_floor_ms'] == 130
     assert plan['latency_scaling_formula'] == 'max(RT-floor, 0)/(SLO-floor)'
-    assert plan['phase_durations_s'] == [120.0] * 13
+    assert plan['phase_durations_s'] == [120.0] * 7
     assert plan['final_hold_seconds'] == 0
     cm = yaml.safe_load((out / 'floor-adapter-configmap.yaml').read_text())
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
@@ -144,3 +144,11 @@ def test_asymmetric_hpa_plan(tmp_path, flags, stabilization):
     assert '(120 / 30' in query
     assert '- 0.15, 0)' in query
     assert 'ue_request_window_complete' not in query
+
+
+def test_floor_adapter_config_prunes_orphan_asymmetric_rules():
+    base = campaign._floor_adapter_config(125, asymmetric_target_ms=150)
+    with_both = campaign._floor_adapter_config(120, base, asymmetric_target_ms=150)
+    cleaned = campaign._floor_adapter_config(120, with_both)
+    names = [r['name']['as'] for r in yaml.safe_load(cleaned['data']['config.yaml'])['externalRules']]
+    assert names == ['ue_p90_latency_seconds', 'ue_p90_excess_latency_120ms_seconds']

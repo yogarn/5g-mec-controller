@@ -35,7 +35,7 @@ from benchmark.client import parse_schedule
 from offloader.budget import VerticalBudget
 from utils.traffic_control import POOL_NAME, TrafficDelay
 from utils.config import validate_resource_weights
-from utils.experiment import DEFAULT_MAX_IN_FLIGHT_PER_UE, DEFAULT_RPS_PER_UE
+from utils.experiment import DEFAULT_RPS_PER_UE
 
 from experiments.profiles import (
     APP,
@@ -88,6 +88,9 @@ from experiments.profiles import (
     _VERTICAL_FULL,
 )
 from experiments.manifests import (
+    DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS,
+    _baseline_cpu_adapter_rule,
+    _baseline_cpu_metric_name,
     _campaign_manifest,
     _container_requests,
     _decimal_to_number,
@@ -110,6 +113,10 @@ from experiments.manifests import (
     _workload_http_threads,
     check_service_routing,
     selected_workload,
+    _core_backend_manifest,
+    _workload_container_name,
+    _workload_cpu_request_cores,
+    verify_matching_pod_cpu_requests,
     workload_identity,
     workload_manifest,
 )
@@ -188,8 +195,7 @@ def remote_settings(settings):
     result = {k: settings[k] for k in ('inventory', 'nr_ue', 'token', 'image', 'telemetry_url')} | {
         'max_ues': max(p['workload_ue'] for p in parse_schedule(settings['schedule'])),
         'gnb1_dnn': dnn, 'gnb1_subnet': subnet,
-        'rps_per_ue': float(settings.get('rps_per_ue', DEFAULT_RPS_PER_UE)),
-        'max_in_flight_per_ue': int(settings.get('max_in_flight_per_ue', DEFAULT_MAX_IN_FLIGHT_PER_UE))}
+        'rps_per_ue': float(settings.get('rps_per_ue', DEFAULT_RPS_PER_UE))}
     if local_gnb1:
         result['gnb2_dnn'], result['gnb2_subnet'] = LOCAL_GNB2_SESSION
         result['gnb3_dnn'], result['gnb3_subnet'] = LOCAL_GNB3_SESSION
@@ -456,10 +462,14 @@ def transfer(settings, campaign, method, output):
     print(f'{method}: raw request checksum verified {local_hash}', flush=True)
 
 
-def _prepare_floor_adapter(root, floor_ms, unit='seconds', asymmetric_target_ms=None):
+def _prepare_floor_adapter(root, floor_ms, unit='seconds', asymmetric_target_ms=None,
+                           baseline_cpu_rules=None):
     """Install the selected rule before either method; no workload or traffic here."""
     current = get('configmap', 'prometheus-adapter-config', PLACEMENT_NAMESPACE)
-    desired = _floor_adapter_config(floor_ms, current, unit=unit, asymmetric_target_ms=asymmetric_target_ms)
+    desired = _floor_adapter_config(
+        floor_ms, current, unit=unit, asymmetric_target_ms=asymmetric_target_ms,
+        baseline_cpu_rules=baseline_cpu_rules,
+    )
     filename = 'floor-adapter-configmap.yaml' if floor_ms else 'latency-adapter-configmap.yaml'
     path = root / filename
     path.write_text(yaml.safe_dump(desired, sort_keys=False))
@@ -574,6 +584,38 @@ def _query_external_latency_metric(allow_not_found=False, metric_name='ue_p90_la
     if not items:
         return [] if allow_not_found else None
     return items
+
+
+def _query_external_metric(metric_name, allow_not_found=False):
+    """Query a namespace-scoped external metric without a label selector."""
+    path = f'/apis/external.metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/{metric_name}'
+    try:
+        raw = kube('get', '--raw', path, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as exc:
+        detail = ((exc.stderr or '') + '\n' + (exc.stdout or '')).lower()
+        if allow_not_found and ('notfound' in detail or 'not found' in detail):
+            return None
+        raise
+    payload = json.loads(raw)
+    items = payload.get('items') or []
+    if not items:
+        return [] if allow_not_found else None
+    return items
+
+
+def _wait_external_metric_ready(metric_name, *, arm_name='baseline', timeout=45, poll_interval=3):
+    """Wait for prometheus-adapter to expose metric_name with a value before HPA creation."""
+    deadline = time.monotonic() + timeout
+    while True:
+        items = _query_external_metric(metric_name, allow_not_found=True)
+        if items and any(item.get('value') is not None for item in items):
+            return items
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f'{arm_name}: external metric {metric_name} did not return a value from '
+                f'prometheus-adapter within {timeout}s; aborting arm'
+            )
+        time.sleep(poll_interval)
 
 
 def check_node_capacity(node_name, manifest_path, max_replicas, workload_app=None):
@@ -784,6 +826,10 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                 if vertical_active or hpa_path is not None or settings.get('no_hpa', False):
                     kube('apply', '-f', config['manifest'])
                 if hpa_path is not None:
+                    if method == 'baseline' and comparison == 'full' and settings.get('site_anchors', False):
+                        n_fixed = (vertical_budget.fixed_replicas if vertical_budget is not None
+                                   else len(_site_anchor_nodes(settings.get('edge_only', False), _site_nodes(settings))))
+                        _wait_external_metric_ready(_baseline_cpu_metric_name(n_fixed), arm_name=arm_name)
                     kube('apply', '-f', hpa_path)
                 seed_managed = (
                     settings.get('site_anchors', False)
@@ -1003,16 +1049,16 @@ def main(argv=None):
     if args.prefer_close_routing_only:
         args.prefer_close = True
     if args.long_run:
-        if args.scenario != 'mobility9':
+        if args.scenario not in ('mobility9', 'joint'):
             parser.error('--long-run requires --scenario mobility9')
         args.phase_duration = MOBILITY_PHASE_SECONDS
-    if args.mobility_direction is not None and args.scenario != 'mobility9':
+    if args.mobility_direction is not None and args.scenario not in ('mobility9', 'joint'):
         parser.error('--mobility-direction requires --scenario mobility9')
-    mobility_direction = (args.mobility_direction or 'forward') if args.scenario == 'mobility9' else None
+    mobility_direction = (args.mobility_direction or 'forward') if args.scenario in ('mobility9', 'joint') else None
     if args.fixed_replicas is not None:
         if args.fixed_replicas < 1:
             parser.error('--fixed-replicas must be a positive integer')
-        if args.scenario != 'mobility9':
+        if args.scenario not in ('mobility9', 'joint'):
             parser.error('--fixed-replicas requires --scenario mobility9')
         if args.max_replicas is not None:
             parser.error('use --fixed-replicas without --max-replicas')
@@ -1064,7 +1110,7 @@ def main(argv=None):
         args.prefer_close = not args.cluster_wide
     if args.final_hold and args.scenario not in SCALER_SCENARIOS:
         parser.error('--final-hold requires a scaling scenario')
-    if args.scenario == 'mobility9':
+    if args.scenario in ('mobility9', 'joint'):
         if args.debug:
             parser.error('mobility9 uses standard HPA timers; omit --debug')
         if args.autoscaler != 'hpa' or args.placement_engine != 'go':
@@ -1113,8 +1159,6 @@ def main(argv=None):
             if args.autoscaler == 'hpa' and (args.comparison == 'full' or args.scenario == 'scaler-staircase')
             else 0
         )
-    if args.vertical_mode != 'off' and args.latency_floor_ms > 0:
-        args.asymmetric_latency = True
     if args.latency_floor_ms < 0:
         parser.error('--latency-floor-ms must be nonnegative')
     if args.asymmetric_latency and (
@@ -1136,16 +1180,13 @@ def main(argv=None):
         parser.error('--phase-duration must be finite and at least 60 seconds')
     if not math.isfinite(args.rps_per_ue) or args.rps_per_ue <= 0:
         parser.error('--rps-per-ue must be finite and positive')
-    if args.max_in_flight_per_ue < 1:
-        parser.error('--max-in-flight-per-ue must be a positive integer')
     os.chdir(ROOT)
     os.environ.setdefault('KUBECONFIG', '/etc/rancher/k3s/k3s.yaml')
     settings = load(args.config)
     site_nodes = _site_nodes(settings)
     settings['rps_per_ue'] = float(args.rps_per_ue)
-    settings['max_in_flight_per_ue'] = args.max_in_flight_per_ue
     settings['phase_transition'] = args.phase_transition
-    if args.scenario == 'mobility9':
+    if args.scenario in ('mobility9', 'joint'):
         mobility_phases = (args.phase_schedule or MOBILITY9_SCHEDULE).split(',')
         if mobility_direction == 'reverse':
             mobility_phases = list(reversed(mobility_phases))
@@ -1159,7 +1200,7 @@ def main(argv=None):
                         phase_duration=SCALER_PHASE_SECONDS)
     if args.phase_schedule is not None:
         parse_schedule(args.phase_schedule)
-        if args.scenario != 'mobility9':
+        if args.scenario not in ('mobility9', 'joint'):
             settings['schedule'] = args.phase_schedule
     workload = args.workload if args.workload is not None else selected_workload(settings)
     if spill_enabled and workload != 'pedestrian-detection':
@@ -1385,6 +1426,64 @@ def main(argv=None):
         managed_min = vertical_budget.dynamic_min
         managed_max = vertical_budget.dynamic_max
     use_hpa_metadata = not args.no_hpa
+    baseline_cpu_rules = None
+    if args.comparison == 'full' and args.site_anchors and not args.no_hpa:
+        core_manifest_path = _core_backend_manifest()
+        pod_request_cores = verify_matching_pod_cpu_requests(
+            workload_manifest(workload),
+            core_manifest=core_manifest_path if (vertical_active and core_manifest_path.exists()) else None,
+        )
+        container_name = _workload_container_name(workload)
+        pod_prefix = workload_identity(workload)
+        if args.vertical_mode == 'four-arm':
+            n_fixed_values = sorted({
+                arm_budgets_obj[arm].fixed_replicas
+                for arm, method_name, _ in ARM_SELECTIONS[args.arms]
+                if method_name == 'baseline'
+            })
+            baseline_metrics = {
+                arm: _baseline_cpu_metric_name(arm_budgets_obj[arm].fixed_replicas)
+                for arm, method_name, _ in ARM_SELECTIONS[args.arms]
+                if method_name == 'baseline'
+            }
+            hpa_targets['baseline'] = {
+                'type': 'external_cpu_dynamic_replicas',
+                'target': args.cpu_hpa_target,
+                'average_value': '1',
+                'pod_request_cores': float(pod_request_cores),
+                'rate_window_seconds': DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS,
+                'metrics_by_arm': baseline_metrics,
+            }
+        elif vertical_active:
+            n_fixed_values = [vertical_budget.fixed_replicas]
+            hpa_targets['baseline'] = {
+                'type': 'external_cpu_dynamic_replicas',
+                'target': args.cpu_hpa_target,
+                'average_value': '1',
+                'pod_request_cores': float(pod_request_cores),
+                'rate_window_seconds': DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS,
+                'metric': _baseline_cpu_metric_name(vertical_budget.fixed_replicas),
+            }
+        else:
+            n_fixed_values = [len(anchor_sites)]
+            hpa_targets['baseline'] = {
+                'type': 'external_cpu_dynamic_replicas',
+                'target': args.cpu_hpa_target,
+                'average_value': '1',
+                'pod_request_cores': float(pod_request_cores),
+                'rate_window_seconds': DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS,
+                'metric': _baseline_cpu_metric_name(len(anchor_sites)),
+            }
+        baseline_cpu_rules = [
+            _baseline_cpu_adapter_rule(
+                n_fixed,
+                cpu_hpa_target=args.cpu_hpa_target,
+                pod_request_cores=pod_request_cores,
+                container=container_name,
+                pod_prefix=pod_prefix,
+            )
+            for n_fixed in n_fixed_values
+        ]
     shared_metadata = {
         'workload': workload,
         'vertical_mode': args.vertical_mode,
@@ -1458,7 +1557,7 @@ def main(argv=None):
         'prefer_close_routing_only': args.prefer_close_routing_only,
         'pod_share_scoring': settings['pod_share_scoring'],
         'replica_bounds': {'min': min_replicas, 'max': max_replicas},
-        'pacing': {'rps_per_ue': float(args.rps_per_ue), 'max_in_flight_per_ue': args.max_in_flight_per_ue},
+        'pacing': {'rps_per_ue': float(args.rps_per_ue)},
         'tc_ms': args.tc_ms,
         'resource_measurement': {
             'source': 'prometheus-cadvisor',
@@ -1541,10 +1640,13 @@ def main(argv=None):
                             site_anchors=args.site_anchors, edge_only=args.edge_only, site_nodes=site_nodes,
                             base_manifest=output / 'workload.yaml', vertical_budget=arm_budgets_obj.get(arm),
                             proposed_scale_down_period_seconds=args.proposed_scale_down_period_seconds)
-        if args.latency_floor_ms or metric_unit == 'milliseconds':
+        if args.latency_floor_ms or metric_unit == 'milliseconds' or baseline_cpu_rules:
             adapter_filename = 'floor-adapter-configmap.yaml' if args.latency_floor_ms else 'latency-adapter-configmap.yaml'
             (output / adapter_filename).write_text(
-                yaml.safe_dump(_floor_adapter_config(args.latency_floor_ms, unit=metric_unit, asymmetric_target_ms=asymmetric_target_ms), sort_keys=False))
+                yaml.safe_dump(_floor_adapter_config(
+                    args.latency_floor_ms, unit=metric_unit, asymmetric_target_ms=asymmetric_target_ms,
+                    baseline_cpu_rules=baseline_cpu_rules,
+                ), sort_keys=False))
         (output / 'plan.yaml').write_text(yaml.safe_dump(shared_metadata | {
             'calibrated': False,
             'warning': 'offline preview only; image digest, dataset, resource sizes, and HPA target require validation',
@@ -1606,7 +1708,7 @@ def main(argv=None):
         if args.comparison == 'full':
             target_label = 'Baseline CPU HPA target'
             print(f'{target_label}: {args.cpu_hpa_target}% of CPU requests.', flush=True)
-        if args.scenario == 'mobility9':
+        if args.scenario in ('mobility9', 'joint'):
             trajectory = ' -> '.join(':'.join(str(p[f'gnb{s}_ues']) for s in (1, 2, 3)) for p in phases)
             print(f'Mobility scenario ({mobility_direction}): UE splits {trajectory}. '
                   f'Descheduler checks every {args.deschedule_interval:g}s; evictions require settled Pods and a score gain of at least 0.05 in Go placement. '
@@ -1658,20 +1760,25 @@ def main(argv=None):
                 check_node_capacity(SCALER_NODE, root / 'workload.yaml', max_replicas, app_id)
             if args.asymmetric_latency:
                 print(f'Asymmetric latency HPA: {scaling_formula}; metric {metric_name}, target {hpa_target_value}.', flush=True)
-                _prepare_floor_adapter(root, args.latency_floor_ms, unit=metric_unit, asymmetric_target_ms=asymmetric_target_ms)
+                adapter_kw = {'baseline_cpu_rules': baseline_cpu_rules} if baseline_cpu_rules else {}
+                _prepare_floor_adapter(root, args.latency_floor_ms, unit=metric_unit, asymmetric_target_ms=asymmetric_target_ms, **adapter_kw)
             elif args.latency_floor_ms:
                 print(f'Exploratory floor-adjusted HPA: fixed reference {args.latency_floor_ms}ms, '
                       f'internal RT scaling target {internal_target_ms:g}ms (factor {args.rt_target_factor:g}), '
                       f'excess target {effective_metric_target_ms:g}ms (metric {metric_name}, target {hpa_target_value}). '
                       f'Reporting SLO remains {slo_ms:g}ms.', flush=True)
-                _prepare_floor_adapter(root, args.latency_floor_ms, unit=metric_unit)
+                adapter_kw = {'baseline_cpu_rules': baseline_cpu_rules} if baseline_cpu_rules else {}
+                _prepare_floor_adapter(root, args.latency_floor_ms, unit=metric_unit, **adapter_kw)
             elif args.rt_target_factor != 1.0 or metric_unit == 'milliseconds':
                 print(f'Proposed RT HPA: internal scaling target {internal_target_ms:g}ms '
                       f'(reporting SLO {slo_ms:g}ms * factor {args.rt_target_factor:g}; '
                       f'metric {metric_name}, target {hpa_target_value}). '
                       f'Reporting SLO remains {slo_ms:g}ms.', flush=True)
-                if metric_unit == 'milliseconds':
-                    _prepare_floor_adapter(root, 0, unit=metric_unit)
+                if metric_unit == 'milliseconds' or baseline_cpu_rules:
+                    adapter_kw = {'baseline_cpu_rules': baseline_cpu_rules} if baseline_cpu_rules else {}
+                    _prepare_floor_adapter(root, 0, unit=metric_unit, **adapter_kw)
+            elif baseline_cpu_rules:
+                _prepare_floor_adapter(root, 0, unit=metric_unit, baseline_cpu_rules=baseline_cpu_rules)
             if args.vertical_mode == 'four-arm':
                 for arm_name, method, arm_vertical_mode in ARM_SELECTIONS[args.arms]:
                     print(f'=== {arm_name.upper()} ({method}, {arm_vertical_mode}) ===', flush=True)
@@ -1684,6 +1791,9 @@ def main(argv=None):
                 command([sys.executable, '-m', 'utils.vertical_summary', root, '--slo-ms', str(slo_ms)])
                 if args.arms == 'all':
                     command([sys.executable, '-m', 'utils.plot_vertical', root, root / 'plots', '--slo-ms', str(slo_ms)])
+                    final_scenario = 'mobility' if args.comparison == 'placement' else 'joint'
+                    command([sys.executable, '-m', 'utils.plot_final_phases', '--run-dir', root,
+                             '--scenario', final_scenario, '--output-dir', root / 'plots'])
                 else:
                     print(f'Plots skipped: arms={args.arms} is a partial run.', flush=True)
             else:
@@ -1701,6 +1811,9 @@ def main(argv=None):
                 command([sys.executable, '-m', 'utils.plot_autoscaler', root, root / 'plots', '--slo-ms', str(slo_ms)])
                 command([sys.executable, '-m', 'utils.plot_slides', root, '--output-dir', root / 'slides', '--slo-ms', str(slo_ms)])
                 command([sys.executable, '-m', 'utils.plot_overhead_slides', root])
+                if args.comparison == 'scaling':
+                    command([sys.executable, '-m', 'utils.plot_final_phases', '--run-dir', root,
+                             '--scenario', 'scaling', '--output-dir', root / 'plots'])
             campaign_completed = True
         finally:
             try:

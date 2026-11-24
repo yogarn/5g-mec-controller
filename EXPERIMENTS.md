@@ -209,7 +209,7 @@ this as a transient workload experiment. The schedule is `total:gnb1:gnb2:gnb3`:
 
 For the pedestrian experiment, pass `--slo-ms 150` (or `--slo-ms 100` for tighter targets) so the controller, summaries and plots share the candidate deadline.
 
-UE switching is stop-and-reattach, **not handover**. Traffic uses **fixed arrival-rate (open-loop) pacing** (`5` RPS/UE by default via `--rps-per-ue`, bounded by `--max-in-flight-per-ue`, default `8`) rather than closed-loop pacing; `5` RPS/UE (`15` RPS at 3 UEs, `45` at 9, `75` at 15, `120` at 24) is an **initial rate requiring calibration, not proven capacity**. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, missed starts, request coverage, telemetry drops and mapping coverage; a fast failure or omitted request can otherwise make latency look better. The response-time plots use **successful requests only**; SLO attainment uses all attempts and is reported alongside request coverage (`completed / scheduled`). Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.
+UE switching is stop-and-reattach, **not handover**. Traffic uses **fixed arrival-rate (open-loop) pacing** (`5` RPS/UE by default via `--rps-per-ue`, true open-loop with a `200`-in-flight safety abort per UE) rather than closed-loop pacing; `5` RPS/UE (`15` RPS at 3 UEs, `45` at 9, `75` at 15, `120` at 24) is an **initial rate requiring calibration, not proven capacity**. Preflight and active collector checks do not independently prove every UE's attachment or physical route. Check those after network/provisioning changes. Record failures, missed starts, request coverage, telemetry drops and mapping coverage; a fast failure or omitted request can otherwise make latency look better. The response-time plots use **successful requests only**; SLO attainment uses all attempts and is reported alongside request coverage (`completed / scheduled`). Resource CPU windows can overlap phase boundaries. One sequential baseline/proposed pair is exploratory; repeat campaigns before drawing a causal conclusion.
 
 Locality is relative request-attempt demand: `site attempts / total attempts`. Its 40% score contribution is unchanged by assigning another replica until observed demand changes; resource headroom is recomputed after each proposed addition. This is a site-demand preference, not residual demand per replica. The CPU-only resource score uses 50% CPU and 50% RAM, with GPU and VRAM weights zero.
 
@@ -280,24 +280,24 @@ bash experiments/run.sh mobility9_fixed6_tc10_01 --scenario mobility9 --fixed-re
 
 ## Fixed arrival-rate load generation & calibration
 
-All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, and `--fixed-replicas`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and bounded in-flight concurrency (`--max-in-flight-per-ue`, default `8`). If concurrency is saturated or the pacer lags past a slot boundary, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. With the default `--phase-transition continuous`, unchanged UEs retain their sessions and request pacing across boundaries. Only moved/removed UEs pause and drain their own requests; their unavailable scheduled slots are counted as missed. New UEs attach without stopping existing traffic. `--phase-transition restart` retains the legacy global stop, drain, and reattachment behavior.
+All scenarios (`--comparison full`, `--comparison placement`, `--scenario mobility9`, and `--fixed-replicas`) schedule per-UE request starts on a monotonic clock every `1 / rps` seconds with deterministic per-UE phase offsets `(ue_pos / active_ues) * period` and open-loop dispatch (no per-UE in-flight skip cap; aborts cleanly at `SAFETY_ABORT_IN_FLIGHT_PER_UE = 200`). If the pacer lags past a slot boundary (`due + period * 0.25`) or a UE is mid-transition, missed slots are counted separately from HTTP failures and skipped without catch-up bursts. With the default `--phase-transition continuous`, unchanged UEs retain their sessions and request pacing across boundaries. Only moved/removed UEs pause and drain their own requests; their unavailable scheduled slots are counted as missed. New UEs attach without stopping existing traffic. `--phase-transition restart` retains the legacy global stop, drain, and reattachment behavior.
 
 Treat the default `--rps-per-ue 5` as an **initial rate requiring calibration, not proven capacity** (`3` UEs = `15` RPS, `9` UEs = `45` RPS, `15` UEs = `75` RPS, `24` UEs = `120` RPS). Calibrate single-replica and multi-replica capacity before full comparisons:
 
 ```bash
 # Standard scaling campaign at explicit rate:
-bash experiments/run.sh run_5rps_01 --comparison full --slo-ms 100 --rps-per-ue 5 --max-in-flight-per-ue 8
+bash experiments/run.sh run_5rps_01 --comparison full --slo-ms 100 --rps-per-ue 5
 
 # Nine-UE mobility comparison (or fixed-replica mobility9) at the same rate:
-bash experiments/run.sh mobility9_5rps_01 --scenario mobility9 --rps-per-ue 5 --max-in-flight-per-ue 8
-bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-replicas 6 --rps-per-ue 5 --max-in-flight-per-ue 8
+bash experiments/run.sh mobility9_5rps_01 --scenario mobility9 --rps-per-ue 5
+bash experiments/run.sh mobility9_fixed6_5rps_01 --scenario mobility9 --fixed-replicas 6 --rps-per-ue 5
 ```
 
 `utils/summarize.py` writes `scheduled`, `started`, `completed`, `failures`, `missed`, `actual_start_rate`, `request_coverage`, and `slo_attainment_scheduled` across `summary.csv` (by phase), `summary-sites.csv` (by phase and gNB site), and `summary-ues.csv` (by phase and UE). `utils/plot_autoscaler.py` exports 300 DPI PNG figures only (no PDFs) on an aligned cumulative traffic-time axis with seconds ticks followed by phase brackets and UE-distribution labels below the plots (excluding setup, draining, and stop-and-reattach gaps), computing 15-second reporting windows (`[0, 15), [15, 30), ...`, plus partial final windows) from raw `requests.jsonl` and `metrics.jsonl`, and writes `window-metrics-15s.csv`, `pod-placement-15s.csv`, `slo-violations.png` (lines with small markers for SLO violations (%) and request coverage), `response-time.png`, `response-time-zoom.png`, and `pod-placement.png` (stacked bars of per-node ready replicas at each 15-second window end, with freshness enforcement; bar widths provide visual spacing, not interval-average counts).
 
 ## Scaler-only balanced scenario (`scaler-balanced`)
 
-Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`80%` target) against native latency HPA (`150` ms p90 target) on `core-5g` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE (`--max-in-flight-per-ue 8`). Before traffic starts, the runner verifies `core-5g` allocatable CPU/memory minus active pods can fit `max_replicas`.
+Use `--comparison scaling --scenario scaler-balanced` to compare native CPU HPA (`80%` target) against native latency HPA (`150` ms p90 target) on `core-5g` alone with `default-scheduler` for both methods, no custom `placement-controller` interaction, `3..24` replica bounds (override with `--min-replicas` / `--max-replicas`), 120-second balanced phases (`3:1:1:1,9:3:3:3,15:5:5:5,24:8:8:8,15:5:5:5,9:3:3:3,3:1:1:1`), and fixed `5` RPS/UE. Before traffic starts, the runner verifies `core-5g` allocatable CPU/memory minus active pods can fit `max_replicas`.
 
 ```bash
 # Offline preview (no cluster or network access):
@@ -393,17 +393,6 @@ New experiment runs use **Prometheus/cAdvisor** as the primary source for `resou
   Supply a fresh result name. Additional campaign options may follow the name. This selects the floor-adjusted native latency HPA described below; append `--latency-floor-ms 0` for the raw RT-ratio variant.
 - **Live checks still required before live evaluation:** verify `nodes/proxy` `/metrics/cadvisor` access on all 4 nodes (`core-5g`, `gnb1`, `gnb-2`, `gnb-3`), confirm container-instance identity labels (`id`/`container_id`), verify `up{job="kubelet-cadvisor"} == 1` with no duplicate targets, and check 5s scrape CPU/memory overhead and 24h retention.
 - **Boundary effects:** CPU rates use a `45s` rate window (with `25s` freshness to accommodate 10–20s cAdvisor container timestamp spacing while keeping Prometheus scrape and Pod lifecycle polling at `5s`) per container instance (with counter-reset handling). A `45s` CPU rate window can cross the `60s` phase boundaries, and newly started containers require `>= 2` samples in the window before a rate exists. Resource summaries are averages of valid observations, not exact phase CPU consumption. If cAdvisor data is missing, `resource-by-ramp.csv` leaves totals blank rather than substituting Metrics Server.
-
-## Proposed low-load TC-on / TC-off path diagnostic (not executed)
-
-To isolate fixed UPF/inter-node path latency from queueing and autoscaling effects without altering the `100` ms all-attempt p90 objective, run a short low-load diagnostic pair (e.g. `1`–`3` UEs at `1`–`2` RPS/UE on a fixed replica count) with `--tc-ms 10` vs. without `--tc-ms`:
-
-```bash
-# Diagnostic only (low load, fixed replicas; compare p50/p90 baseline path delay):
-.venv/bin/python -m utils.fixed_replica_harness --campaign-dir results/diag_tc_off --stage diag --block 1 --run-id tc_off --replicas 6 --node gnb-2 --schedule 3:1:1:1 --rps-per-ue 1 --max-in-flight-per-ue 4
-.venv/bin/python -m utils.fixed_replica_harness --campaign-dir results/diag_tc_on  --stage diag --block 1 --run-id tc_on  --replicas 6 --node gnb-2 --schedule 3:1:1:1 --rps-per-ue 1 --max-in-flight-per-ue 4 --tc-ms 10
-```
-
 
 ## Gradual scaler staircase (new configuration)
 
@@ -687,7 +676,7 @@ finish. The JSON status records timeout/failure rather than claiming success.
 
 Replica overrides: `--replicas N` for mobility; `--min-replicas N --max-replicas N`
 for scaling/joint. `--config`, `--slo-ms`, `--tc-ms`, `--rps-per-ue`,
-`--max-in-flight-per-ue`, and `--method-order` are available. Set
+and `--method-order` are available. Set
 `--latency-floor-ms 0` for a raw-RT smoke comparison.
 The wrapper does not rebuild images or change image digests. Build and validate
 the HTTP-thread-capable image before attributing a smoke run to five HTTP threads.

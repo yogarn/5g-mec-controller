@@ -21,6 +21,8 @@ spec:
       labels:
         app: mec-placement-pedestrian-detection-core
         mec-role: core-fallback
+      annotations:
+        cni.projectcalico.org/ipv4pools: '["mec-campaign-reserved"]'
     spec:
       terminationGracePeriodSeconds: 60
       nodeSelector:

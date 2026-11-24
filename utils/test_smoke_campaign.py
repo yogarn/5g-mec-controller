@@ -33,7 +33,7 @@ def test_offline_profiles_render_real_campaigns_without_subprocess(tmp_path, mon
     assert plan['phase_transition'] == 'continuous'
     assert plan['replica_bounds'] == {'min': minimum, 'max': maximum}
     assert plan['slo_ms'] == 150 and plan['tc_ms'] == 10
-    assert plan['pacing'] == {'rps_per_ue': 5, 'max_in_flight_per_ue': 8}
+    assert plan['pacing'] == {'rps_per_ue': 5}
     assert plan['latency_floor_ms'] == 120
     for method in ['baseline', 'proposed']:
         hpa = yaml.safe_load((out / f'{method}-hpa.yaml').read_text())

@@ -141,7 +141,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 1Gi
           readinessProbe:
             httpGet:
               path: /ready
@@ -311,7 +311,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 1Gi
           readinessProbe:
             httpGet:
               path: /ready
@@ -481,7 +481,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 1Gi
           readinessProbe:
             httpGet:
               path: /ready

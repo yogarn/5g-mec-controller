@@ -116,7 +116,6 @@ def run(settings):
             '--phase-schedule', settings['schedule'], '--phase-duration', str(settings['duration']),
             '--phase-transition', settings.get('phase_transition', 'continuous'),
             '--rps-per-ue', str(settings.get('rps_per_ue', 5.0)),
-            '--max-in-flight-per-ue', str(settings.get('max_in_flight_per_ue', 8)),
             '--telemetry-url', settings['telemetry_url'], '--telemetry-token-file', settings['token'],
             '--output-dir', str(output)]
     if settings.get('phase_durations'):

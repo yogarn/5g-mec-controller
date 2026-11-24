@@ -16,10 +16,10 @@ from urllib.parse import urlsplit
 from benchmark.client import attempt, parse_schedule
 from benchmark.telemetry import TelemetryPublisher, request_with_telemetry, telemetry_config
 from utils import defaults
+from utils.continuous_traffic import SAFETY_ABORT_IN_FLIGHT_PER_UE
 from utils.ue_lifecycle import OwnedUELifecycle, ContinuousUELifecycle
 
 DEFAULT_RPS_PER_UE = 5.0
-DEFAULT_MAX_IN_FLIGHT_PER_UE = 8
 
 
 def validate_url(value):
@@ -48,7 +48,6 @@ def run_fixed_rate_phase(
     selected,
     phase_duration,
     rps_per_ue,
-    max_in_flight_per_ue,
     dispatch_fn,
     emit,
     target_url_for,
@@ -58,6 +57,7 @@ def run_fixed_rate_phase(
     cancelled=None,
     monotonic_fn=time.monotonic,
     wait_fn=None,
+    safety_in_flight_limit=SAFETY_ABORT_IN_FLIGHT_PER_UE,
 ):
     """Run one phase with deterministic staggered fixed-rate arrivals per UE."""
     if cancelled is None:
@@ -115,7 +115,7 @@ def run_fixed_rate_phase(
                 with inflight_lock:
                     in_flight -= 1
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_per_ue) as req_pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=safety_in_flight_limit) as req_pool:
             slot_index = 0
             slot_time = phase_start_mono + offset
             while slot_time < phase_end_mono and not cancelled.is_set():
@@ -144,14 +144,14 @@ def run_fixed_rate_phase(
                     continue
                 scheduled += 1
                 with inflight_lock:
-                    can_dispatch = in_flight < max_in_flight_per_ue
-                    if can_dispatch:
-                        in_flight += 1
-                if not can_dispatch:
-                    with ue_lock:
-                        missed += 1
-                else:
-                    futures.append(req_pool.submit(run_one, slot_index, slot_time))
+                    if in_flight >= safety_in_flight_limit:
+                        cancelled.set()
+                        raise RuntimeError(
+                            f'open-loop safety abort: UE {ue_index} reached {in_flight} '
+                            f'in-flight requests (safety limit {safety_in_flight_limit})'
+                        )
+                    in_flight += 1
+                futures.append(req_pool.submit(run_one, slot_index, slot_time))
                 slot_index += 1
                 slot_time = phase_start_mono + offset + slot_index * period
 
@@ -247,9 +247,6 @@ def run(args):
     rps_per_ue = getattr(args, 'rps_per_ue', DEFAULT_RPS_PER_UE)
     if isinstance(rps_per_ue, bool) or not isinstance(rps_per_ue, (int, float)) or not math.isfinite(rps_per_ue) or rps_per_ue <= 0:
         raise ValueError('rps_per_ue must be a finite positive number')
-    max_in_flight_per_ue = getattr(args, 'max_in_flight_per_ue', DEFAULT_MAX_IN_FLIGHT_PER_UE)
-    if type(max_in_flight_per_ue) is not int or max_in_flight_per_ue < 1:
-        raise ValueError('max_in_flight_per_ue must be a positive integer')
     telemetry = telemetry_config(getattr(args, 'telemetry_url', None), getattr(args, 'telemetry_token_file', None))
     site_urls = getattr(args, 'site_urls', None)
     if site_urls is not None:
@@ -282,7 +279,6 @@ def run(args):
     metadata = {'url': args.url, 'site_urls': site_urls, 'schedule': phases,
                 'phase_duration_s': args.phase_duration, 'phase_durations_s': phase_durations,
                 'timeout_s': args.timeout, 'rps_per_ue': float(rps_per_ue),
-                'max_in_flight_per_ue': max_in_flight_per_ue,
                 'ue_config': str(Path(args.ue_config).resolve()),
                 'nr_ue': str(Path(args.nr_ue).resolve()), 'start_time': time.time(),
                 'workload': 'open-loop-fixed-rate', 'phase_transition': transition,
@@ -311,7 +307,7 @@ def run(args):
                 output.flush()
 
         if transition == 'continuous':
-            from utils.continuous_traffic import run_continuous_phases
+            from utils.continuous_traffic import SAFETY_ABORT_IN_FLIGHT_PER_UE, run_continuous_phases
             lifecycle = ContinuousUELifecycle(out / 'owned_ues', Path(args.ue_config), Path(args.nr_ue))
             def initial_probe(sessions):
                 if getattr(args, 'probe_service_path', False):
@@ -322,7 +318,7 @@ def run(args):
             try:
                 run_continuous_phases(
                     phases, phase_durations, lifecycle, images, assignments, urls,
-                    float(rps_per_ue), max_in_flight_per_ue,
+                    float(rps_per_ue),
                     lambda url, image, source, publisher, site=None: request_with_telemetry(
                         attempt, publisher, url, 'POST', image['body'], image['headers'], source, args.timeout,
                         site=site, response_contract='detection'),
@@ -358,10 +354,9 @@ def run(args):
                                 (group, ue) for group, ues in site_groups for ue in ues)]
                 publisher = TelemetryPublisher(telemetry, [source for _, source, _ in selected]) if telemetry else None
                 start = time.time()
-                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {phase_duration:g}s at {float(rps_per_ue):g} RPS/UE (max_in_flight={max_in_flight_per_ue})", flush=True)
+                print(f"[RUN] {phase['phase']}: {index}/{len(phases)} {direction}; {total} UEs, split {counts}; traffic for {phase_duration:g}s at {float(rps_per_ue):g} RPS/UE", flush=True)
                 emit({'event': 'phase_start', **phase, 'start_time': start,
-                      'duration_s': phase_duration, 'rps_per_ue': float(rps_per_ue),
-                      'max_in_flight_per_ue': max_in_flight_per_ue, 'ues': [
+                      'duration_s': phase_duration, 'rps_per_ue': float(rps_per_ue), 'ues': [
                           {'group': group, 'source_address': ue['ip'], 'interface': ue['iface']}
                           for group, ues in site_groups for ue in ues]})
 
@@ -376,7 +371,6 @@ def run(args):
                         selected,
                         phase_duration,
                         float(rps_per_ue),
-                        max_in_flight_per_ue,
                         dispatch,
                         emit,
                         lambda group: site_urls[group] if site_urls is not None else args.url,
@@ -394,7 +388,7 @@ def run(args):
                 missed = sum(ue['missed'] for ue in per_ue)
                 emit({'event': 'phase_end', **phase, 'start_time': start,
                       'generation_duration_s': phase_duration, 'end_time': time.time(),
-                      'rps_per_ue': float(rps_per_ue), 'max_in_flight_per_ue': max_in_flight_per_ue,
+                      'rps_per_ue': float(rps_per_ue),
                       'scheduled': scheduled, 'started': started, 'completed': completed,
                       'attempts': completed, 'successes': successes, 'failures': completed - successes,
                       'missed': missed, 'actual_start_rate': started / phase_duration,
@@ -420,7 +414,6 @@ def main(argv=None):
     parser.add_argument('--phase-transition', choices=('continuous', 'restart'), default='continuous',
                         help='continuous keeps unchanged UEs sending; restart reproduces legacy full reattachment')
     parser.add_argument('--rps-per-ue', type=float, default=DEFAULT_RPS_PER_UE, help='Target arrival rate per active UE in requests/second')
-    parser.add_argument('--max-in-flight-per-ue', type=int, default=DEFAULT_MAX_IN_FLIGHT_PER_UE, help='Maximum concurrent in-flight requests per UE')
     parser.add_argument('--timeout', type=float, default=10.0, help='Socket timeout in seconds')
     parser.add_argument('--output-dir', default=None, help='New output directory; defaults to a unique results directory')
     parser.add_argument('--compact-response-log', action='store_true',

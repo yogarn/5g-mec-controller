@@ -5,15 +5,15 @@ from experiments import campaign
 
 _SHARED = [
     '--config', 'experiments/campaign-vertical.yaml', '--vertical-mode', 'four-arm',
-    '--scenario', 'mobility9', '--phase-transition', 'continuous', '--rps-per-ue', '5',
-    '--max-in-flight-per-ue', '8', '--slo-ms', '150', '--tc-ms', '10', '--autoscaler', 'hpa',
+    '--phase-transition', 'continuous', '--rps-per-ue', '5',
+    '--slo-ms', '150', '--tc-ms', '10', '--autoscaler', 'hpa',
     '--placement-engine', 'go', '--pod-share-scoring', '--deschedule-interval', '30',
     '--locality-weight', '0.4', '--resource-weights', '0.5', '0.5',
     '--prefer-close', '--site-anchors',
 ]
 _FULL = [
-    '--comparison', 'full', '--cpu-hpa-target', '80', '--scale-down-stabilization-seconds', '60',
-    '--asymmetric-latency', '--rt-target-factor', '1', '--proposed-scale-down-period-seconds', '15',
+    '--scenario', 'joint', '--comparison', 'full', '--cpu-hpa-target', '80', '--scale-down-stabilization-seconds', '60',
+    '--rt-target-factor', '1', '--proposed-scale-down-period-seconds', '15',
 ]
 LEGACY = {
     'vertical-joint': [
@@ -24,7 +24,7 @@ LEGACY = {
         '--arms', 'vertical',
     ],
     'vertical-mobility': [
-        '--comparison', 'placement', '--fixed-replicas', '9', '--no-hpa', *_SHARED,
+        '--scenario', 'mobility9', '--comparison', 'placement', '--fixed-replicas', '9', '--no-hpa', *_SHARED,
         '--phase-schedule', campaign.VERTICAL_MOBILITY_SCHEDULE, '--phase-duration', '120',
     ],
     'scaling-staircase': [
@@ -33,7 +33,7 @@ LEGACY = {
         '--cpu-hpa-target', '80', '--slo-ms', '150',  # full floor formula (no --asymmetric-latency), see PROFILES
         '--min-replicas', '3', '--max-replicas', '18', '--scale-down-stabilization-seconds', '60',
         '--phase-duration', '120', '--phase-transition', 'continuous', '--rps-per-ue', '5',
-        '--max-in-flight-per-ue', '8', '--tc-ms', '10',
+        '--tc-ms', '10',
     ],
 }
 
@@ -54,19 +54,23 @@ def test_profile_flags_can_still_be_overridden():
     assert args.phase_duration == 30
 
 
-def test_mobility_profile_uses_24_ues_with_hotspot_at_most_18():
+def test_mobility_profile_uses_24_ues_with_hotspot_peak_22():
     phases = campaign.parse_schedule(campaign.VERTICAL_MOBILITY_SCHEDULE)
     assert {p['workload_ue'] for p in phases} == {24}
-    assert max(max(p['gnb1_ues'], p['gnb2_ues'], p['gnb3_ues']) for p in phases[1:]) == 18
+    assert max(max(p['gnb1_ues'], p['gnb2_ues'], p['gnb3_ues']) for p in phases[1:]) == 22
 
 
 def test_only_smoke_and_demo_profiles_select_arms():
     assert {n: p.get('arms', 'all') for n, p in campaign.PROFILES.items()} == {
-        'vertical-joint': 'all', 'vertical-smoke': 'vertical', 'vertical-joint-vertical': 'vertical',
-        'vertical-mobility': 'all', 'scaling-staircase': 'all',
+        'vertical-joint': 'all', 'vertical-smoke': 'vertical',
+        'vertical-joint-local': 'local', 'vertical-joint-vertical': 'vertical',
+        'vertical-mobility': 'all',
+        'vertical-mobility-local': 'local', 'vertical-mobility-vertical': 'vertical',
+        'scaling-staircase': 'all',
         'demo-baseline-local': 'baseline-local', 'demo-proposed-local': 'proposed-local',
         'demo-baseline-vertical': 'baseline-vertical', 'demo-proposed-vertical': 'proposed-vertical',
     }
+    assert [a for a, _m, _v in campaign.ARM_SELECTIONS['local']] == ['baseline-local', 'proposed-local']
     assert [a for a, _m, _v in campaign.ARM_SELECTIONS['vertical']] == ['baseline-vertical', 'proposed-vertical']
     assert [a for a, _m, _v in campaign.ARM_SELECTIONS['all']] == [
         'baseline-local', 'proposed-local', 'baseline-vertical', 'proposed-vertical']
