@@ -11,6 +11,14 @@ source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 
 Run one arm at a time, in this order: `baseline`, `proposed`. Each arm section is self-contained.
 
+## Platform (must already be running)
+These sections only add and remove the per-arm pieces. The platform (telemetry, collector, `placement-controller`, token Secret) is deployed once, see [`../platform/README.md`](../platform/README.md) to check it, tear it down or rebuild it from nothing. Quick check:
+
+```bash
+kubectl -n placement get deploy
+kubectl get apiservice v1beta1.external.metrics.k8s.io
+```
+
 ## Scenario setup (once per scenario, before the first arm)
 **T2 (core), keep open for the whole scenario:** inter-node path delay of 10 ms for the experiment pods (`tc_ms: 10`, as in every final run).
 

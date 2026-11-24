@@ -10,6 +10,10 @@ Nothing is generated when you use them.
 | mobility (placement only, fixed replicas) | [`mobility/README.md`](mobility/README.md) | `baseline-local`, `proposed-local`, `baseline-vertical`, `proposed-vertical` |
 | scaling (autoscaler only, core-5g) | [`scaling/README.md`](scaling/README.md) | `baseline`, `proposed` |
 
+The platform the arms run on (telemetry, collector, scheduler, offloader, Envoys, Core backend) is covered by
+[`platform/README.md`](platform/README.md): how to check it, tear it down and rebuild it from nothing. The arm runbooks
+assume it is already running.
+
 Each arm folder holds the numbered manifests (`01-...`, `02-...` in apply order) and `ue-payload.json`,
 the exact stdin the campaign sends to the UE runner. Each runbook has one self-contained section per
 arm with every command written out; nothing says "same for the others".
