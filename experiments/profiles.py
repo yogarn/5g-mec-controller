@@ -90,8 +90,9 @@ _VERTICAL_FULL = {
     'comparison': 'full',
     'cpu_hpa_target': 80,
     'scale_down_stabilization_seconds': 60,
+    'scale_down_pods': 1,
+    'scale_down_period_seconds': 15,
     'asymmetric_latency': False,
-    'proposed_scale_down_period_seconds': 15,
 }
 PROFILES = {
     'vertical-joint': {**_VERTICAL_COMMON, **_VERTICAL_FULL, 'phase_schedule': VERTICAL_JOINT_SCHEDULE},
@@ -125,6 +126,8 @@ PROFILES = {
         'min_replicas': 3,
         'max_replicas': 18,
         'scale_down_stabilization_seconds': 60,
+        'scale_down_pods': 1,
+        'scale_down_period_seconds': 15,
         'phase_duration': 120.0,
         'rps_per_ue': 5.0,
         'tc_ms': 10.0,

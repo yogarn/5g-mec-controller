@@ -13,7 +13,8 @@ _SHARED = [
 ]
 _FULL = [
     '--scenario', 'joint', '--comparison', 'full', '--cpu-hpa-target', '80', '--scale-down-stabilization-seconds', '60',
-    '--rt-target-factor', '1', '--proposed-scale-down-period-seconds', '15',
+    '--scale-down-pods', '1', '--scale-down-period-seconds', '15',
+    '--rt-target-factor', '1',
 ]
 LEGACY = {
     'vertical-joint': [
@@ -32,6 +33,7 @@ LEGACY = {
         '--comparison', 'scaling', '--scenario', 'scaler-staircase', '--autoscaler', 'hpa',
         '--cpu-hpa-target', '80', '--slo-ms', '150',  # full floor formula (no --asymmetric-latency), see PROFILES
         '--min-replicas', '3', '--max-replicas', '18', '--scale-down-stabilization-seconds', '60',
+        '--scale-down-pods', '1', '--scale-down-period-seconds', '15',
         '--phase-duration', '120', '--phase-transition', 'continuous', '--rps-per-ue', '5',
         '--tc-ms', '10',
     ],

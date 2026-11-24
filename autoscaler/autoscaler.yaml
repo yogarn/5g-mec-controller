@@ -32,7 +32,7 @@ scale_down_stabilization_seconds: 60
 scale_down_pods: 1
 
 # Default scale-down policy period in seconds when rate limiting is enabled.
-scale_down_period_seconds: 30
+scale_down_period_seconds: 15
 
 # Scale-down policy period in seconds for the proposed vertical HPA arm.
 proposed_scale_down_period_seconds: 15

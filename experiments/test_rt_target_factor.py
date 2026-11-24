@@ -24,7 +24,14 @@ def test_default_factor_backward_compatible(tmp_path):
     assert plan['latency_floor_ms'] == 130
     assert plan['effective_rt_metric_target_ms'] == 20
     assert plan['latency_scaling_formula'] == 'max(RT-floor, 0)/(SLO-floor)'
-    assert plan['hpa_targets']['baseline'] == {'type': 'cpu_utilization_percent', 'target': 80}
+    assert plan['hpa_targets']['baseline'] == {
+        'type': 'external_cpu_dynamic_replicas',
+        'target': 80,
+        'average_value': '1',
+        'pod_request_cores': 0.5,
+        'rate_window_seconds': 45,
+        'metric': 'mec_baseline_cpu_dynamic_replicas_fixed0',
+    }
     assert plan['hpa_targets']['proposed'] == {
         'type': 'excess_latency_p90_ms',
         'target': 20,
@@ -33,7 +40,7 @@ def test_default_factor_backward_compatible(tmp_path):
         'metric': 'ue_p90_excess_latency_130ms_seconds',
     }
     assert prop['spec']['metrics'][0]['external']['target']['value'] == '20m'
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert base['spec']['metrics'][0]['external']['metric']['name'] == 'mec_baseline_cpu_dynamic_replicas_fixed0'
 
 
 def test_raw_mode_slo_150_factor_095(tmp_path):
@@ -62,9 +69,9 @@ def test_raw_mode_slo_150_factor_095(tmp_path):
     assert prop['spec']['metrics'][0]['external']['target']['value'] == '142.5'
     cm = yaml.safe_load((out / 'latency-adapter-configmap.yaml').read_text())
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
-    assert rules[-1]['name']['as'] == 'ue_p90_latency_milliseconds'
-    assert '* 1000' in rules[-1]['metricsQuery']
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    ms_rule = next(r for r in rules if r['name']['as'] == 'ue_p90_latency_milliseconds')
+    assert '* 1000' in ms_rule['metricsQuery']
+    assert base['spec']['metrics'][0]['external']['metric']['name'] == 'mec_baseline_cpu_dynamic_replicas_fixed0'
     assert base['spec']['behavior'] == prop['spec']['behavior']
     assert base['spec']['minReplicas'] == prop['spec']['minReplicas'] == 3
     assert base['spec']['maxReplicas'] == prop['spec']['maxReplicas'] == 18
@@ -106,9 +113,9 @@ def test_floor_mode_slo_150_floor_130_factor_095(tmp_path):
     assert prop['spec']['metrics'][0]['external']['target']['value'] == '12.5'
     cm = yaml.safe_load((out / 'floor-adapter-configmap.yaml').read_text())
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
-    assert rules[-1]['name']['as'] == 'ue_p90_excess_latency_130ms_milliseconds'
-    assert '(clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.13, 0)) * 1000' in rules[-1]['metricsQuery']
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    floor_rule = next(r for r in rules if r['name']['as'] == 'ue_p90_excess_latency_130ms_milliseconds')
+    assert '(clamp_min(ue_request_attempt_duration_p90_seconds{job="ue-telemetry"} - 0.13, 0)) * 1000' in floor_rule['metricsQuery']
+    assert base['spec']['metrics'][0]['external']['metric']['name'] == 'mec_baseline_cpu_dynamic_replicas_fixed0'
     assert base['spec']['behavior'] == prop['spec']['behavior']
 
 
@@ -248,7 +255,7 @@ def test_fractional_slo_with_default_factor_installs_millisecond_adapter(tmp_pat
     monkeypatch.setattr(campaign, 'prerequisites', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'check_result_name', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, '_prepare_floor_adapter',
-                        lambda root, floor_ms, unit='seconds': adapter_calls.append((root, floor_ms, unit)))
+                        lambda root, floor_ms, unit='seconds', **kw: adapter_calls.append((root, floor_ms, unit)))
     monkeypatch.setattr(campaign, 'command', lambda *a, **kw: None)
     monkeypatch.setattr(campaign.fcntl, 'flock', lambda *a, **kw: None)
     monkeypatch.setattr(campaign, 'TrafficDelay', lambda *a, **kw: SimpleNamespace(start=lambda: None, close=lambda: None))

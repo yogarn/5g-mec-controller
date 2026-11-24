@@ -14,7 +14,7 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     base = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())
     prop = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert base['spec']['metrics'][0]['external']['metric']['name'] == 'mec_baseline_cpu_dynamic_replicas_fixed0'
     assert base['spec']['behavior'] == prop['spec']['behavior']
     assert prop['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_excess_latency_130ms_seconds'
     assert prop['spec']['metrics'][0]['external']['target']['value'] == '20m'
@@ -26,9 +26,10 @@ def test_floor_plan_changes_only_proposed_signal_and_records_reference(tmp_path)
     cm = yaml.safe_load((out / 'floor-adapter-configmap.yaml').read_text())
     rules = yaml.safe_load(cm['data']['config.yaml'])['externalRules']
     assert rules[0]['name']['as'] == 'ue_p90_latency_seconds'
-    assert rules[-1]['resources'] == {'namespaced': False}
-    assert '- 0.13, 0)' in rules[-1]['metricsQuery']
-    assert 'ue_request_window_complete' not in rules[-1]['metricsQuery']
+    floor_rule = next(r for r in rules if r['name']['as'] == 'ue_p90_excess_latency_130ms_seconds')
+    assert floor_rule['resources'] == {'namespaced': False}
+    assert '- 0.13, 0)' in floor_rule['metricsQuery']
+    assert 'ue_request_window_complete' not in floor_rule['metricsQuery']
 
 
 @pytest.mark.parametrize('factor,excess_target', [('1.0', '20m'), ('0.95', '12.5')])
@@ -134,7 +135,10 @@ def test_asymmetric_hpa_plan(tmp_path, flags, stabilization):
     baseline = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())['spec']
     external = proposed['metrics'][0]['external']
     assert external['target']['value'] == '150m'
-    assert baseline['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    if 'scaling' in flags:
+        assert baseline['metrics'][0]['external']['metric']['name'] == 'mec_baseline_cpu_dynamic_replicas_fixed0'
+    else:
+        assert baseline['metrics'][0]['resource']['target']['averageUtilization'] == 80
     assert proposed['behavior']['scaleDown']['stabilizationWindowSeconds'] == stabilization
     name = external['metric']['name']
     assert plan['rt_metric_name'] == name

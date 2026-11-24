@@ -394,6 +394,8 @@ def _render_hpa(template_name, output_path, hpa_name, app_name, min_replicas, ma
             hpa['spec']['behavior']['scaleDown']['policies'] = [
                 {'type': 'Pods', 'value': pods, 'periodSeconds': period}
             ]
+        else:
+            hpa['spec']['behavior']['scaleDown'].pop('policies', None)
     if external_metric_name is not None:
         hpa['spec']['metrics'] = [{
             'type': 'External',
@@ -688,9 +690,12 @@ def _method_configs(root, method, slo_ms, max_replicas, debug=False, resource_we
     if method == 'baseline' and comparison in ('full', 'scaling'):
         external_metric_name = None
         external_average_value = None
-        if comparison == 'full' and site_anchors:
-            n_fixed = (vertical_budget.fixed_replicas if vertical_budget is not None
-                       else len(_site_anchor_nodes(edge_only, site_nodes)))
+        if comparison == 'scaling' or (comparison == 'full' and site_anchors):
+            if comparison == 'scaling':
+                n_fixed = 0
+            else:
+                n_fixed = (vertical_budget.fixed_replicas if vertical_budget is not None
+                           else len(_site_anchor_nodes(edge_only, site_nodes)))
             external_metric_name = _baseline_cpu_metric_name(n_fixed)
             external_average_value = '1'
         hpa_path = _render_hpa(

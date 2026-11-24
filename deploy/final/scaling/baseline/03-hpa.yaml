@@ -11,14 +11,19 @@ spec:
   minReplicas: 3
   maxReplicas: 18
   metrics:
-  - type: Resource
-    resource:
-      name: cpu
+  - type: External
+    external:
+      metric:
+        name: mec_baseline_cpu_dynamic_replicas_fixed0
       target:
-        type: Utilization
-        averageUtilization: 80
+        type: AverageValue
+        averageValue: '1'
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 0
     scaleDown:
       stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 15

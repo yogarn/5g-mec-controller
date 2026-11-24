@@ -1,5 +1,5 @@
 # Scaling experiment (autoscaler only)
-Scaling staircase: 7 phases x 120 s, schedule `3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7,24:8:8:8,12:4:4:4,3:1:1:1`, `core-5g` only, default scheduler for both arms. `baseline` uses the native CPU HPA (80%), `proposed` the latency HPA (excess over 120 ms, target 30m).
+Scaling staircase: 7 phases x 120 s, schedule `3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7,24:8:8:8,12:4:4:4,3:1:1:1`, `core-5g` only, default scheduler for both arms. `baseline` uses the external cAdvisor CPU HPA (80%, `mec_baseline_cpu_dynamic_replicas_fixed0`), `proposed` the latency HPA (excess over 120 ms, target 30m); both use `stabilizationWindowSeconds: 60` and `scaleDown.policies: 1 pod / 15s`.
 
 ## Order of work and rebuild verdict
 1. **A. Build and push the images we make** (the collector): `docker build` on core, push to the registry as `:latest` plus an immutable `build-<timestamp>` tag. Skip it if the images in the registry are already the ones you want.

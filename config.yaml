@@ -8,9 +8,8 @@ slo_seconds: 0.15
 min_replicas: 1
 max_replicas: 100
 interval_seconds: 15
-# Legacy Python controller and non-suite HPA fallback. Go placement ignores
-# this field. The suite passes 60 s to the HPA renderer when scaling is enabled.
-scale_down_seconds: 300
+# HPA scale-down stabilization default (matches suite profiles). Go placement ignores this field.
+scale_down_seconds: 60
 mode: mobility-aware
 mutate: false
 eligible_nodes: [gnb1, gnb-2, gnb-3]

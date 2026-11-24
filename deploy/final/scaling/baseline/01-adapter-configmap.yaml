@@ -10,4 +10,9 @@ data:
     ue-telemetry\"}\n- seriesQuery: ue_request_attempt_duration_p90_seconds{job=\"\
     ue-telemetry\"}\n  resources:\n    namespaced: false\n  name:\n    matches: ^ue_request_attempt_duration_p90_seconds$\n\
     \    as: ue_p90_excess_latency_120ms_seconds\n  metricsQuery: clamp_min(ue_request_attempt_duration_p90_seconds{job=\"\
-    ue-telemetry\"}\n    - 0.12, 0)\n"
+    ue-telemetry\"}\n    - 0.12, 0)\n- seriesQuery: up{job=\"kubelet-cadvisor\"}\n\
+    \  resources:\n    namespaced: false\n  name:\n    matches: ^up$\n    as: mec_baseline_cpu_dynamic_replicas_fixed0\n\
+    \  metricsQuery: clamp_min((sum(rate(container_cpu_usage_seconds_total{job=\"\
+    kubelet-cadvisor\",namespace=\"services\",container=\"pedestrian-detection\",pod=~\"\
+    mec-placement-pedestrian-detection.*\"}[45s]))\n    or vector(0)) / (0.8 * 0.5)\
+    \ - 0, 0)\n"

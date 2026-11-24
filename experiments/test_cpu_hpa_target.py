@@ -14,7 +14,20 @@ def test_custom_cpu_target_matches_manifest_and_metadata(tmp_path, comparison, t
     plan = yaml.safe_load((out / 'plan.yaml').read_text())
     base = yaml.safe_load((out / 'baseline-hpa.yaml').read_text())
     proposed = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
-    assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == target
+    if comparison == 'scaling':
+        assert base['spec']['metrics'] == [{
+            'type': 'External',
+            'external': {
+                'metric': {'name': 'mec_baseline_cpu_dynamic_replicas_fixed0'},
+                'target': {'type': 'AverageValue', 'averageValue': '1'},
+            },
+        }]
+        cm = yaml.safe_load((out / 'latency-adapter-configmap.yaml').read_text())
+        rules = {r['name']['as']: r['metricsQuery'] for r in yaml.safe_load(cm['data']['config.yaml'])['externalRules']}
+        expected_dec = f'{target / 100:g}'
+        assert f'/ ({expected_dec} * 0.5) - 0, 0)' in rules['mec_baseline_cpu_dynamic_replicas_fixed0']
+    else:
+        assert base['spec']['metrics'][0]['resource']['target']['averageUtilization'] == target
     assert plan['cpu_hpa_target'] == plan['campaign_settings']['cpu_hpa_target'] == target
     assert plan['hpa_targets']['baseline']['target'] == target
     assert proposed['spec']['metrics'][0]['external']['target']['value'] == ('30m' if comparison == 'full' else '150m')
@@ -62,4 +75,10 @@ def test_live_method_uses_custom_cpu_target(tmp_path, monkeypatch):
         campaign.run_method({'cpu_hpa_target': 65}, 'example', tmp_path, 'baseline',
                             None, 150, 12, comparison='scaling', autoscaler='hpa')
     hpa = yaml.safe_load((tmp_path / 'baseline-hpa.yaml').read_text())
-    assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 65
+    assert hpa['spec']['metrics'] == [{
+        'type': 'External',
+        'external': {
+            'metric': {'name': 'mec_baseline_cpu_dynamic_replicas_fixed0'},
+            'target': {'type': 'AverageValue', 'averageValue': '1'},
+        },
+    }]

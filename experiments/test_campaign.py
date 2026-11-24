@@ -304,17 +304,17 @@ def test_debug_configs_shorten_policy_timers_and_preserve_measurement_target(tmp
     assert hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
 
 
-def test_normal_hpa_and_proposed_share_15s_interval_and_300s_stabilization(tmp_path):
+def test_normal_hpa_and_proposed_share_15s_interval_and_60s_stabilization(tmp_path):
     config, _, path = campaign._method_configs(tmp_path, 'baseline', 500, 30, debug=False)
     hpa = yaml.safe_load(path.read_text())
     assert 'scale_up_cooldown_seconds' not in config
     assert hpa['spec']['behavior']['scaleUp']['stabilizationWindowSeconds'] == 0
-    assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == config['scale_down_seconds'] == 300
+    assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == config['scale_down_seconds'] == 60
     proposed, proposed_path, _ = campaign._method_configs(tmp_path, 'proposed', 500, 30)
     from utils.config import load_settings
     effective = load_settings(proposed_path)
     assert proposed['interval_seconds'] == effective.interval_seconds == config['interval_seconds'] == 15
-    assert effective.scale_down_seconds == 300
+    assert effective.scale_down_seconds == 60
 
 
 def test_debug_cli_uses_60_second_phases(monkeypatch):
@@ -641,7 +641,7 @@ def test_separated_comparison_a_placement_vs_comparison_b_full(tmp_path):
     prop_hpa = yaml.safe_load(prop_lat_hpa.read_text())
     assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '450m'
     assert prop_hpa['spec']['maxReplicas'] == 12
-    assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+    assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 60
 
 
 def test_prometheus_adapter_external_rule_sets_namespaced_false():
@@ -909,7 +909,7 @@ def test_mobility9_plan_rotates_fixed_demand_with_matched_hpa(tmp_path, monkeypa
     baseline = yaml.safe_load((output / 'baseline-hpa.yaml').read_text())
     proposed = yaml.safe_load((output / 'proposed-hpa.yaml').read_text())
     assert baseline['spec'] == proposed['spec']
-    assert proposed['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+    assert proposed['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 60
     assert proposed['spec']['metrics'][0]['external']['target']['value'] == '150m'
     cfg = yaml.safe_load((output / 'proposed-controller.yaml').read_text())
     assert cfg['deschedule_interval_seconds'] == 30
@@ -970,7 +970,7 @@ def test_mobility9_long_run_extends_phases_with_fixed_budget_and_normal_timers(t
     assert cfg['deschedule_interval_seconds'] == 30
     for method in ('baseline', 'proposed'):
         hpa = yaml.safe_load((output / f'{method}-hpa.yaml').read_text())
-        assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+        assert hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 60
 
 
 def test_mobility9_preserves_explicit_timer_and_slo_overrides(tmp_path):
@@ -1124,13 +1124,13 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     prop_hpa = yaml.safe_load((out / 'proposed-hpa.yaml').read_text())
     assert base_hpa['spec']['minReplicas'] == 3
     assert base_hpa['spec']['maxReplicas'] == 24
-    assert base_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
-    assert base_hpa['spec']['metrics'][0]['resource']['name'] == 'cpu'
-    assert base_hpa['spec']['metrics'][0]['resource']['target']['averageUtilization'] == 80
+    assert base_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 60
+    assert base_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'mec_baseline_cpu_dynamic_replicas_fixed0'
+    assert base_hpa['spec']['metrics'][0]['external']['target'] == {'type': 'AverageValue', 'averageValue': '1'}
 
     assert prop_hpa['spec']['minReplicas'] == 3
     assert prop_hpa['spec']['maxReplicas'] == 24
-    assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 300
+    assert prop_hpa['spec']['behavior']['scaleDown']['stabilizationWindowSeconds'] == 60
     assert prop_hpa['spec']['metrics'][0]['external']['metric']['name'] == 'ue_p90_latency_seconds'
     assert prop_hpa['spec']['metrics'][0]['external']['target']['value'] == '150m'
 
@@ -1145,7 +1145,14 @@ def test_scaler_balanced_plan_only_renders_workloads_hpas_and_metadata(tmp_path)
     assert plan['replica_bounds'] == {'min': 3, 'max': 24}
     assert plan['pacing'] == {'rps_per_ue': 5.0}
     assert plan['hpa_targets'] == {
-        'baseline': {'type': 'cpu_utilization_percent', 'target': 80},
+        'baseline': {
+            'type': 'external_cpu_dynamic_replicas',
+            'target': 80,
+            'average_value': '1',
+            'pod_request_cores': 0.5,
+            'rate_window_seconds': 45,
+            'metric': 'mec_baseline_cpu_dynamic_replicas_fixed0',
+        },
         'proposed': {'type': 'latency_p90_ms', 'target': 150},
     }
     assert plan['tc_ms'] == 10

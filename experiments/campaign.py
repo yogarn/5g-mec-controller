@@ -826,9 +826,14 @@ def run_method(settings, campaign, root, method, delay, slo_ms, max_replicas, de
                 if vertical_active or hpa_path is not None or settings.get('no_hpa', False):
                     kube('apply', '-f', config['manifest'])
                 if hpa_path is not None:
-                    if method == 'baseline' and comparison == 'full' and settings.get('site_anchors', False):
-                        n_fixed = (vertical_budget.fixed_replicas if vertical_budget is not None
-                                   else len(_site_anchor_nodes(settings.get('edge_only', False), _site_nodes(settings))))
+                    if method == 'baseline' and (
+                        comparison == 'scaling' or (comparison == 'full' and settings.get('site_anchors', False))
+                    ):
+                        if comparison == 'scaling':
+                            n_fixed = 0
+                        else:
+                            n_fixed = (vertical_budget.fixed_replicas if vertical_budget is not None
+                                       else len(_site_anchor_nodes(settings.get('edge_only', False), _site_nodes(settings))))
                         _wait_external_metric_ready(_baseline_cpu_metric_name(n_fixed), arm_name=arm_name)
                     kube('apply', '-f', hpa_path)
                 seed_managed = (
@@ -1427,7 +1432,7 @@ def main(argv=None):
         managed_max = vertical_budget.dynamic_max
     use_hpa_metadata = not args.no_hpa
     baseline_cpu_rules = None
-    if args.comparison == 'full' and args.site_anchors and not args.no_hpa:
+    if (args.comparison == 'scaling' or (args.comparison == 'full' and args.site_anchors)) and not args.no_hpa:
         core_manifest_path = _core_backend_manifest()
         pod_request_cores = verify_matching_pod_cpu_requests(
             workload_manifest(workload),
@@ -1435,7 +1440,17 @@ def main(argv=None):
         )
         container_name = _workload_container_name(workload)
         pod_prefix = workload_identity(workload)
-        if args.vertical_mode == 'four-arm':
+        if args.comparison == 'scaling':
+            n_fixed_values = [0]
+            hpa_targets['baseline'] = {
+                'type': 'external_cpu_dynamic_replicas',
+                'target': args.cpu_hpa_target,
+                'average_value': '1',
+                'pod_request_cores': float(pod_request_cores),
+                'rate_window_seconds': DEFAULT_BASELINE_CPU_RATE_WINDOW_SECONDS,
+                'metric': _baseline_cpu_metric_name(0),
+            }
+        elif args.vertical_mode == 'four-arm':
             n_fixed_values = sorted({
                 arm_budgets_obj[arm].fixed_replicas
                 for arm, method_name, _ in ARM_SELECTIONS[args.arms]

@@ -1,6 +1,6 @@
 # Proposed latency-driven HPA manifest (requires prometheus-adapter external.metrics.k8s.io).
 # Desired replicas = ceil(currentReplicas * (ue_p90_latency_seconds / slo_seconds)),
-# with 0s scale-up stabilization and 300s rolling-maximum scale-down stabilization.
+# with 0s scale-up stabilization and 60s rolling-maximum scale-down stabilization (1 pod / 15s).
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -28,4 +28,8 @@ spec:
     scaleUp:
       stabilizationWindowSeconds: 0
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 15

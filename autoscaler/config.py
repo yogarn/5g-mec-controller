@@ -22,7 +22,7 @@ DEFAULT_AUTOSCALER_SETTINGS = {
     'scale_up_stabilization_seconds': 0,
     'scale_down_stabilization_seconds': 60,
     'scale_down_pods': 1,
-    'scale_down_period_seconds': 30,
+    'scale_down_period_seconds': 15,
     'proposed_scale_down_period_seconds': 15,
 }
 

@@ -107,6 +107,8 @@ def test_autoscaler_config_loader_validates_inputs():
     assert cfg['slo_ms'] == 150
     assert cfg['cpu_hpa_target'] == 80
     assert cfg['latency_floor_fraction'] == pytest.approx(0.8)
+    assert cfg['scale_down_pods'] == 1
+    assert cfg['scale_down_period_seconds'] == 15
     assert cfg['proposed_scale_down_period_seconds'] == 15
 
     with pytest.raises(ValueError, match='unknown autoscaler'):
@@ -115,3 +117,19 @@ def test_autoscaler_config_loader_validates_inputs():
         validate_autoscaler_config({'cpu_hpa_target': 150})
     with pytest.raises(ValueError, match='latency_floor_fraction'):
         validate_autoscaler_config({'latency_floor_fraction': 1.0})
+
+
+def test_final_hpas_share_identical_scale_down_behavior_and_external_metrics():
+    expected_behavior = {
+        'scaleUp': {'stabilizationWindowSeconds': 0},
+        'scaleDown': {
+            'stabilizationWindowSeconds': 60,
+            'policies': [{'type': 'Pods', 'value': 1, 'periodSeconds': 15}],
+        },
+    }
+    hpa_paths = sorted((ROOT / 'deploy/final').rglob('*hpa.yaml'))
+    assert len(hpa_paths) == 6
+    for path in hpa_paths:
+        doc = yaml.safe_load(path.read_text(encoding='utf-8'))
+        assert doc['spec']['behavior'] == expected_behavior, f'behavior mismatch in {path}'
+        assert doc['spec']['metrics'][0]['type'] == 'External', f'non-External metric in {path}'
