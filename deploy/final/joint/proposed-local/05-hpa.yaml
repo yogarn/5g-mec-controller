@@ -1,0 +1,32 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mec-placement-pedestrian-detection-proposed
+  namespace: services
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mec-placement-pedestrian-detection
+  minReplicas: 1
+  maxReplicas: 15
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: ue_p90_excess_latency_120ms_seconds
+        selector:
+          matchLabels:
+            job: ue-telemetry
+      target:
+        type: Value
+        value: 30m
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 15

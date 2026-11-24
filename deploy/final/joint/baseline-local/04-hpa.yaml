@@ -1,0 +1,25 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mec-placement-pedestrian-detection-baseline
+  namespace: services
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mec-placement-pedestrian-detection
+  minReplicas: 1
+  maxReplicas: 15
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: mec_baseline_cpu_dynamic_replicas_fixed3
+      target:
+        type: AverageValue
+        averageValue: '1'
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+    scaleDown:
+      stabilizationWindowSeconds: 60

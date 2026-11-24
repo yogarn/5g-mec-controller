@@ -1,0 +1,22 @@
+{
+  "inventory": "/home/member/skripsi_yoga/5g-mec-controller/.private/ue-paper-24/inventory.yaml",
+  "nr_ue": "/home/member/5g-ai-edge/ueransim/build/nr-ue",
+  "token": "/home/member/.config/5g-mec/ue-telemetry-token",
+  "image": "/home/member/skripsi_yoga/5g-mec-controller/apps/pedestrian-detection/images",
+  "telemetry_url": "http://10.34.211.140:31669/observations",
+  "max_ues": 24,
+  "gnb1_dnn": "mec.icn-2.testbed",
+  "gnb1_subnet": "172.16.50.0/24",
+  "rps_per_ue": 5.0,
+  "gnb2_dnn": "embb.gnb2.testbed",
+  "gnb2_subnet": "10.63.1.0/24",
+  "gnb3_dnn": "embb.gnb3.testbed",
+  "gnb3_subnet": "10.64.1.0/24",
+  "campaign": "manual_mobility",
+  "method": "baseline",
+  "output_name": "baseline-local",
+  "site_urls": null,
+  "schedule": "24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22",
+  "duration": 120.0,
+  "phase_transition": "continuous"
+}

@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placement-controller-config
+  namespace: placement
+data:
+  config.yaml: "manifest: /etc/placement/manifest.yaml\nprometheus_url: http://placement-prometheus.placement.svc:9090\n\
+    mode: mobility-aware\nmutate: true\neligible_nodes:\n- gnb1\n- gnb-2\n- gnb-3\n\
+    zero_locality_nodes: []\ncpu_utilization_query: 1 - avg by (node) (rate(node_cpu_seconds_total{job=\"\
+    node-exporter\",mode=\"idle\",node=~\"gnb1|gnb-2|gnb-3\"}[1m]))\nmobility_query:\
+    \ ue_request_upf_placement_window_attempts{job=\"ue-telemetry-placement\",node=~\"\
+    gnb1|gnb-2|gnb-3\"}\n  / 5\nlocality_weight: 0.4\ndeschedule_interval_seconds:\
+    \ 30.0\nresource_weights:\n  cpu: 0.5\n  memory: 0.5\npod_share_scoring: true\n\
+    namespace: services\n"
+  manifest.yaml: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mec-placement-pedestrian-detection\n\
+    \  namespace: services\nspec:\n  replicas: 0\n  selector:\n    matchLabels:\n\
+    \      app: mec-placement-pedestrian-detection\n      mec-replica: managed\n \
+    \ template:\n    metadata:\n      labels:\n        app: mec-placement-pedestrian-detection\n\
+    \        mec-replica: managed\n      annotations:\n        cni.projectcalico.org/ipv4pools:\
+    \ '[\"mec-campaign-reserved\"]'\n    spec:\n      terminationGracePeriodSeconds:\
+    \ 60\n      schedulerName: mec-placement-scheduler\n      affinity:\n        nodeAffinity:\n\
+    \          requiredDuringSchedulingIgnoredDuringExecution:\n            nodeSelectorTerms:\n\
+    \            - matchFields:\n              - key: metadata.name\n            \
+    \    operator: In\n                values:\n                - gnb1\n         \
+    \   - matchFields:\n              - key: metadata.name\n                operator:\
+    \ In\n                values:\n                - gnb-2\n            - matchFields:\n\
+    \              - key: metadata.name\n                operator: In\n          \
+    \      values:\n                - gnb-3\n      containers:\n      - name: pedestrian-detection\n\
+    \        image: 10.34.211.140:30500/pedestrian-detection@sha256:5245d82fcec53c68db02844135a38eed05e7ee263b987571d38e16d1f4e0d269\n\
+    \        imagePullPolicy: IfNotPresent\n        lifecycle:\n          preStop:\n\
+    \            exec:\n              command:\n              - /bin/sh\n        \
+    \      - -c\n              - sleep 35\n        ports:\n        - name: http\n\
+    \          containerPort: 5000\n        - name: health\n          containerPort:\
+    \ 5001\n        resources:\n          requests:\n            cpu: 500m\n     \
+    \       memory: 256Mi\n          limits:\n            cpu: '1'\n            memory:\
+    \ 512Mi\n        readinessProbe:\n          httpGet:\n            path: /ready\n\
+    \            port: health\n        livenessProbe:\n          httpGet:\n      \
+    \      path: /health\n            port: health\n        env:\n        - name:\
+    \ HTTP_THREADS\n          value: '5'\n        - name: ORT_THREADS\n          value:\
+    \ '1'\n        - name: HEALTH_PORT\n          value: '5001'\n        - name: POD_NAME\n\
+    \          valueFrom:\n            fieldRef:\n              fieldPath: metadata.name\n\
+    \        - name: NODE_NAME\n          valueFrom:\n            fieldRef:\n    \
+    \          fieldPath: spec.nodeName\n        startupProbe:\n          httpGet:\n\
+    \            path: /ready\n            port: health\n          periodSeconds:\
+    \ 2\n          failureThreshold: 60\n---\napiVersion: v1\nkind: Service\nmetadata:\n\
+    \  name: mec-placement-pedestrian-detection\n  namespace: services\nspec:\n  type:\
+    \ NodePort\n  externalTrafficPolicy: Cluster\n  internalTrafficPolicy: Cluster\n\
+    \  sessionAffinity: None\n  selector:\n    app: mec-placement-pedestrian-detection\n\
+    \  ports:\n  - name: http\n    port: 5000\n    targetPort: http\n    protocol:\
+    \ TCP\n  trafficDistribution: PreferClose\n"
