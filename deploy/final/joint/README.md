@@ -368,14 +368,16 @@ kubectl -n $NS get pods -o wide
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+# no managed pod may exist yet: one that landed on core-5g would count as a Core endpoint (fix below if this prints)
+kubectl -n $NS get pods -l mec-replica=managed --no-headers 2>/dev/null | grep -q . && echo "WARNING: managed pods exist. Run: kubectl -n $NS scale deployment/$APP --replicas=0 && kubectl -n $NS wait --for=delete pod -l mec-replica=managed --timeout=120s"
 # reset every site to LOCAL and wait for the Envoy ACKs
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 # Core fallback pool: 0 replicas
 kubectl -n $NS scale deployment/$APP-core --replicas=0
 kubectl -n $NS wait --for=delete pod -l app=$APP-core --timeout=180s 2>/dev/null || true
 # wait until the offloader sees 0 Core endpoints at every site
-for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "0" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: expected 0 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
+for i in $(seq 1 90); do case "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" in 0) break;; esac; sleep 2; done
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 0 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a Core endpoint: scale the managed Deployment to 0, wait for the pod to go, and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
@@ -528,14 +530,16 @@ kubectl -n $NS get pods -o wide
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+# no managed pod may exist yet: one that landed on core-5g would count as a Core endpoint (fix below if this prints)
+kubectl -n $NS get pods -l mec-replica=managed --no-headers 2>/dev/null | grep -q . && echo "WARNING: managed pods exist. Run: kubectl -n $NS scale deployment/$APP --replicas=0 && kubectl -n $NS wait --for=delete pod -l mec-replica=managed --timeout=120s"
 # reset every site to LOCAL and wait for the Envoy ACKs
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 # Core fallback pool: 0 replicas
 kubectl -n $NS scale deployment/$APP-core --replicas=0
 kubectl -n $NS wait --for=delete pod -l app=$APP-core --timeout=180s 2>/dev/null || true
 # wait until the offloader sees 0 Core endpoints at every site
-for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "0" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: expected 0 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
+for i in $(seq 1 90); do case "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" in 0) break;; esac; sleep 2; done
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 0 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a Core endpoint: scale the managed Deployment to 0, wait for the pod to go, and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
@@ -697,6 +701,8 @@ kubectl -n $NS get pods -o wide
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+# no managed pod may exist yet: one that landed on core-5g would count as a Core endpoint (fix below if this prints)
+kubectl -n $NS get pods -l mec-replica=managed --no-headers 2>/dev/null | grep -q . && echo "WARNING: managed pods exist. Run: kubectl -n $NS scale deployment/$APP --replicas=0 && kubectl -n $NS wait --for=delete pod -l mec-replica=managed --timeout=120s"
 # reset every site to LOCAL and wait for the Envoy ACKs
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 # Core fallback pool: 3 replicas
@@ -704,12 +710,12 @@ kubectl -n $NS scale deployment/$APP-core --replicas=3
 kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
 kubectl -n $NS get pods -l app=$APP-core -o wide    # expect 3 Ready on core-5g
 # wait until the offloader sees 3 Core endpoints at every site
-for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "3" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: expected 3 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
+for i in $(seq 1 90); do case "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" in 3) break;; esac; sleep 2; done
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 3 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a Core endpoint: scale the managed Deployment to 0, wait for the pod to go, and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints: 3` (no TIMEOUT above; the offloader counts a managed pod that runs on `core-5g` as a Core endpoint, which is why the managed Deployment is seeded only after this gate), activate vertical mode:
+Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints` within the allowed range (no TIMEOUT above; the offloader counts a managed pod that runs on `core-5g` as a Core endpoint, so it must be exactly 3, which is why the managed Deployment is seeded only after this gate), activate vertical mode:
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -868,6 +874,8 @@ kubectl -n $NS get pods -o wide
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+# no managed pod may exist yet: one that landed on core-5g would count as a Core endpoint (fix below if this prints)
+kubectl -n $NS get pods -l mec-replica=managed --no-headers 2>/dev/null | grep -q . && echo "WARNING: managed pods exist. Run: kubectl -n $NS scale deployment/$APP --replicas=0 && kubectl -n $NS wait --for=delete pod -l mec-replica=managed --timeout=120s"
 # reset every site to LOCAL and wait for the Envoy ACKs
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 # Core fallback pool: 3 replicas
@@ -875,12 +883,12 @@ kubectl -n $NS scale deployment/$APP-core --replicas=3
 kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
 kubectl -n $NS get pods -l app=$APP-core -o wide    # expect 3 Ready on core-5g
 # wait until the offloader sees 3 Core endpoints at every site
-for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "3" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: expected 3 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
+for i in $(seq 1 90); do case "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" in 3) break;; esac; sleep 2; done
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 3 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a Core endpoint: scale the managed Deployment to 0, wait for the pod to go, and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints: 3` (no TIMEOUT above; the offloader counts a managed pod that runs on `core-5g` as a Core endpoint, which is why the managed Deployment is seeded only after this gate), activate vertical mode:
+Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints` within the allowed range (no TIMEOUT above; the offloader counts a managed pod that runs on `core-5g` as a Core endpoint, so it must be exactly 3, which is why the managed Deployment is seeded only after this gate), activate vertical mode:
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
