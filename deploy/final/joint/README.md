@@ -340,11 +340,7 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/joint/baseline-local/03-workload.yaml
-# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
-kubectl -n $NS rollout status deployment/$APP --timeout=240s
-# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
-# skip the two lines above and run the scale line once the UE log shows [RUN]
+# replicas: 0 on purpose; the managed Deployment is seeded in the "Seed" step below, after the readiness gate
 ```
 
 #### 5. Autoscaler
@@ -379,11 +375,23 @@ kubectl -n $NS scale deployment/$APP-core --replicas=0
 kubectl -n $NS wait --for=delete pod -l app=$APP-core --timeout=180s 2>/dev/null || true
 # wait until the offloader sees 0 Core endpoints at every site
 for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "0" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: offloader never reported 0 core endpoints at every site (is the T3 port-forward running?)"
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 0 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-#### 8. UE: prerequisites check, then run (blocks for the whole schedule)
+#### 8. Seed the managed Deployment (after the readiness gate, before traffic)
+The HPA does not act at 0 replicas, so the managed Deployment is scaled to the HPA minimum (1) now. This comes after the offloader gate on purpose: the campaign's gate expects exactly the Core pool, and a managed pod that lands on `core-5g` is counted as a Core endpoint.
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+kubectl -n $NS get pods -o wide
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip this step and run the scale line once the UE log shows [RUN]
+```
+
+#### 9. UE: prerequisites check, then run (blocks for the whole schedule)
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -399,7 +407,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`. Open a second terminal (T4) for the next step.
 
-#### 9. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
+#### 10. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
 HPA decisions (stays open):
 
 ```bash
@@ -429,7 +437,7 @@ export CAMP=$(cat /tmp/final-camp)
 $UE "cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign $CAMP --method baseline-local"
 ```
 
-#### 10. After the UE finishes: collect and clean up
+#### 11. After the UE finishes: collect and clean up
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -497,11 +505,7 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/joint/proposed-local/04-workload.yaml
-# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
-kubectl -n $NS rollout status deployment/$APP --timeout=240s
-# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
-# skip the two lines above and run the scale line once the UE log shows [RUN]
+# replicas: 0 on purpose; the managed Deployment is seeded in the "Seed" step below, after the readiness gate
 ```
 
 #### 6. Autoscaler
@@ -531,11 +535,23 @@ kubectl -n $NS scale deployment/$APP-core --replicas=0
 kubectl -n $NS wait --for=delete pod -l app=$APP-core --timeout=180s 2>/dev/null || true
 # wait until the offloader sees 0 Core endpoints at every site
 for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "0" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: offloader never reported 0 core endpoints at every site (is the T3 port-forward running?)"
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 0 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-#### 9. UE: prerequisites check, then run (blocks for the whole schedule)
+#### 9. Seed the managed Deployment (after the readiness gate, before traffic)
+The HPA does not act at 0 replicas, so the managed Deployment is scaled to the HPA minimum (1) now. This comes after the offloader gate on purpose: the campaign's gate expects exactly the Core pool, and a managed pod that lands on `core-5g` is counted as a Core endpoint.
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+kubectl -n $NS get pods -o wide
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip this step and run the scale line once the UE log shows [RUN]
+```
+
+#### 10. UE: prerequisites check, then run (blocks for the whole schedule)
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -551,7 +567,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`. Open a second terminal (T4) for the next step.
 
-#### 10. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
+#### 11. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
 Latency metric visible to the HPA (should appear within ~90 s of `[RUN]`; prints a value and returns):
 
 ```bash
@@ -595,7 +611,7 @@ export CAMP=$(cat /tmp/final-camp)
 $UE "cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign $CAMP --method proposed-local"
 ```
 
-#### 11. After the UE finishes: collect and clean up
+#### 12. After the UE finishes: collect and clean up
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -653,11 +669,7 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/joint/baseline-vertical/03-workload.yaml
-# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
-kubectl -n $NS rollout status deployment/$APP --timeout=240s
-# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
-# skip the two lines above and run the scale line once the UE log shows [RUN]
+# replicas: 0 on purpose; the managed Deployment is seeded in the "Seed" step below, after the readiness gate
 ```
 
 #### 5. Autoscaler
@@ -693,11 +705,11 @@ kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
 kubectl -n $NS get pods -l app=$APP-core -o wide    # expect 3 Ready on core-5g
 # wait until the offloader sees 3 Core endpoints at every site
 for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "3" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: offloader never reported 3 core endpoints at every site (is the T3 port-forward running?)"
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 3 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints: 3` (no TIMEOUT above), activate vertical mode:
+Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints: 3` (no TIMEOUT above; the offloader counts a managed pod that runs on `core-5g` as a Core endpoint, which is why the managed Deployment is seeded only after this gate), activate vertical mode:
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -707,7 +719,19 @@ curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route
 
 Expect `mode: vertical`.
 
-#### 8. UE: prerequisites check, then run (blocks for the whole schedule)
+#### 8. Seed the managed Deployment (after the readiness gate, before traffic)
+The HPA does not act at 0 replicas, so the managed Deployment is scaled to the HPA minimum (1) now. This comes after the offloader gate on purpose: the campaign's gate expects exactly the Core pool, and a managed pod that lands on `core-5g` is counted as a Core endpoint.
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+kubectl -n $NS get pods -o wide
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip this step and run the scale line once the UE log shows [RUN]
+```
+
+#### 9. UE: prerequisites check, then run (blocks for the whole schedule)
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -723,7 +747,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`. Open a second terminal (T4) for the next step.
 
-#### 9. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
+#### 10. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
 HPA decisions (stays open):
 
 ```bash
@@ -753,7 +777,7 @@ export CAMP=$(cat /tmp/final-camp)
 $UE "cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign $CAMP --method baseline-vertical"
 ```
 
-#### 10. After the UE finishes: collect and clean up
+#### 11. After the UE finishes: collect and clean up
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -821,11 +845,7 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/joint/proposed-vertical/04-workload.yaml
-# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
-kubectl -n $NS rollout status deployment/$APP --timeout=240s
-# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
-# skip the two lines above and run the scale line once the UE log shows [RUN]
+# replicas: 0 on purpose; the managed Deployment is seeded in the "Seed" step below, after the readiness gate
 ```
 
 #### 6. Autoscaler
@@ -856,11 +876,11 @@ kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
 kubectl -n $NS get pods -l app=$APP-core -o wide    # expect 3 Ready on core-5g
 # wait until the offloader sees 3 Core endpoints at every site
 for i in $(seq 1 90); do [ "$(curl -s -H "$H" $A/status | jq -r '[.sites[].core_ready_endpoints]|unique|join(",")')" = "3" ] && break; sleep 2; done
-[ "$i" -lt 90 ] || echo "TIMEOUT: offloader never reported 3 core endpoints at every site (is the T3 port-forward running?)"
+[ "$i" -lt 90 ] || echo "TIMEOUT: expected 3 core endpoints at every site, see the counts below. A managed pod already running on core-5g counts as a core endpoint: scale the managed Deployment to 0 and repeat."
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints: 3` (no TIMEOUT above), activate vertical mode:
+Only if every site shows `active_route: LOCAL`, `local_ready_endpoints >= 1` and `core_ready_endpoints: 3` (no TIMEOUT above; the offloader counts a managed pod that runs on `core-5g` as a Core endpoint, which is why the managed Deployment is seeded only after this gate), activate vertical mode:
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -870,7 +890,19 @@ curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route
 
 Expect `mode: vertical`.
 
-#### 9. UE: prerequisites check, then run (blocks for the whole schedule)
+#### 9. Seed the managed Deployment (after the readiness gate, before traffic)
+The HPA does not act at 0 replicas, so the managed Deployment is scaled to the HPA minimum (1) now. This comes after the offloader gate on purpose: the campaign's gate expects exactly the Core pool, and a managed pod that lands on `core-5g` is counted as a Core endpoint.
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+kubectl -n $NS get pods -o wide
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip this step and run the scale line once the UE log shows [RUN]
+```
+
+#### 10. UE: prerequisites check, then run (blocks for the whole schedule)
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
@@ -886,7 +918,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`. Open a second terminal (T4) for the next step.
 
-#### 10. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
+#### 11. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
 Latency metric visible to the HPA (should appear within ~90 s of `[RUN]`; prints a value and returns):
 
 ```bash
@@ -930,7 +962,7 @@ export CAMP=$(cat /tmp/final-camp)
 $UE "cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign $CAMP --method proposed-vertical"
 ```
 
-#### 11. After the UE finishes: collect and clean up
+#### 12. After the UE finishes: collect and clean up
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
