@@ -54,9 +54,11 @@ kubectl -n $NS get deployment $APP-core -o jsonpath='{.spec.replicas}{"\n"}'   #
 ## 1. `baseline-local`: default scheduler, all replicas local, no offload
 Files: `deploy/final/joint/baseline-local/`. Run in terminal **T1** on core (see the setup section) unless stated.
 
-#### 1. Start from a clean slate (what the campaign does before every arm)
+#### 1. Start from a clean slate (offloader to LOCAL first, then remove the previous arm)
+Reset the offloader before deleting anything, so no site is still routing to the Core pool or to pods that are about to disappear (the campaign guarantees this through the previous arm's teardown; after an aborted run you must do it yourself).
 
 ```bash
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
@@ -153,12 +155,14 @@ To abort the UE early: `ssh member@10.34.211.6 'cd /home/member/skripsi_yoga/5g-
 ```bash
 # optional: copy the UE-side results (request logs, summaries) to core
 rsync -a member@10.34.211.6:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMP/ results/$CAMP-ue/
+# 1) offloader back to LOCAL first (waits for the Envoy ACKs), same order as the campaign's teardown
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
+# 2) only then remove the arm
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
 kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || true
-curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
-kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 before the run
+# The Core pool is left as this arm set it; the next arm sets its own size, and the scenario teardown restores it to 3.
 ```
 
 ---
@@ -166,9 +170,11 @@ kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 befor
 ## 2. `proposed-local`: placement scheduler + descheduler + latency HPA, no offload
 Files: `deploy/final/joint/proposed-local/`. Run in terminal **T1** on core (see the setup section) unless stated.
 
-#### 1. Start from a clean slate (what the campaign does before every arm)
+#### 1. Start from a clean slate (offloader to LOCAL first, then remove the previous arm)
+Reset the offloader before deleting anything, so no site is still routing to the Core pool or to pods that are about to disappear (the campaign guarantees this through the previous arm's teardown; after an aborted run you must do it yourself).
 
 ```bash
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
@@ -272,12 +278,14 @@ To abort the UE early: `ssh member@10.34.211.6 'cd /home/member/skripsi_yoga/5g-
 ```bash
 # optional: copy the UE-side results (request logs, summaries) to core
 rsync -a member@10.34.211.6:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMP/ results/$CAMP-ue/
+# 1) offloader back to LOCAL first (waits for the Envoy ACKs), same order as the campaign's teardown
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
+# 2) only then remove the arm
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
 kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || true
-curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
-kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 before the run
+# The Core pool is left as this arm set it; the next arm sets its own size, and the scenario teardown restores it to 3.
 ```
 
 ---
@@ -285,9 +293,11 @@ kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 befor
 ## 3. `baseline-vertical`: default scheduler, offload to the Core pool allowed
 Files: `deploy/final/joint/baseline-vertical/`. Run in terminal **T1** on core (see the setup section) unless stated.
 
-#### 1. Start from a clean slate (what the campaign does before every arm)
+#### 1. Start from a clean slate (offloader to LOCAL first, then remove the previous arm)
+Reset the offloader before deleting anything, so no site is still routing to the Core pool or to pods that are about to disappear (the campaign guarantees this through the previous arm's teardown; after an aborted run you must do it yourself).
 
 ```bash
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
@@ -389,12 +399,14 @@ To abort the UE early: `ssh member@10.34.211.6 'cd /home/member/skripsi_yoga/5g-
 ```bash
 # optional: copy the UE-side results (request logs, summaries) to core
 rsync -a member@10.34.211.6:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMP/ results/$CAMP-ue/
+# 1) offloader back to LOCAL first (waits for the Envoy ACKs), same order as the campaign's teardown
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
+# 2) only then remove the arm
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
 kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || true
-curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
-kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 before the run
+# The Core pool is left as this arm set it; the next arm sets its own size, and the scenario teardown restores it to 3.
 ```
 
 ---
@@ -402,9 +414,11 @@ kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 befor
 ## 4. `proposed-vertical`: placement scheduler + descheduler + latency HPA + offload
 Files: `deploy/final/joint/proposed-vertical/`. Run in terminal **T1** on core (see the setup section) unless stated.
 
-#### 1. Start from a clean slate (what the campaign does before every arm)
+#### 1. Start from a clean slate (offloader to LOCAL first, then remove the previous arm)
+Reset the offloader before deleting anything, so no site is still routing to the Core pool or to pods that are about to disappear (the campaign guarantees this through the previous arm's teardown; after an aborted run you must do it yourself).
 
 ```bash
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
@@ -513,12 +527,14 @@ To abort the UE early: `ssh member@10.34.211.6 'cd /home/member/skripsi_yoga/5g-
 ```bash
 # optional: copy the UE-side results (request logs, summaries) to core
 rsync -a member@10.34.211.6:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMP/ results/$CAMP-ue/
+# 1) offloader back to LOCAL first (waits for the Envoy ACKs), same order as the campaign's teardown
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
+# 2) only then remove the arm
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
 kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || true
-curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
-kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 before the run
+# The Core pool is left as this arm set it; the next arm sets its own size, and the scenario teardown restores it to 3.
 ```
 
 ---
@@ -526,8 +542,12 @@ kubectl -n $NS scale deployment/$APP-core --replicas=3    # the pool was 3 befor
 ## Scenario teardown
 
 ```bash
-echo "Ctrl-C the tc helper in T2 (removes the delay) and the port-forward in T3"
+# offloader to LOCAL first, then restore the Core pool to its original 3 replicas (as the campaign does at the very end)
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
+kubectl -n $NS scale deployment/$APP-core --replicas=3
+kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
+kubectl -n $NS get deployment $APP-core    # expect 3/3
+# now stop the tc helper in T2 with Ctrl-C (removes the delay) and, for joint/mobility, the port-forward in T3
 kubectl get nodes -L topology.kubernetes.io/zone
-kubectl -n $NS get deployment $APP-core    # should be 3/3 again
 ```
 

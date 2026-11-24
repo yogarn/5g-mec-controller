@@ -185,7 +185,7 @@ kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || t
 ## Scenario teardown
 
 ```bash
-echo "Ctrl-C the tc helper in T2 (removes the delay) and the port-forward in T3"
+# now stop the tc helper in T2 with Ctrl-C (removes the delay) and, for joint/mobility, the port-forward in T3
 kubectl get nodes -L topology.kubernetes.io/zone
 ```
 
