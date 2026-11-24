@@ -13,18 +13,27 @@ The platform manifests now use `:latest` for the offloader, the collector and `p
 **Important:** the `latest` tags that exist in the registry today are *not* the images used in the final runs. Pushing a fresh build replaces them with a build of the current checkout, whose digest will differ from the ones recorded for the results:
 
 | image | final runs used | `latest` in the registry before you rebuild |
-
 |---|---|---|
-
 | vertical-offloader | tag `backoff-20261121T180558Z` (`sha256:5c0a3478...`) | `sha256:4471c7df...` |
-
 | ue-telemetry-collector | tag `prune-20261121T152448Z` (`sha256:a39107ee...`) | `sha256:121b56b5...` |
-
 | placement-controller | `sha256:1164526f...` | `sha256:948f3b1e...` |
-
 | pedestrian-detection (the application under test) | `sha256:5245d82f...` | no `latest` tag |
 
 The application image is deliberately **not** moved to `latest`: it is the system under test, its digest is recorded in the results, and it is already in the registry. It is pinned by digest in `apps/pedestrian-detection/manifest.yaml`, `offloader/core-backend.yaml` and every rendered manifest here. No build step is needed for it.
+
+### A0. Which images are safe to rebuild (read first)
+Same source does not mean same image: every `docker build` produces a new digest (layer timestamps, and base images and unpinned dependencies can move). What matters is whether that can change the **measured** result. Status of what was checked is stated per row.
+
+| image | built by you? | safe to rebuild? | why / what was checked |
+|---|---|---|---|
+| `vertical-offloader` | yes (A2) | **yes** | It makes the offloading decisions of the vertical arms, but its logic is identical: checked on core that every non-test `.py` file in the final-run image (`backoff-20261121T180558Z`) has the same SHA-256 as the file in this repo (17 files). Only the digest, the base image `python:3.12-slim` and the unpinned `pip install pyyaml` (config parsing only) can differ. |
+| `ue-telemetry-collector` | yes (A2) | **yes** | It computes the p90 the HPA reads. Checked on core: every non-test `.py` file in the final-run image (`prune-20261121T152448Z`) is identical to the repo (6 files). `PyYAML==6.0.2` is pinned; only the base image can move. |
+| `placement-controller` | yes (A2) | **probably, least verifiable** | It is the scheduler and descheduler of the proposed arms. A Go binary cannot be compared to source, so identity with the image behind `sha256:1164526f...` is **not proven**: the manifest comment named an older source commit than the binary clearly contains. `go.sum` pins the modules, `-trimpath` and a static build make it deterministic apart from the moving `golang:1.24-alpine` toolchain. Checked: `go vet ./...` and `go test ./...` pass on the frozen source (config, controller and policy packages, in `golang:1.24-alpine`), and a local build from `placement/` starts and prints its flags; that shows the logic is sound, not that it is the same binary. If you want zero doubt, keep the pinned digest (section A4) and skip this build. |
+| `envoyproxy/envoy:v1.31-latest` | no (upstream) | **do not re-pull it** | It sits on the request path and the tag is floating. The nodes run `sha256:caa5b411...`, which is also the digest recorded in the results; `imagePullPolicy: IfNotPresent` keeps it cached. A fresh pull could bring a newer 1.31.x. Pinning it (`envoyproxy/envoy@sha256:caa5b411be1633b90023592a34a7e010c933d6e60206c758f631485e53006865`) would remove that risk; the manifests do not do this yet. |
+| `pedestrian-detection` (the workload) | **no** | **no, keep the digest** | It is the system under test and the digest `sha256:5245d82f...` (tag `steep-spillover`) is recorded in the results. `requirements.txt` pins only 5 packages (Flask, gunicorn, numpy, Pillow, onnxruntime); their dependencies and the `python:3.11-slim` base are not pinned, so a rebuild can change inference time by a few ms, which goes straight into p90 and SLO violations. With `:latest` and `imagePullPolicy: IfNotPresent` each node would also keep whichever build it pulled first, so replicas on different nodes could silently run different images. A rebuild means a new tag and digest, every YAML with the old digest replaced, and the experiment rerun. |
+| Prometheus `v2.53.0`, prometheus-adapter `v0.12.0`, node-exporter `v1.8.1`, Grafana `11.1.0` | no (upstream) | n/a | Fixed version tags, pulled not built; nothing to do. |
+
+Rule of thumb: the three control components are safe to rebuild from this checkout (the first two are proven identical in logic; the Go one is only tested), the workload and Envoy are never rebuilt or re-pulled during a comparison. After any rebuild, section B3 shows the digest each pod really runs; write it down next to the results.
 
 ### A1. Check the checkout and the build tools
 The build uses whatever is checked out, so confirm it is the frozen commit and clean:

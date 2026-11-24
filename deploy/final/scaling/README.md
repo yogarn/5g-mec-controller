@@ -13,18 +13,22 @@ The platform manifests now use `:latest` for the collector (`imagePullPolicy: Al
 **Important:** the `latest` tags that exist in the registry today are *not* the images used in the final runs. Pushing a fresh build replaces them with a build of the current checkout, whose digest will differ from the ones recorded for the results:
 
 | image | final runs used | `latest` in the registry before you rebuild |
-
 |---|---|---|
-
-| vertical-offloader | tag `backoff-20261121T180558Z` (`sha256:5c0a3478...`) | `sha256:4471c7df...` |
-
 | ue-telemetry-collector | tag `prune-20261121T152448Z` (`sha256:a39107ee...`) | `sha256:121b56b5...` |
-
-| placement-controller | `sha256:1164526f...` | `sha256:948f3b1e...` |
-
 | pedestrian-detection (the application under test) | `sha256:5245d82f...` | no `latest` tag |
 
 The application image is deliberately **not** moved to `latest`: it is the system under test, its digest is recorded in the results, and it is already in the registry. It is pinned by digest in `apps/pedestrian-detection/manifest.yaml`, `offloader/core-backend.yaml` and every rendered manifest here. No build step is needed for it.
+
+### A0. Which images are safe to rebuild (read first)
+Same source does not mean same image: every `docker build` produces a new digest (layer timestamps, and base images and unpinned dependencies can move). What matters is whether that can change the **measured** result. Status of what was checked is stated per row.
+
+| image | built by you? | safe to rebuild? | why / what was checked |
+|---|---|---|---|
+| `ue-telemetry-collector` | yes (A2) | **yes** | It computes the p90 the HPA reads. Checked on core: every non-test `.py` file in the final-run image (`prune-20261121T152448Z`) is identical to the repo (6 files). `PyYAML==6.0.2` is pinned; only the base image can move. |
+| `pedestrian-detection` (the workload) | **no** | **no, keep the digest** | It is the system under test and the digest `sha256:5245d82f...` (tag `steep-spillover`) is recorded in the results. `requirements.txt` pins only 5 packages (Flask, gunicorn, numpy, Pillow, onnxruntime); their dependencies and the `python:3.11-slim` base are not pinned, so a rebuild can change inference time by a few ms, which goes straight into p90 and SLO violations. With `:latest` and `imagePullPolicy: IfNotPresent` each node would also keep whichever build it pulled first, so replicas on different nodes could silently run different images. A rebuild means a new tag and digest, every YAML with the old digest replaced, and the experiment rerun. |
+| Prometheus `v2.53.0`, prometheus-adapter `v0.12.0`, node-exporter `v1.8.1`, Grafana `11.1.0` | no (upstream) | n/a | Fixed version tags, pulled not built; nothing to do. |
+
+Rule of thumb: the collector is safe to rebuild from this checkout (proven identical in logic), the workload is never rebuilt during a comparison. This scenario does not use the offloader, `placement-controller` or the Envoys. After any rebuild, section B3 shows the digest each pod really runs; write it down next to the results.
 
 ### A1. Check the checkout and the build tools
 The build uses whatever is checked out, so confirm it is the frozen commit and clean:

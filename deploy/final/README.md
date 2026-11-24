@@ -20,6 +20,11 @@ Each scenario runbook starts with the setup the arms need:
   `placement-controller`, offloader, Core backend, Envoys), and check it.
 - then the scenario setup (tc delay, zones, port-forward) and the per-arm sections.
 
+**Which images are safe to rebuild** is spelled out in section A0 of every runbook (and in `platform/README.md`):
+the offloader and the collector are proven identical in logic to the final-run images, `placement-controller`
+is only tested (a Go binary cannot be compared to source), the workload `pedestrian-detection` and Envoy are
+never rebuilt or re-pulled during a comparison.
+
 [`platform/README.md`](platform/README.md) is the same material as a stand-alone reference.
 
 Each arm folder holds the numbered manifests (`01-...`, `02-...` in apply order) and `ue-payload.json`,
