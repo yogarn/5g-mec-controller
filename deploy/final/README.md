@@ -51,8 +51,8 @@ arm with every command written out; nothing says "same for the others".
    them ("core and UE project revisions differ") and will refuse until the UE host is on the same commit.
 2. **What is not YAML** and is therefore in the runbooks as commands: the PreferClose zone labels
    (`gnb1`, `gnb-2`, `gnb-3`; `core-5g` is not labelled), the 10 ms `tc` delay, the offloader admin API
-   (reset / Core pool / vertical mode), the one-pod seed of the managed Deployment (done before traffic by default; the runbooks show how to do it
-   at `[RUN]` instead, as the recorded runs did), and the UE runner.
+   (reset / Core pool / vertical mode), the one-pod seed of the managed Deployment (done after the offloader readiness gate and before traffic; the
+   runbooks show how to do it at `[RUN]` instead, as the recorded runs did), and the UE runner.
 3. **Cluster state right now** (read on core): zones on `gnb1`, `gnb-2`, `gnb-3` are already set to
    their own name, the Core pool is at 3 replicas, and the Calico pool `mec-campaign-reserved`
    (172.16.40.0/23) exists.

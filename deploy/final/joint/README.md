@@ -23,9 +23,9 @@ Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `basel
 ## A. Build and push the images
 The platform manifests now use `:latest` for the offloader, the collector and `placement-controller` (`imagePullPolicy: Always`). Build on core with Docker (no sudo needed), push to the cluster registry through `localhost:30500`; the nodes pull the same registry as `10.34.211.140:30500`.
 
-**Important:** the `latest` tags that exist in the registry today are *not* the images used in the final runs. Pushing a fresh build replaces them with a build of the current checkout, whose digest will differ from the ones recorded for the results:
+**Important:** before the first rebuild on 2026-11-24 the `latest` tags in the registry were older images, *not* the ones used in the final runs. Pushing a build replaces `latest` with a build of the current checkout, whose digest can differ from the ones recorded for the results (A3 compares them layer by layer). The table shows the state before that first rebuild:
 
-| image | final runs used | `latest` in the registry before you rebuild |
+| image | final runs used | `latest` before the first rebuild (2026-11-24) |
 |---|---|---|
 | vertical-offloader | tag `backoff-20261121T180558Z` (`sha256:5c0a3478...`) | `sha256:4471c7df...` |
 | ue-telemetry-collector | tag `prune-20261121T152448Z` (`sha256:a39107ee...`) | `sha256:121b56b5...` |
