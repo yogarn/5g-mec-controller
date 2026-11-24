@@ -7,15 +7,84 @@ Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T3
 
 Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `baseline-vertical`, `proposed-vertical`. Each arm section is self-contained.
 
-## Platform (must already be running)
-These sections only add and remove the per-arm pieces. The platform (telemetry, collector, `placement-controller`, `vertical-offloader`, Envoys, Core backend, token Secret) is deployed once, see [`../platform/README.md`](../platform/README.md) to check it, tear it down or rebuild it from nothing. Quick check:
+## 0. Platform: remove the old one and deploy from scratch
+This scenario needs the whole platform: telemetry (node-exporter, Prometheus, adapter), the collector, `placement-controller`, the offloader, the Core backend and the three Envoys. The arm sections below assume it exists; this section builds it. All `apply` commands are idempotent, so skip 0a if you only want to make sure everything is present.
+
+### 0a. Remove the old platform (optional, only to start from nothing)
+Prometheus keeps its history inside the pod, so this drops it. Reverse order, so nothing points at something already gone. Finish or clean up any running arm first.
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
-kubectl -n placement get deploy
-kubectl -n services get deploy | grep -E "envoy|core"
+# Envoys first (they consume the offloader's xDS), then the Core backend, then the offloader
+kubectl delete -f offloader/envoy-ingress.yaml --ignore-not-found=true
+kubectl delete -f offloader/core-backend.yaml --ignore-not-found=true
+kubectl delete -f offloader/manifest.yaml --ignore-not-found=true
+# scheduler: while it is gone, pods with schedulerName mec-placement-scheduler stay Pending
+kubectl delete -f placement/deploy.yaml --ignore-not-found=true
+# collector, then telemetry
+kubectl delete -f collector/manifest.yaml --ignore-not-found=true
+kubectl delete -f telemetry/05-prometheus-adapter.yaml --ignore-not-found=true
+kubectl delete -f telemetry/03-prometheus.yaml --ignore-not-found=true
+kubectl delete -f telemetry/01-node-exporter.yaml --ignore-not-found=true
+```
+
+The namespaces and the `ue-telemetry-token` Secret are kept.
+
+### 0b. Deploy
+Namespaces and the token Secret (the Secret value must be the token file content exactly; the one on core is byte-identical to this file):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl apply -f telemetry/00-namespace.yaml
+kubectl get namespace services >/dev/null 2>&1 || kubectl create namespace services
+kubectl -n placement get secret ue-telemetry-token >/dev/null 2>&1 || \
+  kubectl -n placement create secret generic ue-telemetry-token \
+    --from-file=token=/home/member/.config/5g-mec/ue-telemetry-token
+```
+
+Telemetry and collector (do **not** apply `collector/prometheus-scrape.yaml`, it is only a merge snippet; the scrape jobs are already in `telemetry/03-prometheus.yaml`):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl apply -f telemetry/01-node-exporter.yaml
+kubectl apply -f telemetry/03-prometheus.yaml
+kubectl -n placement rollout status deployment/placement-prometheus --timeout=180s
+kubectl apply -f telemetry/05-prometheus-adapter.yaml
+kubectl -n placement rollout status deployment/prometheus-adapter --timeout=180s
+kubectl apply -f collector/manifest.yaml
+kubectl -n placement rollout status deployment/ue-telemetry --timeout=180s
+kubectl get apiservice v1beta1.external.metrics.k8s.io   # AVAILABLE must become True
+```
+
+Scheduler, offloader, Core backend and Envoys (in this order):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl apply -f placement/deploy.yaml
+kubectl -n placement rollout status deployment/placement-controller --timeout=180s
+kubectl apply -f offloader/manifest.yaml
+kubectl -n placement rollout status deployment/vertical-offloader --timeout=180s
+kubectl apply -f offloader/core-backend.yaml
+kubectl -n services rollout status deployment/mec-placement-pedestrian-detection-core --timeout=240s
+kubectl apply -f offloader/envoy-ingress.yaml
+kubectl -n services rollout status deployment/mec-envoy-gnb-1 --timeout=180s
+kubectl -n services rollout status deployment/mec-envoy-gnb-2 --timeout=180s
+kubectl -n services rollout status deployment/mec-envoy-gnb-3 --timeout=180s
+```
+
+The offloader starts in `mode: vertical`; every arm resets it to `local-only` first, so that is fine. The Core backend comes up with 3 replicas.
+
+### 0c. Check
+Give Prometheus about a minute to scrape before the first arm; the adapter metrics only appear once the `ue-telemetry` and `kubelet-cadvisor` jobs have data.
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n placement get deploy,svc
+kubectl -n services get deploy | grep -E 'envoy|core'
 kubectl get apiservice v1beta1.external.metrics.k8s.io
 ```
+
+Expect `1/1` for `placement-prometheus`, `prometheus-adapter`, `ue-telemetry`, `placement-controller`, `vertical-offloader`; `1/1` for each `mec-envoy-gnb-N`; `3/3` for `mec-placement-pedestrian-detection-core`; Services `vertical-offloader` (8085) and `vertical-offloader-admin` (8086); APIService `True`. The offloader itself is checked in the setup below, once the port-forward is up.
 
 ## Scenario setup (once per scenario, before the first arm)
 **T2 (core), keep open for the whole scenario:** inter-node path delay of 10 ms for the experiment pods (`tc_ms: 10`, as in every final run).
@@ -710,14 +779,31 @@ kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || t
 
 ## Scenario teardown
 
+**Option 1: keep the platform, restore the pool.** Offloader to LOCAL first, then the Core pool back to its original 3 replicas (as the campaign does at the very end):
+
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
-# offloader to LOCAL first, then restore the Core pool to its original 3 replicas (as the campaign does at the very end)
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
 kubectl -n $NS scale deployment/$APP-core --replicas=3
 kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
 kubectl -n $NS get deployment $APP-core    # expect 3/3
-# now stop the tc helper in T2 with Ctrl-C (removes the delay) and, for joint/mobility, the port-forward in T3
+```
+
+**Option 2: remove the offloader stack as well** (offloader to LOCAL first, then Envoys, Core backend, offloader, scheduler; the telemetry and collector stay, remove them with section 0a if you want a bare cluster):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d '{"mode":"local-only"}' $A/reset | jq .
+kubectl delete -f offloader/envoy-ingress.yaml --ignore-not-found=true
+kubectl delete -f offloader/core-backend.yaml --ignore-not-found=true
+kubectl delete -f offloader/manifest.yaml --ignore-not-found=true
+kubectl delete -f placement/deploy.yaml --ignore-not-found=true
+```
+
+Then stop the tc helper in T2 (Ctrl-C removes the delay) and the port-forward in T3, and check the zones:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl get nodes -L topology.kubernetes.io/zone
 ```
 

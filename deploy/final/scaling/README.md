@@ -7,14 +7,58 @@ Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T4
 
 Run one arm at a time, in this order: `baseline`, `proposed`. Each arm section is self-contained.
 
-## Platform (must already be running)
-These sections only add and remove the per-arm pieces. The platform (telemetry, collector, `placement-controller`, token Secret) is deployed once, see [`../platform/README.md`](../platform/README.md) to check it, tear it down or rebuild it from nothing. Quick check:
+## 0. Platform: remove the old one and deploy from scratch
+This scenario needs telemetry (node-exporter, Prometheus, adapter) and the collector. It does **not** use `placement-controller`, the offloader, the Envoys or the Core backend. The arm sections below assume it exists; this section builds it. All `apply` commands are idempotent, so skip 0a if you only want to make sure everything is present.
+
+### 0a. Remove the old platform (optional, only to start from nothing)
+Prometheus keeps its history inside the pod, so this drops it. Reverse order, so nothing points at something already gone. Finish or clean up any running arm first.
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
-kubectl -n placement get deploy
+kubectl delete -f collector/manifest.yaml --ignore-not-found=true
+kubectl delete -f telemetry/05-prometheus-adapter.yaml --ignore-not-found=true
+kubectl delete -f telemetry/03-prometheus.yaml --ignore-not-found=true
+kubectl delete -f telemetry/01-node-exporter.yaml --ignore-not-found=true
+```
+
+The namespaces and the `ue-telemetry-token` Secret are kept.
+
+### 0b. Deploy
+Namespaces and the token Secret (the Secret value must be the token file content exactly; the one on core is byte-identical to this file):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl apply -f telemetry/00-namespace.yaml
+kubectl get namespace services >/dev/null 2>&1 || kubectl create namespace services
+kubectl -n placement get secret ue-telemetry-token >/dev/null 2>&1 || \
+  kubectl -n placement create secret generic ue-telemetry-token \
+    --from-file=token=/home/member/.config/5g-mec/ue-telemetry-token
+```
+
+Telemetry and collector (do **not** apply `collector/prometheus-scrape.yaml`, it is only a merge snippet; the scrape jobs are already in `telemetry/03-prometheus.yaml`):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl apply -f telemetry/01-node-exporter.yaml
+kubectl apply -f telemetry/03-prometheus.yaml
+kubectl -n placement rollout status deployment/placement-prometheus --timeout=180s
+kubectl apply -f telemetry/05-prometheus-adapter.yaml
+kubectl -n placement rollout status deployment/prometheus-adapter --timeout=180s
+kubectl apply -f collector/manifest.yaml
+kubectl -n placement rollout status deployment/ue-telemetry --timeout=180s
+kubectl get apiservice v1beta1.external.metrics.k8s.io   # AVAILABLE must become True
+```
+
+### 0c. Check
+Give Prometheus about a minute to scrape before the first arm; the adapter metrics only appear once the `ue-telemetry` and `kubelet-cadvisor` jobs have data.
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n placement get deploy,svc
 kubectl get apiservice v1beta1.external.metrics.k8s.io
 ```
+
+Expect `1/1` for `placement-prometheus`, `prometheus-adapter`, `ue-telemetry` and APIService `True`.
 
 ## Scenario setup (once per scenario, before the first arm)
 **T2 (core), keep open for the whole scenario:** inter-node path delay of 10 ms for the experiment pods (`tc_ms: 10`, as in every final run).
@@ -238,9 +282,10 @@ kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || t
 
 ## Scenario teardown
 
+Stop the tc helper in T2 (Ctrl-C removes the delay). The telemetry stack and collector stay; remove them with section 0a if you want a bare cluster. Check the zones were not touched:
+
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
-# now stop the tc helper in T2 with Ctrl-C (removes the delay) and, for joint/mobility, the port-forward in T3
 kubectl get nodes -L topology.kubernetes.io/zone
 ```
 

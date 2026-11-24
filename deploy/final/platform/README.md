@@ -1,5 +1,8 @@
 # Platform: what the arm runbooks assume is already running
 
+Stand-alone reference. The same remove and deploy steps are in section 0 of each scenario runbook
+(`../joint`, `../mobility`, `../scaling`), tailored to what that scenario needs.
+
 The arm runbooks (`../joint`, `../mobility`, `../scaling`) only add and remove the per-arm pieces
 (workload, anchors, HPA, adapter rules, placement config). They do **not** deploy the platform below.
 The campaign does not either; it fails its preflight if a piece is missing. Run this once, or to rebuild
