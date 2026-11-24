@@ -67,6 +67,7 @@ about 30 GB with results and archives).
 
 <!-- rebuild-safety:start -->
 ## Rebuild safety: which images are safe to rebuild
+**Short answer:** the offloader, the collector and `placement-controller` (what we build ourselves) are safe to rebuild. The workload is not. Envoy and the telemetry images are upstream and not built.
 Same source does not mean same image: every `docker build` produces a new digest (layer timestamps, and base images and unpinned dependencies can move). What matters is whether that can change the **measured** result. Status of what was checked is stated per row.
 | image | built by you? | safe to rebuild? | why / what was checked |
 |---|---|---|---|

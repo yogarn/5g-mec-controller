@@ -1,6 +1,19 @@
 # Mobility experiment (placement only, no autoscaling)
 Mobility scenario: 7 phases x 120 s, 24 UEs the whole time, schedule `24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22`. Replica counts are fixed (no HPA): 3 anchors + 6 dynamic for local arms, 3 anchors + 3 dynamic + 3 Core for vertical arms.
 
+## Order of work and rebuild verdict
+1. **A. Build and push the images we make** (the offloader, the collector and `placement-controller`): `docker build` on core, push to the registry as `:latest` plus an immutable `build-<timestamp>` tag. Skip it if the images in the registry are already the ones you want.
+
+2. **B. Platform:** remove the old one (optional) and deploy it from scratch, then check it and save the image digests that actually run.
+
+3. **Scenario setup:** `tc` delay, zone labels, offloader port-forward.
+
+4. **The arms, one at a time**, in the order given below, each with its own clean-up.
+
+5. **Scenario teardown.**
+
+**Rebuild verdict:** everything we build ourselves (the offloader, the collector and `placement-controller`) is **safe to rebuild** from this checkout; its source has not changed since the final-run image was built (details and checks in A0). The workload `pedestrian-detection` is **not** rebuilt: it stays pinned by digest. Envoy and the telemetry images (Prometheus, adapter, node-exporter, Grafana) are upstream images, pulled and not built.
+
 Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T3** = offloader port-forward, **T4** = monitoring.
 
 **Every code block below starts with `source .../deploy/final/env.sh`** (project directory, `KUBECONFIG`, `NS`, `APP`, `A`, `H`, `UE`), so a block can be pasted into any terminal on core, in any order. State shared between blocks lives in files (`/tmp/final-camp`, `/tmp/ue-payload.json`), not in shell variables.
@@ -22,6 +35,8 @@ The platform manifests now use `:latest` for the offloader, the collector and `p
 The application image is deliberately **not** moved to `latest`: it is the system under test, its digest is recorded in the results, and it is already in the registry. It is pinned by digest in `apps/pedestrian-detection/manifest.yaml`, `offloader/core-backend.yaml` and every rendered manifest here. No build step is needed for it.
 
 ### A0. Which images are safe to rebuild (read first)
+**Short answer:** the offloader, the collector and `placement-controller` (what we build ourselves) are safe to rebuild. The workload is not. Envoy and the telemetry images are upstream and not built.
+
 Same source does not mean same image: every `docker build` produces a new digest (layer timestamps, and base images and unpinned dependencies can move). What matters is whether that can change the **measured** result. Status of what was checked is stated per row.
 
 | image | built by you? | safe to rebuild? | why / what was checked |
@@ -208,6 +223,15 @@ kubectl -n placement get pods -o custom-columns=POD:.metadata.name,IMAGE:.spec.c
 ```
 
 Expect `1/1` for `placement-prometheus`, `prometheus-adapter`, `ue-telemetry`, `placement-controller`, `vertical-offloader`; `1/1` for each `mec-envoy-gnb-N`; `3/3` for `mec-placement-pedestrian-detection-core`; Services `vertical-offloader` (8085) and `vertical-offloader-admin` (8086); APIService `True`. The offloader itself is checked in the setup below, once the port-forward is up.
+
+Save the digests that are actually running next to the results. After a rebuild they differ from the digests recorded for the final runs, so write down which build you measured:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+mkdir -p results
+OUT=results/platform-images-$(date -u +%Y%m%dT%H%M%SZ).txt
+{ echo "commit: $(git rev-parse --short HEAD)"; kubectl -n placement get pods -o custom-columns=POD:.metadata.name,IMAGE:.spec.containers[0].image,IMAGEID:.status.containerStatuses[0].imageID; kubectl -n services get pods -o custom-columns=POD:.metadata.name,IMAGE:.spec.containers[0].image,IMAGEID:.status.containerStatuses[0].imageID; } | tee $OUT
+```
 
 ## Scenario setup (once per scenario, before the first arm)
 **T2 (core), keep open for the whole scenario:** inter-node path delay of 10 ms for the experiment pods (`tc_ms: 10`, as in every final run).
