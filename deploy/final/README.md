@@ -19,6 +19,9 @@ arm with every command written out; nothing says "same for the others".
 - **core** (`ssh core`): everything cluster-side. Project at `/home/member/skripsi_yoga/5g-mec-controller`.
 - **UE host** `member@10.34.211.6`: the UE processes. The runbooks start them from core over SSH
   (`sudo -n`), exactly as the campaign does.
+- In **every** terminal on core, first run `source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh`
+  (project directory, `KUBECONFIG`, `NS`, `APP`, `A`, `TOKEN`, `H`). Without it `kubectl` talks to the
+  wrong cluster config and `$NS`/`$APP` are empty.
 - Four terminals on core: **T1** commands, **T2** the 10 ms path delay (`tools/hold_tc_delay.py`),
   **T3** the offloader port-forward (joint and mobility only), **T4** monitoring.
 
@@ -30,8 +33,8 @@ arm with every command written out; nothing says "same for the others".
    them ("core and UE project revisions differ") and will refuse until the UE host is on the same commit.
 2. **What is not YAML** and is therefore in the runbooks as commands: the PreferClose zone labels
    (`gnb1`, `gnb-2`, `gnb-3`; `core-5g` is not labelled), the 10 ms `tc` delay, the offloader admin API
-   (reset / Core pool / vertical mode), seeding the managed Deployment after traffic starts, and the UE
-   runner.
+   (reset / Core pool / vertical mode), the one-pod seed of the managed Deployment (done before traffic by default; the runbooks show how to do it
+   at `[RUN]` instead, as the recorded runs did), and the UE runner.
 3. **Cluster state right now** (read on core): zones on `gnb1`, `gnb-2`, `gnb-3` are already set to
    their own name, the Core pool is at 3 replicas, and the Calico pool `mec-campaign-reserved`
    (172.16.40.0/23) exists.

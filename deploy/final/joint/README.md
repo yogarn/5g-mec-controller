@@ -3,15 +3,10 @@ Joint scenario: 7 phases x 120 s, 3 to 24 UEs, schedule `3:1:1:1,8:1:6:1,14:1:12
 
 Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T3** = offloader port-forward, **T4** = monitoring.
 
-**Paste this in every terminal that runs `kubectl` or `curl` (T1 and T4):**
+**Run this first in EVERY terminal (T1, T2, T3, T4); it sets the project directory, `KUBECONFIG` and the variables used below:**
 
 ```bash
-cd /home/member/skripsi_yoga/5g-mec-controller
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-export NS=services APP=mec-placement-pedestrian-detection
-export A=http://127.0.0.1:18086
-export TOKEN=$(cat /home/member/.config/5g-mec/ue-telemetry-token)
-export H="Authorization: Bearer $TOKEN"
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 ```
 
 Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `baseline-vertical`, `proposed-vertical`. Each arm section is self-contained.
@@ -20,8 +15,7 @@ Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `basel
 **T2 (core), keep open for the whole scenario:** inter-node path delay of 10 ms for the experiment pods (`tc_ms: 10`, as in every final run).
 
 ```bash
-cd /home/member/skripsi_yoga/5g-mec-controller
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 .venv/bin/python deploy/final/tools/hold_tc_delay.py 10
 # prints "tc delay 10 ms active"; Ctrl-C at the very end removes it
 ```
@@ -38,6 +32,7 @@ kubectl get nodes -L topology.kubernetes.io/zone
 **Offloader admin API** (**T3**, core, keep open): the offloader is used by all four arms.
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n placement port-forward --address 127.0.0.1 svc/vertical-offloader-admin 18086:8086
 ```
 
@@ -89,7 +84,11 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 
 ```bash
 kubectl apply -f deploy/final/joint/baseline-local/03-workload.yaml
-# replicas: 0 on purpose; it is seeded after traffic starts (step "While the UE runs")
+# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip the two lines above and run the scale line once the UE log shows [RUN]
 ```
 
 #### 5. Autoscaler
@@ -139,11 +138,9 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 9. While the UE runs (terminal T4 on core, same environment block)
+#### 9. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
-# a) as soon as the UE log shows [RUN], seed the managed Deployment up to the HPA minimum (1):
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
 kubectl -n $NS get hpa -w            # HPA decisions
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'   # offload routes per site
@@ -208,7 +205,11 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 
 ```bash
 kubectl apply -f deploy/final/joint/proposed-local/04-workload.yaml
-# replicas: 0 on purpose; it is seeded after traffic starts (step "While the UE runs")
+# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip the two lines above and run the scale line once the UE log shows [RUN]
 ```
 
 #### 6. Autoscaler
@@ -253,12 +254,10 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 10. While the UE runs (terminal T4 on core, same environment block)
+#### 10. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
-# a) as soon as the UE log shows [RUN], seed the managed Deployment up to the HPA minimum (1):
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
-# b) the latency metric must show a value within ~90 s of traffic starting:
+# the latency metric must show a value within ~90 s of traffic starting:
 until kubectl get --raw /apis/external.metrics.k8s.io/v1beta1/namespaces/$NS/ue_p90_excess_latency_120ms_seconds | jq -e '.items[0].value'; do sleep 5; done
 kubectl -n $NS get hpa -w            # HPA decisions
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
@@ -316,7 +315,11 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 
 ```bash
 kubectl apply -f deploy/final/joint/baseline-vertical/03-workload.yaml
-# replicas: 0 on purpose; it is seeded after traffic starts (step "While the UE runs")
+# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip the two lines above and run the scale line once the UE log shows [RUN]
 ```
 
 #### 5. Autoscaler
@@ -371,11 +374,9 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 9. While the UE runs (terminal T4 on core, same environment block)
+#### 9. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
-# a) as soon as the UE log shows [RUN], seed the managed Deployment up to the HPA minimum (1):
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
 kubectl -n $NS get hpa -w            # HPA decisions
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'   # offload routes per site
@@ -440,7 +441,11 @@ kubectl -n $NS rollout status deployment/$APP-anchor-gnb-3 --timeout=180s
 
 ```bash
 kubectl apply -f deploy/final/joint/proposed-vertical/04-workload.yaml
-# replicas: 0 on purpose; it is seeded after traffic starts (step "While the UE runs")
+# seed the managed Deployment to the HPA minimum (1) before traffic (the HPA does not act at 0 replicas)
+kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
+kubectl -n $NS rollout status deployment/$APP --timeout=240s
+# Alternative that matches the recorded final runs exactly (they started with 0 dynamic pods):
+# skip the two lines above and run the scale line once the UE log shows [RUN]
 ```
 
 #### 6. Autoscaler
@@ -490,12 +495,10 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 10. While the UE runs (terminal T4 on core, same environment block)
+#### 10. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
-# a) as soon as the UE log shows [RUN], seed the managed Deployment up to the HPA minimum (1):
-kubectl -n $NS scale deployment/$APP --current-replicas=0 --replicas=1
-# b) the latency metric must show a value within ~90 s of traffic starting:
+# the latency metric must show a value within ~90 s of traffic starting:
 until kubectl get --raw /apis/external.metrics.k8s.io/v1beta1/namespaces/$NS/ue_p90_excess_latency_120ms_seconds | jq -e '.items[0].value'; do sleep 5; done
 kubectl -n $NS get hpa -w            # HPA decisions
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)

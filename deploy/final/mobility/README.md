@@ -3,15 +3,10 @@ Mobility scenario: 7 phases x 120 s, 24 UEs the whole time, schedule `24:1:11:12
 
 Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T3** = offloader port-forward, **T4** = monitoring.
 
-**Paste this in every terminal that runs `kubectl` or `curl` (T1 and T4):**
+**Run this first in EVERY terminal (T1, T2, T3, T4); it sets the project directory, `KUBECONFIG` and the variables used below:**
 
 ```bash
-cd /home/member/skripsi_yoga/5g-mec-controller
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-export NS=services APP=mec-placement-pedestrian-detection
-export A=http://127.0.0.1:18086
-export TOKEN=$(cat /home/member/.config/5g-mec/ue-telemetry-token)
-export H="Authorization: Bearer $TOKEN"
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 ```
 
 Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `baseline-vertical`, `proposed-vertical`. Each arm section is self-contained.
@@ -20,8 +15,7 @@ Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `basel
 **T2 (core), keep open for the whole scenario:** inter-node path delay of 10 ms for the experiment pods (`tc_ms: 10`, as in every final run).
 
 ```bash
-cd /home/member/skripsi_yoga/5g-mec-controller
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 .venv/bin/python deploy/final/tools/hold_tc_delay.py 10
 # prints "tc delay 10 ms active"; Ctrl-C at the very end removes it
 ```
@@ -38,6 +32,7 @@ kubectl get nodes -L topology.kubernetes.io/zone
 **Offloader admin API** (**T3**, core, keep open): the offloader is used by all four arms.
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n placement port-forward --address 127.0.0.1 svc/vertical-offloader-admin 18086:8086
 ```
 
@@ -119,7 +114,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 7. While the UE runs (terminal T4 on core, same environment block)
+#### 7. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
@@ -215,7 +210,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 8. While the UE runs (terminal T4 on core, same environment block)
+#### 8. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
@@ -308,7 +303,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 7. While the UE runs (terminal T4 on core, same environment block)
+#### 7. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
@@ -409,7 +404,7 @@ $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python 
 
 The run is 7 phases x 120 s (`24:1:11:12,24:1:17:6,24:1:22:1,24:1:16:7,24:1:11:12,24:1:6:17,24:1:1:22`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
 
-#### 8. While the UE runs (terminal T4 on core, same environment block)
+#### 8. While the UE runs (terminal T4 on core, after `source .../env.sh`)
 
 ```bash
 kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
