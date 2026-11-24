@@ -28,6 +28,15 @@ Same source does not mean same image: every `docker build` produces a new digest
 | `pedestrian-detection` (the workload) | **no** | **no, keep the digest** | It is the system under test and the digest `sha256:5245d82f...` (tag `steep-spillover`) is recorded in the results. `requirements.txt` pins only 5 packages (Flask, gunicorn, numpy, Pillow, onnxruntime); their dependencies and the `python:3.11-slim` base are not pinned, so a rebuild can change inference time by a few ms, which goes straight into p90 and SLO violations. With `:latest` and `imagePullPolicy: IfNotPresent` each node would also keep whichever build it pulled first, so replicas on different nodes could silently run different images. A rebuild means a new tag and digest, every YAML with the old digest replaced, and the experiment rerun. |
 | Prometheus `v2.53.0`, prometheus-adapter `v0.12.0`, node-exporter `v1.8.1`, Grafana `11.1.0` | no (upstream) | n/a | Fixed version tags, pulled not built; nothing to do. |
 
+**When the final-run images were built, and what changed in the code afterwards** (commit times in this repo are WIB, UTC+7; image times are UTC). The first final run started 2026-11-22 12:33 UTC.
+
+| image | built (UTC) | built after | code changed since? |
+|---|---|---|---|
+| `ue-telemetry-collector` | 2026-11-21 15:25 | `fda7bfb` "prune unreachable edge cases", which came after the big refactors (`fc05563` modularize, `a477e95` split offloader/collector into modules) | no: every non-test `.py` file is identical to the repo |
+| `pedestrian-detection` | tag `steep-spillover` | its last source commit `84c4beb` (2026-11-19) | no app source change since; the image is pinned by digest |
+
+So the images were built **after** the large refactors and after the last change to these components. What changed after that is the experiment harness and the plots (`experiments/`, `utils/`), which run outside these images (the campaign on core, the UE runner on the UE host).
+
 Rule of thumb: the collector is safe to rebuild from this checkout (proven identical in logic), the workload is never rebuilt during a comparison. This scenario does not use the offloader, `placement-controller` or the Envoys. After any rebuild, section B3 shows the digest each pod really runs; write it down next to the results.
 
 ### A1. Check the checkout and the build tools
