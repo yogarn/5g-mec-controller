@@ -7,10 +7,101 @@ Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T3
 
 Run one arm at a time, in this order: `baseline-local`, `proposed-local`, `baseline-vertical`, `proposed-vertical`. Each arm section is self-contained.
 
-## 0. Platform: remove the old one and deploy from scratch
-This scenario needs the whole platform: telemetry (node-exporter, Prometheus, adapter), the collector, `placement-controller`, the offloader, the Core backend and the three Envoys. The arm sections below assume it exists; this section builds it. All `apply` commands are idempotent, so skip 0a if you only want to make sure everything is present.
+## A. Build and push the images
+The platform manifests now use `:latest` for the offloader, the collector and `placement-controller` (`imagePullPolicy: Always`). Build on core with Docker (no sudo needed), push to the cluster registry through `localhost:30500`; the nodes pull the same registry as `10.34.211.140:30500`.
 
-### 0a. Remove the old platform (optional, only to start from nothing)
+**Important:** the `latest` tags that exist in the registry today are *not* the images used in the final runs. Pushing a fresh build replaces them with a build of the current checkout, whose digest will differ from the ones recorded for the results:
+
+| image | final runs used | `latest` in the registry before you rebuild |
+
+|---|---|---|
+
+| vertical-offloader | tag `backoff-20261121T180558Z` (`sha256:5c0a3478...`) | `sha256:4471c7df...` |
+
+| ue-telemetry-collector | tag `prune-20261121T152448Z` (`sha256:a39107ee...`) | `sha256:121b56b5...` |
+
+| placement-controller | `sha256:1164526f...` | `sha256:948f3b1e...` |
+
+| pedestrian-detection (the application under test) | `sha256:5245d82f...` | no `latest` tag |
+
+The application image is deliberately **not** moved to `latest`: it is the system under test, its digest is recorded in the results, and it is already in the registry. It is pinned by digest in `apps/pedestrian-detection/manifest.yaml`, `offloader/core-backend.yaml` and every rendered manifest here. No build step is needed for it.
+
+### A1. Check the checkout and the build tools
+The build uses whatever is checked out, so confirm it is the frozen commit and clean:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+git log --oneline -1
+git status -s    # must print nothing
+docker info --format 'docker {{.ServerVersion}}, root {{.DockerRootDir}}'
+curl -s -o /dev/null -w 'registry http %{http_code}\n' http://localhost:30500/v2/
+```
+
+### A2. Build and push
+Each image is pushed twice: as `latest` and as an immutable `build-<timestamp>` tag, so you can always say which build ran. The base images (`python:3.12-slim`, `golang:1.24-alpine`, `distroless`) are pulled from the internet, so core needs outbound access.
+
+Offloader (build context = repo root, it copies `offloader/` and the probe image):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export TS=$(date -u +%Y%m%dT%H%M%SZ) R=localhost:30500
+docker build --network=host -f offloader/Dockerfile -t $R/vertical-offloader:latest -t $R/vertical-offloader:build-$TS .
+docker push $R/vertical-offloader:latest
+docker push $R/vertical-offloader:build-$TS
+echo built vertical-offloader:build-$TS
+```
+
+Collector (build context = repo root):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export TS=$(date -u +%Y%m%dT%H%M%SZ) R=localhost:30500
+docker build --network=host -f collector/Dockerfile -t $R/ue-telemetry-collector:latest -t $R/ue-telemetry-collector:build-$TS .
+docker push $R/ue-telemetry-collector:latest
+docker push $R/ue-telemetry-collector:build-$TS
+echo built ue-telemetry-collector:build-$TS
+```
+
+`placement-controller` (Go; build context = `placement/`, downloads Go modules):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export TS=$(date -u +%Y%m%dT%H%M%SZ) R=localhost:30500
+docker build --network=host -t $R/placement-controller:latest -t $R/placement-controller:build-$TS placement
+docker push $R/placement-controller:latest
+docker push $R/placement-controller:build-$TS
+echo built placement-controller:build-$TS
+```
+
+### A3. Verify what is in the registry now
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+for r in vertical-offloader ue-telemetry-collector placement-controller; do
+  echo "$r latest = $(curl -s -I -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json' http://localhost:30500/v2/$r/manifests/latest | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')"
+  curl -s http://localhost:30500/v2/$r/tags/list; echo
+done
+```
+
+The `latest` digest must now differ from the one in the table and the newest `build-...` tag must be listed. Section B deploys these images; section B3 shows the digest each pod really runs.
+
+### A4. Go back to the exact final-run images (only if you need them)
+Run this *after* section B. It pins the running Deployments to the images the results were produced with (the old tags still exist in the registry):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n placement set image deployment/vertical-offloader offloader=10.34.211.140:30500/vertical-offloader:backoff-20261121T180558Z
+kubectl -n placement rollout status deployment/vertical-offloader --timeout=180s
+kubectl -n placement set image deployment/ue-telemetry collector=10.34.211.140:30500/ue-telemetry-collector:prune-20261121T152448Z
+kubectl -n placement rollout status deployment/ue-telemetry --timeout=180s
+kubectl -n placement set image deployment/placement-controller placement-controller=10.34.211.140:30500/placement-controller@sha256:1164526f35a20a1a1afdccf538d9fd0f6b49169f851db31670d656c5d2afab1a
+kubectl -n placement rollout status deployment/placement-controller --timeout=180s
+```
+
+## B. Platform: remove the old one and deploy from scratch
+This scenario needs the whole platform: telemetry (node-exporter, Prometheus, adapter), the collector, `placement-controller`, the offloader, the Core backend and the three Envoys. The arm sections below assume it exists; this section builds it. All `apply` commands are idempotent, so skip B1 if you only want to make sure everything is present.
+
+### B1. Remove the old platform (optional, only to start from nothing)
 Prometheus keeps its history inside the pod, so this drops it. Reverse order, so nothing points at something already gone. Finish or clean up any running arm first.
 
 ```bash
@@ -30,7 +121,7 @@ kubectl delete -f telemetry/01-node-exporter.yaml --ignore-not-found=true
 
 The namespaces and the `ue-telemetry-token` Secret are kept.
 
-### 0b. Deploy
+### B2. Deploy
 Namespaces and the token Secret (the Secret value must be the token file content exactly; the one on core is byte-identical to this file):
 
 ```bash
@@ -72,9 +163,19 @@ kubectl -n services rollout status deployment/mec-envoy-gnb-2 --timeout=180s
 kubectl -n services rollout status deployment/mec-envoy-gnb-3 --timeout=180s
 ```
 
+If the Deployments were already running (you skipped B1) and you rebuilt an image in section A, `apply` does nothing for an unchanged `:latest` tag. Restart them so they pull the new image:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n placement rollout restart deployment/ue-telemetry deployment/placement-controller deployment/vertical-offloader
+kubectl -n placement rollout status deployment/ue-telemetry --timeout=180s
+kubectl -n placement rollout status deployment/placement-controller --timeout=180s
+kubectl -n placement rollout status deployment/vertical-offloader --timeout=180s
+```
+
 The offloader starts in `mode: vertical`; every arm resets it to `local-only` first, so that is fine. The Core backend comes up with 3 replicas.
 
-### 0c. Check
+### B3. Check
 Give Prometheus about a minute to scrape before the first arm; the adapter metrics only appear once the `ue-telemetry` and `kubelet-cadvisor` jobs have data.
 
 ```bash
@@ -82,6 +183,8 @@ source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n placement get deploy,svc
 kubectl -n services get deploy | grep -E 'envoy|core'
 kubectl get apiservice v1beta1.external.metrics.k8s.io
+# which image (and exact digest) each platform pod is really running:
+kubectl -n placement get pods -o custom-columns=POD:.metadata.name,IMAGE:.spec.containers[0].image,IMAGEID:.status.containerStatuses[0].imageID
 ```
 
 Expect `1/1` for `placement-prometheus`, `prometheus-adapter`, `ue-telemetry`, `placement-controller`, `vertical-offloader`; `1/1` for each `mec-envoy-gnb-N`; `3/3` for `mec-placement-pedestrian-detection-core`; Services `vertical-offloader` (8085) and `vertical-offloader-admin` (8086); APIService `True`. The offloader itself is checked in the setup below, once the port-forward is up.
@@ -789,7 +892,7 @@ kubectl -n $NS rollout status deployment/$APP-core --timeout=180s
 kubectl -n $NS get deployment $APP-core    # expect 3/3
 ```
 
-**Option 2: remove the offloader stack as well** (offloader to LOCAL first, then Envoys, Core backend, offloader, scheduler; the telemetry and collector stay, remove them with section 0a if you want a bare cluster):
+**Option 2: remove the offloader stack as well** (offloader to LOCAL first, then Envoys, Core backend, offloader, scheduler; the telemetry and collector stay, remove them with section B1 if you want a bare cluster):
 
 ```bash
 source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh

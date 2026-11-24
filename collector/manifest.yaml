@@ -43,7 +43,8 @@ spec:
         site: core
       containers:
         - name: collector
-          image: 10.34.211.140:30500/ue-telemetry-collector:prune-20261121T152448Z
+          # The final runs used the tag prune-20261121T152448Z (sha256:a39107ee...).
+          image: 10.34.211.140:30500/ue-telemetry-collector:latest
           imagePullPolicy: Always
           ports:
             - name: http

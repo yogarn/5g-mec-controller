@@ -1,7 +1,7 @@
 # Platform: what the arm runbooks assume is already running
 
-Stand-alone reference. The same remove and deploy steps are in section 0 of each scenario runbook
-(`../joint`, `../mobility`, `../scaling`), tailored to what that scenario needs.
+Stand-alone reference. The same steps are in each scenario runbook (`../joint`, `../mobility`, `../scaling`),
+tailored to what that scenario needs: section A builds the images, section B removes and deploys the platform.
 
 The arm runbooks (`../joint`, `../mobility`, `../scaling`) only add and remove the per-arm pieces
 (workload, anchors, HPA, adapter rules, placement config). They do **not** deploy the platform below.
@@ -47,10 +47,23 @@ curl -s $A/health; echo
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
 
-Three sites, `core_ready_endpoints: 3` each. The pinned images (from the manifests) are
-`placement-controller@sha256:1164526f...`, `pedestrian-detection@sha256:5245d82f...`,
-`vertical-offloader:backoff-20261121T180558Z`, `ue-telemetry-collector:prune-20261121T152448Z`,
-`envoyproxy/envoy:v1.31-latest`, all from `10.34.211.140:30500`.
+Three sites, `core_ready_endpoints: 3` each.
+
+Images (all from the registry `10.34.211.140:30500`):
+
+| component | manifest image now | final runs used |
+|---|---|---|
+| vertical-offloader | `:latest` | tag `backoff-20261121T180558Z` |
+| ue-telemetry-collector | `:latest` | tag `prune-20261121T152448Z` |
+| placement-controller | `:latest` | `@sha256:1164526f...` |
+| pedestrian-detection (system under test) | `@sha256:5245d82f...` (unchanged on purpose) | same |
+| Envoy | `envoyproxy/envoy:v1.31-latest` | same |
+
+The three `:latest` images must be built and pushed first (section A of each scenario runbook:
+`docker build` on core, push to `localhost:30500`). The `latest` tags in the registry before such a build are
+older images, not the ones the final runs used. To pin the running Deployments back to the final-run images,
+see section A4 of the runbooks. `.dockerignore` at the repo root keeps the build context small (the repo is
+about 30 GB with results and archives).
 
 ## 2. Tear the platform down (reverse order)
 
@@ -129,6 +142,6 @@ metrics only appear once the `ue-telemetry` and `kubelet-cadvisor` jobs have dat
 ## Status
 
 The manifest list, order and expected state come from the repo manifests and from what is running on core
-now (read-only). The registry on `10.34.211.140:30500` has the pinned image tags. Neither the teardown nor
+now (read-only). The registry on `10.34.211.140:30500` has the final-run image tags and digests. Neither the teardown nor
 the bring-up was executed; the teardown is destructive for Prometheus history, so read section 2 before
 running it.

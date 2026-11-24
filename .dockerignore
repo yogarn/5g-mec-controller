@@ -1,0 +1,9 @@
+# Build contexts that use the repo root (offloader/Dockerfile, collector/Dockerfile) only copy
+# offloader/, collector/ and the probe image. Everything else (results, archives, .venv, .git, ...)
+# can be tens of GB and must not be sent to the Docker daemon.
+*
+!offloader/
+!collector/
+!apps/pedestrian-detection/images/bus.jpg
+**/__pycache__
+**/*.pyc

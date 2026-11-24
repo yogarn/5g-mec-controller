@@ -10,10 +10,17 @@ Nothing is generated when you use them.
 | mobility (placement only, fixed replicas) | [`mobility/README.md`](mobility/README.md) | `baseline-local`, `proposed-local`, `baseline-vertical`, `proposed-vertical` |
 | scaling (autoscaler only, core-5g) | [`scaling/README.md`](scaling/README.md) | `baseline`, `proposed` |
 
-The platform the arms run on (telemetry, collector, scheduler, offloader, Envoys, Core backend) is part of
-each runbook: **section 0** removes the old platform and deploys it from scratch (joint and mobility need
-all of it, scaling only telemetry and the collector), and the scenario teardown can remove the offloader
-stack again. [`platform/README.md`](platform/README.md) is the same material as a stand-alone reference.
+Each scenario runbook starts with the setup the arms need:
+
+- **Section A, build and push the images** (`docker build` on core, push to the registry as `:latest` and an
+  immutable `build-<timestamp>` tag): the offloader, the collector and `placement-controller` for joint and
+  mobility, only the collector for scaling. The platform manifests now use `:latest`. The application image
+  (`pedestrian-detection`) stays pinned by digest on purpose and is not rebuilt.
+- **Section B, platform**: remove the old one and deploy it from scratch (telemetry, collector,
+  `placement-controller`, offloader, Core backend, Envoys), and check it.
+- then the scenario setup (tc delay, zones, port-forward) and the per-arm sections.
+
+[`platform/README.md`](platform/README.md) is the same material as a stand-alone reference.
 
 Each arm folder holds the numbered manifests (`01-...`, `02-...` in apply order) and `ue-payload.json`,
 the exact stdin the campaign sends to the UE runner. Each runbook has one self-contained section per

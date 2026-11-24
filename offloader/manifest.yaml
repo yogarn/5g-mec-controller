@@ -96,7 +96,8 @@ spec:
       serviceAccountName: vertical-offloader
       containers:
         - name: offloader
-          image: 10.34.211.140:30500/vertical-offloader:backoff-20261121T180558Z
+          # The final runs used the tag backoff-20261121T180558Z (sha256:5c0a3478...).
+          image: 10.34.211.140:30500/vertical-offloader:latest
           imagePullPolicy: Always
           ports:
             - name: xds
