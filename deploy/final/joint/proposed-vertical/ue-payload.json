@@ -12,7 +12,7 @@
   "gnb2_subnet": "10.63.1.0/24",
   "gnb3_dnn": "embb.gnb3.testbed",
   "gnb3_subnet": "10.64.1.0/24",
-  "campaign": "manual_joint",
+  "campaign": "CAMPAIGN",
   "method": "proposed",
   "output_name": "proposed-vertical",
   "site_urls": {

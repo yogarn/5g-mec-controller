@@ -12,10 +12,14 @@
   "gnb2_subnet": "10.63.1.0/24",
   "gnb3_dnn": "embb.gnb3.testbed",
   "gnb3_subnet": "10.64.1.0/24",
-  "campaign": "manual_joint",
+  "campaign": "CAMPAIGN",
   "method": "baseline",
   "output_name": "baseline-local",
-  "site_urls": null,
+  "site_urls": {
+    "gnb-1": "http://10.34.211.157:NODEPORT/detect",
+    "gnb-2": "http://10.34.211.196:NODEPORT/detect",
+    "gnb-3": "http://10.34.210.3:NODEPORT/detect"
+  },
   "schedule": "3:1:1:1,8:1:6:1,14:1:12:1,20:1:18:1,24:1:22:1,12:1:5:6,3:1:1:1",
   "duration": 120.0,
   "phase_transition": "continuous"
