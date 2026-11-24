@@ -3,8 +3,9 @@
 The arm runbooks (`../joint`, `../mobility`, `../scaling`) only add and remove the per-arm pieces
 (workload, anchors, HPA, adapter rules, placement config). They do **not** deploy the platform below.
 The campaign does not either; it fails its preflight if a piece is missing. Run this once, or to rebuild
-from nothing. Every command runs on core in a terminal where you did
-`source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh`.
+from nothing. Every command runs on core; each block starts with
+`source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh` (it also `cd`s into the project,
+which the relative manifest paths need), so a block can be pasted into any terminal on core.
 
 | layer | namespace | manifest | what it is |
 |---|---|---|---|
@@ -24,6 +25,7 @@ Not part of the platform: Grafana (`telemetry/04-grafana.yaml`, optional) and
 ## 1. Check what is running now
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n placement get deploy,ds,svc -o wide
 kubectl -n services get deploy,svc | grep -E 'envoy|core|pedestrian'
 kubectl get apiservice v1beta1.external.metrics.k8s.io
@@ -34,9 +36,10 @@ Expected in `placement`: `node-exporter` (DaemonSet), `placement-prometheus`, `p
 `ue-telemetry`, `placement-controller`, `vertical-offloader` all `1/1`, plus Services
 `vertical-offloader` (8085) and `vertical-offloader-admin` (8086). Expected in `services`:
 `mec-envoy-gnb-1/2/3` `1/1` and `mec-placement-pedestrian-detection-core` `3/3`. The APIService must say
-`True` under AVAILABLE. Then the offloader itself (needs the T3 port-forward):
+`True` under AVAILABLE. Then the offloader itself (needs the offloader port-forward running in another terminal, `kubectl -n placement port-forward --address 127.0.0.1 svc/vertical-offloader-admin 18086:8086`):
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 curl -s $A/health; echo
 curl -s -H "$H" $A/status | jq '{mode, sites: (.sites | map_values({active_route, local_ready_endpoints, core_ready_endpoints}))}'
 ```
@@ -52,6 +55,7 @@ Do the arm cleanup from the runbook first (offloader to LOCAL, remove the arm). 
 nothing is left pointing at something that is already gone:
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 # Envoys first: they consume the offloader's xDS
 kubectl delete -f offloader/envoy-ingress.yaml
 # Core backend and the offloader itself
@@ -74,6 +78,7 @@ Prometheus stores its data in the pod, so tearing it down drops the history.
 ## 3. Bring the platform up from nothing
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 # 3.1 namespaces
 kubectl apply -f telemetry/00-namespace.yaml
 kubectl get namespace services >/dev/null 2>&1 || kubectl create namespace services

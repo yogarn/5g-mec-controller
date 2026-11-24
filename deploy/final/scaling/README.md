@@ -3,11 +3,7 @@ Scaling staircase: 7 phases x 120 s, schedule `3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7
 
 Terminals (all on core unless noted): **T1** = commands, **T2** = tc delay, **T4** = monitoring.
 
-**Run this first in EVERY terminal (T1, T2, T3, T4); it sets the project directory, `KUBECONFIG` and the variables used below:**
-
-```bash
-source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
-```
+**Every code block below starts with `source .../deploy/final/env.sh`** (project directory, `KUBECONFIG`, `NS`, `APP`, `A`, `H`, `UE`), so a block can be pasted into any terminal on core, in any order. State shared between blocks lives in files (`/tmp/final-camp`, `/tmp/ue-payload.json`), not in shell variables.
 
 Run one arm at a time, in this order: `baseline`, `proposed`. Each arm section is self-contained.
 
@@ -15,6 +11,7 @@ Run one arm at a time, in this order: `baseline`, `proposed`. Each arm section i
 These sections only add and remove the per-arm pieces. The platform (telemetry, collector, `placement-controller`, token Secret) is deployed once, see [`../platform/README.md`](../platform/README.md) to check it, tear it down or rebuild it from nothing. Quick check:
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n placement get deploy
 kubectl get apiservice v1beta1.external.metrics.k8s.io
 ```
@@ -38,6 +35,7 @@ Files: `deploy/final/scaling/baseline/`. Run in terminal **T1** on core (see the
 #### 1. Start from a clean slate (what the campaign does before every arm)
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
@@ -47,6 +45,7 @@ kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || t
 #### 2. Prometheus adapter rules
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/scaling/baseline/01-adapter-configmap.yaml
 kubectl -n placement rollout restart deployment/prometheus-adapter
 kubectl -n placement rollout status deployment/prometheus-adapter --timeout=120s
@@ -55,6 +54,7 @@ kubectl -n placement rollout status deployment/prometheus-adapter --timeout=120s
 #### 3. Workload (managed Deployment + Service)
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/scaling/baseline/02-workload.yaml
 kubectl -n $NS rollout status deployment/$APP --timeout=240s
 ```
@@ -62,6 +62,7 @@ kubectl -n $NS rollout status deployment/$APP --timeout=240s
 #### 4. Autoscaler
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/scaling/baseline/03-hpa.yaml
 kubectl -n $NS get hpa
 ```
@@ -69,6 +70,7 @@ kubectl -n $NS get hpa
 #### 5. Routing check before traffic
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n $NS get svc $APP -o jsonpath='{.spec.trafficDistribution}{"\n"}'
 kubectl -n $NS get pods -o wide
 ```
@@ -76,30 +78,47 @@ kubectl -n $NS get pods -o wide
 #### 6. UE: prerequisites check, then run (blocks for the whole schedule)
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 export CAMP=manual_scaling_$(date -u +%Y%m%dT%H%M%SZ)   # new name per run, results land in results/$CAMP on the UE host
+echo "$CAMP" > /tmp/final-camp                              # later blocks (abort, collect) read it from here
 PORT=$(kubectl -n $NS get svc $APP -o jsonpath='{.spec.ports[0].nodePort}')
 jq --arg c "$CAMP" --arg p "$PORT" '.campaign=$c | .site_urls |= with_entries(.value |= sub("NODEPORT";$p))' \
   deploy/final/scaling/baseline/ue-payload.json > /tmp/ue-payload.json
-UE="ssh -o BatchMode=yes -o ConnectTimeout=10 member@10.34.211.6"
-$UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue check' < /tmp/ue-payload.json
-# when the check prints "UE prerequisites ready", start traffic (open a second terminal T4 now):
-$UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -u -m experiments.campaign_ue run' < /tmp/ue-payload.json
+# the check must pass before traffic starts (&&), then this terminal blocks for the whole run
+$UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue check' < /tmp/ue-payload.json \
+  && $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -u -m experiments.campaign_ue run' < /tmp/ue-payload.json
 ```
 
-The run is 7 phases x 120 s (`3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7,24:8:8:8,12:4:4:4,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
+The run is 7 phases x 120 s (`3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7,24:8:8:8,12:4:4:4,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`. Open a second terminal (T4) for the next step.
 
-#### 7. While the UE runs (terminal T4 on core, after `source .../env.sh`)
+#### 7. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
+HPA decisions (stays open):
 
 ```bash
-kubectl -n $NS get hpa -w            # HPA decisions
-kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS get hpa -w
 ```
 
-To abort the UE early: `ssh member@10.34.211.6 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign '"$CAMP"' --method baseline'`.
+Pod placement (stays open):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS get pods -o wide -w
+```
+
+Abort the UE early:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export CAMP=$(cat /tmp/final-camp)
+$UE "cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign $CAMP --method baseline"
+```
 
 #### 8. After the UE finishes: collect and clean up
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export CAMP=$(cat /tmp/final-camp)
 # optional: copy the UE-side results (request logs, summaries) to core
 rsync -a member@10.34.211.6:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMP/ results/$CAMP-ue/
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
@@ -116,6 +135,7 @@ Files: `deploy/final/scaling/proposed/`. Run in terminal **T1** on core (see the
 #### 1. Start from a clean slate (what the campaign does before every arm)
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
   deployment/$APP-anchor-gnb-1 deployment/$APP-anchor-gnb-2 deployment/$APP-anchor-gnb-3 \
   --ignore-not-found=true --cascade=foreground --wait=true --timeout=180s
@@ -125,6 +145,7 @@ kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || t
 #### 2. Prometheus adapter rules
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/scaling/proposed/01-adapter-configmap.yaml
 kubectl -n placement rollout restart deployment/prometheus-adapter
 kubectl -n placement rollout status deployment/prometheus-adapter --timeout=120s
@@ -133,6 +154,7 @@ kubectl -n placement rollout status deployment/prometheus-adapter --timeout=120s
 #### 3. Workload (managed Deployment + Service)
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/scaling/proposed/02-workload.yaml
 kubectl -n $NS rollout status deployment/$APP --timeout=240s
 ```
@@ -140,6 +162,7 @@ kubectl -n $NS rollout status deployment/$APP --timeout=240s
 #### 4. Autoscaler
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl apply -f deploy/final/scaling/proposed/03-hpa.yaml
 kubectl -n $NS get hpa
 ```
@@ -147,6 +170,7 @@ kubectl -n $NS get hpa
 #### 5. Routing check before traffic
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 kubectl -n $NS get svc $APP -o jsonpath='{.spec.trafficDistribution}{"\n"}'
 kubectl -n $NS get pods -o wide
 ```
@@ -154,32 +178,54 @@ kubectl -n $NS get pods -o wide
 #### 6. UE: prerequisites check, then run (blocks for the whole schedule)
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 export CAMP=manual_scaling_$(date -u +%Y%m%dT%H%M%SZ)   # new name per run, results land in results/$CAMP on the UE host
+echo "$CAMP" > /tmp/final-camp                              # later blocks (abort, collect) read it from here
 PORT=$(kubectl -n $NS get svc $APP -o jsonpath='{.spec.ports[0].nodePort}')
 jq --arg c "$CAMP" --arg p "$PORT" '.campaign=$c | .site_urls |= with_entries(.value |= sub("NODEPORT";$p))' \
   deploy/final/scaling/proposed/ue-payload.json > /tmp/ue-payload.json
-UE="ssh -o BatchMode=yes -o ConnectTimeout=10 member@10.34.211.6"
-$UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue check' < /tmp/ue-payload.json
-# when the check prints "UE prerequisites ready", start traffic (open a second terminal T4 now):
-$UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -u -m experiments.campaign_ue run' < /tmp/ue-payload.json
+# the check must pass before traffic starts (&&), then this terminal blocks for the whole run
+$UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue check' < /tmp/ue-payload.json \
+  && $UE 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -u -m experiments.campaign_ue run' < /tmp/ue-payload.json
 ```
 
-The run is 7 phases x 120 s (`3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7,24:8:8:8,12:4:4:4,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`.
+The run is 7 phases x 120 s (`3:1:1:1,9:3:3:3,15:5:5:5,21:7:7:7,24:8:8:8,12:4:4:4,3:1:1:1`). Traffic starts when the UE log prints a line beginning with `[RUN]`. Open a second terminal (T4) for the next step.
 
-#### 7. While the UE runs (terminal T4 on core, after `source .../env.sh`)
+#### 7. While the UE runs (terminal T4 on core). Each block is independent; the `-w` ones stay open until Ctrl-C
+Latency metric visible to the HPA (should appear within ~90 s of `[RUN]`; prints a value and returns):
 
 ```bash
-# the latency metric must show a value within ~90 s of traffic starting:
-until kubectl get --raw /apis/external.metrics.k8s.io/v1beta1/namespaces/$NS/ue_p90_excess_latency_120ms_seconds | jq -e '.items[0].value'; do sleep 5; done
-kubectl -n $NS get hpa -w            # HPA decisions
-kubectl -n $NS get pods -o wide -w    # pod placement (Ctrl-C to stop watching)
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+for i in $(seq 1 24); do kubectl get --raw /apis/external.metrics.k8s.io/v1beta1/namespaces/$NS/ue_p90_excess_latency_120ms_seconds | jq -e '.items[0].value' && break; sleep 5; done
 ```
 
-To abort the UE early: `ssh member@10.34.211.6 'cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign '"$CAMP"' --method proposed'`.
+HPA decisions (stays open):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS get hpa -w
+```
+
+Pod placement (stays open):
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+kubectl -n $NS get pods -o wide -w
+```
+
+Abort the UE early:
+
+```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export CAMP=$(cat /tmp/final-camp)
+$UE "cd /home/member/skripsi_yoga/5g-mec-controller && sudo -n .venv/bin/python -m experiments.campaign_ue stop --campaign $CAMP --method proposed"
+```
 
 #### 8. After the UE finishes: collect and clean up
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
+export CAMP=$(cat /tmp/final-camp)
 # optional: copy the UE-side results (request logs, summaries) to core
 rsync -a member@10.34.211.6:/home/member/skripsi_yoga/5g-mec-controller/results/$CAMP/ results/$CAMP-ue/
 kubectl -n $NS delete hpa/$APP-baseline hpa/$APP-proposed deployment/$APP service/$APP \
@@ -193,6 +239,7 @@ kubectl -n $NS wait --for=delete pod -l app=$APP --timeout=180s 2>/dev/null || t
 ## Scenario teardown
 
 ```bash
+source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh
 # now stop the tc helper in T2 with Ctrl-C (removes the delay) and, for joint/mobility, the port-forward in T3
 kubectl get nodes -L topology.kubernetes.io/zone
 ```

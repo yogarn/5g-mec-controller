@@ -23,9 +23,10 @@ arm with every command written out; nothing says "same for the others".
 - **core** (`ssh core`): everything cluster-side. Project at `/home/member/skripsi_yoga/5g-mec-controller`.
 - **UE host** `member@10.34.211.6`: the UE processes. The runbooks start them from core over SSH
   (`sudo -n`), exactly as the campaign does.
-- In **every** terminal on core, first run `source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh`
-  (project directory, `KUBECONFIG`, `NS`, `APP`, `A`, `TOKEN`, `H`). Without it `kubectl` talks to the
-  wrong cluster config and `$NS`/`$APP` are empty.
+- Every code block in the runbooks starts with `source /home/member/skripsi_yoga/5g-mec-controller/deploy/final/env.sh`
+  (project directory, `KUBECONFIG`, `NS`, `APP`, `A`, `TOKEN`, `H`, `UE`), so any block can be pasted into any
+  terminal on core, in any order. State shared between blocks lives in files (`/tmp/final-camp`,
+  `/tmp/ue-payload.json`), not in shell variables.
 - Four terminals on core: **T1** commands, **T2** the 10 ms path delay (`tools/hold_tc_delay.py`),
   **T3** the offloader port-forward (joint and mobility only), **T4** monitoring.
 
@@ -47,6 +48,6 @@ arm with every command written out; nothing says "same for the others".
 
 The manifests and `ue-payload.json` files are the campaign's own output. The commands around them were
 written from `experiments/campaign.py`, `experiments/vertical.py`, `experiments/campaign_ue.py` and
-`utils/traffic_control.py`, and every bash block passes `bash -n`, but they have not been executed
+`utils/traffic_control.py`, and every bash block passes `bash -n` and is self-contained, but they have not been executed
 end to end. `tools/hold_tc_delay.py` is new and has not been run against the cluster. If a manual arm and
 the campaign disagree, the campaign is the reference.
