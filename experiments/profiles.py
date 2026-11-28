@@ -133,6 +133,10 @@ PROFILES = {
         'tc_ms': 10.0,
     },
 }
+# Rerun of the scaling stage with gnb-1 on its local UPF (DNN mec.icn-2.testbed, NodePort on gnb1), so all three
+# sites cross to the core-5g Pods and receive the same tc delay. Everything else equals 'scaling-staircase'.
+PROFILES['scaling-staircase-local'] = {**PROFILES['scaling-staircase'],
+                                       'config': 'experiments/campaign-scaling-local.yaml'}
 FINAL_HOLD_SECONDS = 360
 COMPARISONS = ('full', 'placement', 'scaling')
 AUTOSCALERS = ('hpa',)

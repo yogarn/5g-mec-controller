@@ -38,6 +38,9 @@ LEGACY = {
         '--tc-ms', '10',
     ],
 }
+LEGACY['scaling-staircase-local'] = [
+    *LEGACY['scaling-staircase'][:1], 'experiments/campaign-scaling-local.yaml', *LEGACY['scaling-staircase'][2:],
+]
 
 
 @pytest.mark.parametrize('name', sorted(LEGACY))
@@ -69,6 +72,7 @@ def test_only_smoke_and_demo_profiles_select_arms():
         'vertical-mobility': 'all',
         'vertical-mobility-local': 'local', 'vertical-mobility-vertical': 'vertical',
         'scaling-staircase': 'all',
+        'scaling-staircase-local': 'all',
         'demo-baseline-local': 'baseline-local', 'demo-proposed-local': 'proposed-local',
         'demo-baseline-vertical': 'baseline-vertical', 'demo-proposed-vertical': 'proposed-vertical',
     }
@@ -85,3 +89,20 @@ def test_demo_profiles_are_the_joint_profile_for_a_single_arm():
         assert demo.pop('arms') == arm
         assert [spec[0] for spec in ARM_SELECTIONS[arm]] == [arm]
         assert demo == {k: v for k, v in PROFILES['vertical-joint'].items() if k != 'arms'}
+
+
+def test_local_scaling_profile_puts_gnb1_on_its_local_upf():
+    _, args = campaign._parse_args(['run_x', '--profile', 'scaling-staircase-local'])
+    assert args.comparison == 'scaling'
+    settings = campaign.load(args.config)
+    assert settings['radio_only_gnb1'] is False
+    assert settings['site_node_ips']['gnb-1'] == '10.34.211.157'
+    remote = campaign.remote_settings(settings)
+    assert (remote['gnb1_dnn'], remote['gnb1_subnet']) == ('mec.icn-2.testbed', '172.16.50.0/24')
+    assert (remote['gnb2_dnn'], remote['gnb3_dnn']) == ('embb.gnb2.testbed', 'embb.gnb3.testbed')
+
+
+def test_legacy_scaling_profile_still_uses_the_core_dnn_for_gnb1():
+    _, args = campaign._parse_args(['run_x', '--profile', 'scaling-staircase'])
+    settings = campaign.load(args.config)
+    assert campaign.remote_settings(settings)['gnb1_dnn'] == 'embb.testbed'
