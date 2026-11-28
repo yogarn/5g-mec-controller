@@ -129,6 +129,39 @@ def test_wait_external_metric_ready_aborts_when_unavailable(monkeypatch):
         )
 
 
+def test_wait_external_metric_ready_retries_transient_adapter_errors(monkeypatch):
+    clock, calls = [0.0], []
+    ok = ('{"kind":"ExternalMetricValueList","items":[{"metricName":"mec_baseline_cpu_dynamic_replicas_fixed0",'
+          '"value":"4m"}]}')
+
+    def fake_kube(*args, **kwargs):
+        calls.append(args)
+        if len(calls) < 3:
+            raise subprocess.CalledProcessError(
+                1, args, stderr='Error from server (ServiceUnavailable): the server is currently unable to handle the request')
+        return subprocess.CompletedProcess(args, 0, stdout=ok, stderr='')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(campaign.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(campaign.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    items = campaign._wait_external_metric_ready('mec_baseline_cpu_dynamic_replicas_fixed0', timeout=45, poll_interval=3)
+    assert items[0]['value'] == '4m' and len(calls) == 3
+
+
+def test_wait_external_metric_ready_reports_last_transient_error(monkeypatch):
+    clock = [0.0]
+
+    def fake_kube(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args, stderr='Error from server (ServiceUnavailable): unavailable')
+
+    monkeypatch.setattr(campaign, 'kube', fake_kube)
+    monkeypatch.setattr(campaign.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(campaign.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    with pytest.raises(RuntimeError, match='last error: Error from server \\(ServiceUnavailable\\)'):
+        campaign._wait_external_metric_ready('m', timeout=9, poll_interval=3)
+
 def _native_cpu_hpa_step(total_cpu, current_total, *, min_total, max_total,
                          cpu_target=0.8, pod_request=0.5, tolerance=0.1):
     """Simulate Kubernetes autoscaling/v2 Resource CPU HPA over all serving Pods."""

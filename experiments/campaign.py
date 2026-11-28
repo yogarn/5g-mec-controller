@@ -606,14 +606,21 @@ def _query_external_metric(metric_name, allow_not_found=False):
 def _wait_external_metric_ready(metric_name, *, arm_name='baseline', timeout=45, poll_interval=3):
     """Wait for prometheus-adapter to expose metric_name with a value before HPA creation."""
     deadline = time.monotonic() + timeout
+    last_error = None
     while True:
-        items = _query_external_metric(metric_name, allow_not_found=True)
+        try:
+            items = _query_external_metric(metric_name, allow_not_found=True)
+        except subprocess.CalledProcessError as exc:
+            # Right after the adapter restart the aggregated API can briefly answer 503 (ServiceUnavailable)
+            # while the APIService switches to the new Pod; keep polling until the deadline.
+            items, last_error = None, ((exc.stderr or '') + (exc.stdout or '')).strip()
         if items and any(item.get('value') is not None for item in items):
             return items
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 f'{arm_name}: external metric {metric_name} did not return a value from '
                 f'prometheus-adapter within {timeout}s; aborting arm'
+                + (f' (last error: {last_error})' if last_error else '')
             )
         time.sleep(poll_interval)
 
